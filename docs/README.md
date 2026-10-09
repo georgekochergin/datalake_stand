@@ -116,6 +116,49 @@ docker compose up -d --build
 | trino | 8082 | `http://localhost:8082` |
 | airflow webserver/api-server | 8089 | admin/password (см. `airflow-init`) |
 
+## Доступ к сервисам
+
+### Web-интерфейсы
+
+| Сервис | URL | Логин/пароль |
+|---|---|---|
+| Spark Master UI | http://localhost:8080 | без авторизации |
+| Spark Worker UI | http://localhost:8081 | без авторизации |
+| SILO (консоль, MinIO-совместимая) | http://localhost:9001 | `admin` / `password` (`SILO_ROOT_USER`/`SILO_ROOT_PASSWORD`) |
+| datagen-api (Swagger UI) | http://localhost:8090/docs | без авторизации (см. `## Учётные данные` про сам инструмент) |
+| Airflow | http://localhost:8089 | `admin` / `password` (`AIRFLOW_UI_USER`/`AIRFLOW_UI_PASSWORD`) |
+
+### Подключение из DBeaver (на машине, где запущен docker)
+
+DBeaver подключается к `localhost` — порты опубликованы в `docker-compose.yaml`
+(см. таблицу портов выше).
+
+**Trino** — драйвер «Trino» (встроен в DBeaver):
+- Host: `localhost`, Port: `8082`
+- Catalog/Database: `iceberg`
+- Авторизация в Trino не настроена — в DBeaver можно указать любой
+  Username (например `admin`), поле Password оставить пустым.
+- JDBC URL целиком: `jdbc:trino://localhost:8082/iceberg`
+
+**mssql-source** — драйвер «SQL Server» (Microsoft):
+- Host: `localhost`, Port: `1433`
+- Database: `demo`
+- Authentication: SQL Server Authentication
+- Username: `sa`, Password: значение `MSSQL_SA_PASSWORD` из `.env` (по умолчанию `AdminPassword1!`)
+- На вкладке Driver properties (или прямо в URL) нужно отключить шифрование/проверку
+  сертификата, иначе DBeaver откажется подключаться к самоподписанному сертификату
+  контейнера: `encrypt=false;trustServerCertificate=true`.
+
+**oracle-source** — драйвер «Oracle»:
+- Host: `localhost`, Port: `1521`
+- Connection type: Service Name, значение `demo`
+  (это pluggable database `demo`, созданная переменной `ORACLE_DATABASE=demo`,
+  а не стандартный `FREEPDB1`)
+- Username: `demo`, Password: значение `ORACLE_APP_PASSWORD` из `.env`
+  (по умолчанию `password`)
+- Дополнительных настроек/Oracle Instant Client не требуется (используется
+  тонкий JDBC-драйвер).
+
 ## Учётные данные
 
 Тестовый стенд — везде, где логин/пароль настраиваемы, используется
