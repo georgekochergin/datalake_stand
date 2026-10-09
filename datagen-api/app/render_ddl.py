@@ -44,7 +44,7 @@ def _map_type(logical_type: str, dialect: str) -> str:
         ) from exc
 
 
-def render_create_table(table: TableSchema, qualified_name: str, dialect: str) -> str:
+def render_create_table(table: TableSchema, qualified_name: str, dialect: str, qualify: callable) -> str:
     col_lines = [
         f"  {c.name} {_map_type(c.type, dialect)}" for c in table.columns
     ]
@@ -55,7 +55,7 @@ def render_create_table(table: TableSchema, qualified_name: str, dialect: str) -
         ref_cols = ", ".join(fk.ref_columns)
         fk_name = f"fk_{table.name}_{'_'.join(fk.columns)}"
         col_lines.append(
-            f"  CONSTRAINT {fk_name} FOREIGN KEY ({cols}) REFERENCES {fk.ref_table} ({ref_cols})"
+            f"  CONSTRAINT {fk_name} FOREIGN KEY ({cols}) REFERENCES {qualify(fk.ref_table)} ({ref_cols})"
         )
     body = ",\n".join(col_lines)
     return f"CREATE TABLE {qualified_name} (\n{body}\n)"
@@ -68,6 +68,6 @@ def render_all(schema: SourceSchema, dialect: str, qualify: callable) -> list[st
     """
     order = topological_order(schema)
     return [
-        render_create_table(schema.tables[name], qualify(name), dialect)
+        render_create_table(schema.tables[name], qualify(name), dialect, qualify)
         for name in order
     ]

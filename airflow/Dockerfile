@@ -15,3 +15,10 @@ ENV SPARK_HOME=/home/airflow/.local/lib/python3.11/site-packages/pyspark
 ENV PATH="${SPARK_HOME}/bin:${PATH}"
 COPY requirements.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
+
+# Простой менеджер аутентификации SimpleAuthManager читает пароли из файла
+# /opt/airflow/simple_auth_manager_passwords.json.generated. Кладём туда admin/admin
+# заранее, чтобы не полагаться на сломанную в Airflow 3.3.2 команду
+# `airflow users create` (баг в apache-airflow-providers-fab 3.9.0).
+# --chown=50000:0 — пользователь airflow (uid 50000) должен открывать файл на запись.
+COPY --chown=50000:0 simple_auth_manager_passwords.json /opt/airflow/simple_auth_manager_passwords.json.generated
