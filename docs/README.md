@@ -11,7 +11,7 @@ flowchart TB
     ANALYST["Аналитик\n(Trino CLI / BI-инструмент)"]
 
     subgraph Sources["Источники данных (эмуляция систем-доноров 1С)"]
-        MSSQL[("mssql-source\nmcr.microsoft.com/mssql/server:2022-CU23-ubuntu-22.04\nDB demo / schema demo")]
+        MSSQL[("mssql-source\nmcr.microsoft.com/mssql/server:2022-latest\nDB demo / schema demo")]
         ORA[("oracle-source\ngvenzl/oracle-free:23-slim-faststart\nPDB demo / user(схема) demo")]
     end
 
@@ -77,7 +77,7 @@ flowchart TB
 
 | Компонент           | Образ/версия                                                                                     |
 | ------------------- | ------------------------------------------------------------------------------------------------ |
-| mssql-source        | `mcr.microsoft.com/mssql/server:2022-CU23-ubuntu-22.04`¹                                         |
+| mssql-source        | `mcr.microsoft.com/mssql/server:2022-latest`¹                                                    |
 | oracle-source       | `gvenzl/oracle-free:23-slim-faststart`                                                           |
 | pg-catalog          | `postgres:16.15-bookworm`                                                                        |
 | nessie              | `projectnessie/nessie:0.76.6`                                                                    |
@@ -86,7 +86,7 @@ flowchart TB
 | trino               | `trinodb/trino:479`                                                                              |
 | airflow             | `apache/airflow:3.3.2-python3.11`, LocalExecutor                                                 |
 
-¹ тег не подтверждён независимо (сетевые тайм-ауты при подборе) — перепроверить по каталогу MCR перед сборкой.
+¹ `2022-latest` — floating-тег (Microsoft перенаправляет его на новые cumulative update по мере выхода); для воспроизводимой сборки можно позже закрепить на конкретном `2022-CUxx-ubuntu-22.04` по факту того, что реально резолвится из каталога MCR на вашей машине.
 
 **Контур B (только тестовый стенд, нет в production):** `datagen-api` —
 REST API для наполнения источников синтетическими данными и ограниченной
@@ -193,8 +193,11 @@ airflow-postgres, Airflow UI (`:8089`), Oracle (`ORACLE_PASSWORD`) — везд�
 
 ## Известные риски
 
-- Тег `mcr.microsoft.com/mssql/server:2022-CU23-ubuntu-22.04` не подтверждён
-  независимо (сетевые тайм-ауты при подборе) — перепроверить по каталогу MCR.
+- Образ mssql-source использует floating-тег `2022-latest` (не закреплённый
+  на конкретном cumulative update) — ранее закреплённый тег `2022-CU23-ubuntu-22.04`
+  не резолвился (`failed to resolve reference ... context deadline exceeded`),
+  возможно, такого CU уже не существует в каталоге MCR. `2022-latest`
+  надёжнее для старта, но воспроизводимость по версии ниже.
 - `apache-airflow-providers-apache-spark==6.3.2` требует `pyspark-client>=4.0.0`
   (пакет Spark Connect) — нужно подтвердить, что `SparkSubmitOperator`
   всё ещё работает через классический `spark-submit` на Standalone-кластере.
