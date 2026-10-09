@@ -1,0 +1,61 @@
+# Схема данных источника oracle-source (PDB demo, пользователь/схема demo).
+# Независимый файл от schema/sources/mssql.yaml — структурно не обязан
+# совпадать (в этом примере совпадает, для простоты демонстрации).
+
+database: demo
+schema: demo
+
+tables:
+  customers:
+    primary_key: [customer_id]
+    columns:
+      - name: customer_id
+        type: bigint
+        generator: {kind: sequence}
+      - name: name
+        type: string
+        generator: {kind: faker, provider: company}
+      - name: segment
+        type: string
+        generator: {kind: choice, values: [Retail, Corporate, VIP]}
+    foreign_keys: []
+
+  products:
+    primary_key: [product_id]
+    columns:
+      - name: product_id
+        type: bigint
+        generator: {kind: sequence}
+      - name: product_name
+        type: string
+        generator: {kind: faker, provider: word}
+      - name: price
+        type: "decimal(18,2)"
+        generator: {kind: random_decimal, min: 1, max: 100000}
+    foreign_keys: []
+
+  orders:
+    primary_key: [order_id]
+    columns:
+      - name: order_id
+        type: bigint
+        generator: {kind: sequence}
+      - name: customer_id
+        type: bigint
+        generator: null
+      - name: product_id
+        type: bigint
+        generator: null
+      - name: amount
+        type: "decimal(18,2)"
+        generator: {kind: random_decimal, min: 1, max: 100000}
+      - name: order_date
+        type: date
+        generator: {kind: random_date}
+    foreign_keys:
+      - columns: [customer_id]
+        ref_table: customers
+        ref_columns: [customer_id]
+      - columns: [product_id]
+        ref_table: products
+        ref_columns: [product_id]

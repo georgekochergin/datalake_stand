@@ -1,0 +1,203 @@
+name: dlh-poc
+
+networks:
+  dlh-poc:
+
+volumes:
+  pg_catalog_data:
+  airflow_pg_data:
+  silo_data:
+  datagen_state:
+
+services:
+
+  # ---------- Источники (эмуляция систем-доноров 1С) ----------
+
+  mssql-source:
+    image: mcr.microsoft.com/mssql/server:2022-CU23-ubuntu-22.04 # ⚠ тег не подтверждён независимо, см. docs/PLAN.md
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+      MSSQL_PID: Developer
+    ports: ["1433:1433"]
+    networks: [dlh-poc]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  oracle-source:
+    image: gvenzl/oracle-free:23-slim-faststart
+    environment:
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD}
+      ORACLE_DATABASE: demo
+      APP_USER: demo
+      APP_USER_PASSWORD: ${ORACLE_APP_PASSWORD}
+    ports: ["1521:1521"]
+    networks: [dlh-poc]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ---------- ТОЛЬКО ДЛЯ ТЕСТОВОГО СТЕНДА — отсутствует в production ----------
+
+  datagen-api:
+    build: ./datagen-api
+    environment:
+      MSSQL_HOST: mssql-source
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+      ORACLE_HOST: oracle-source
+      ORACLE_APP_USER: demo
+      ORACLE_APP_PASSWORD: ${ORACLE_APP_PASSWORD}
+      ORACLE_SERVICE: demo
+    volumes:
+      - ./schema/sources:/app/schema/sources:ro
+      - datagen_state:/state
+    ports: ["8090:8000"]
+    depends_on:
+      mssql-source: {condition: service_healthy}
+      oracle-source: {condition: service_healthy}
+    networks: [dlh-poc]
+
+  # ---------- Каталог метаданных ----------
+
+  pg-catalog:
+    image: postgres:16.15-bookworm
+    environment:
+      POSTGRES_DB: nessie
+      POSTGRES_USER: nessie
+      POSTGRES_PASSWORD: ${PG_CATALOG_PASSWORD}
+    volumes: ["pg_catalog_data:/var/lib/postgresql/data"]
+    networks: [dlh-poc]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nessie"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  nessie:
+    image: projectnessie/nessie:0.76.6
+    environment:
+      nessie.version.store.type: JDBC
+      quarkus.datasource.db-kind: postgresql
+      quarkus.datasource.jdbc.url: jdbc:postgresql://pg-catalog:5432/nessie
+      quarkus.datasource.username: nessie
+      quarkus.datasource.password: ${PG_CATALOG_PASSWORD}
+    ports: ["19120:19120"]
+    depends_on: {pg-catalog: {condition: service_healthy}}
+    networks: [dlh-poc]
+
+  # ---------- Объектное хранилище ----------
+
+  silo:
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${SILO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${SILO_ROOT_PASSWORD}
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["silo_data:/data"]
+    networks: [dlh-poc]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  silo-init:
+    image: amazon/aws-cli:2.17.0
+    entrypoint: ["/bin/sh", "/init-bucket.sh"]
+    environment:
+      AWS_ACCESS_KEY_ID: ${SILO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${SILO_ROOT_PASSWORD}
+      AWS_DEFAULT_REGION: us-east-1
+    volumes: ["./silo/init-bucket.sh:/init-bucket.sh:ro"]
+    depends_on: {silo: {condition: service_healthy}}
+    networks: [dlh-poc]
+
+  # ---------- Вычисления ----------
+
+  spark-master:
+    build: ./spark
+    command: ["/opt/spark/sbin/start-master.sh", "--host", "spark-master"]
+    ports: ["7077:7077", "8080:8080"]
+    environment:
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+      ORACLE_APP_PASSWORD: ${ORACLE_APP_PASSWORD}
+    depends_on: {nessie: {condition: service_started}, silo-init: {condition: service_completed_successfully}}
+    networks: [dlh-poc]
+
+  spark-worker:
+    build: ./spark
+    command: ["/opt/spark/sbin/start-worker.sh", "spark://spark-master:7077"]
+    environment:
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+      ORACLE_APP_PASSWORD: ${ORACLE_APP_PASSWORD}
+    ports: ["8081:8081"]
+    depends_on: [spark-master]
+    networks: [dlh-poc]
+
+  trino:
+    image: trinodb/trino:479
+    ports: ["8082:8080"] # host 8082, чтобы не конфликтовать с Spark Master UI (8080)
+    volumes:
+      - ./trino/etc/catalog:/etc/trino/catalog:ro
+      - ./trino/sql:/opt/trino-sql:ro
+    depends_on: {nessie: {condition: service_started}}
+    networks: [dlh-poc]
+
+  # ---------- Оркестрация ----------
+
+  airflow-postgres:
+    image: postgres:16.15-bookworm
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_PG_PASSWORD}
+    volumes: ["airflow_pg_data:/var/lib/postgresql/data"]
+    networks: [dlh-poc]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  airflow-init:
+    build: ./airflow
+    entrypoint: ["/bin/bash", "-c"]
+    command: ["airflow db migrate && airflow users create --username admin --password admin --firstname admin --lastname admin --role Admin --email admin@example.com || true"]
+    environment: &airflow-env
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_PG_PASSWORD}@airflow-postgres:5432/airflow
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW_CONN_SPARK_DEFAULT: "spark://spark-master:7077?deploy-mode=cluster&spark_binary=spark-submit"
+      AIRFLOW_CONN_TRINO_DEFAULT: "trino://trino:8080"
+    depends_on: {airflow-postgres: {condition: service_healthy}}
+    volumes: ["./airflow/dags:/opt/airflow/dags"]
+    networks: [dlh-poc]
+
+  airflow-scheduler:
+    build: ./airflow
+    command: ["scheduler"]
+    environment: *airflow-env
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./spark/jobs:/opt/spark-jobs:ro
+      - ./trino/sql:/opt/airflow/sql:ro
+    depends_on: [airflow-init]
+    networks: [dlh-poc]
+
+  airflow-webserver:
+    build: ./airflow
+    command: ["api-server"] # ⚠ Airflow 3.x: проверить точное имя команды/компонента на этапе реализации (см. docs/PLAN.md)
+    environment: *airflow-env
+    ports: ["8089:8080"]
+    volumes: ["./airflow/dags:/opt/airflow/dags"]
+    depends_on: [airflow-init]
+    networks: [dlh-poc]

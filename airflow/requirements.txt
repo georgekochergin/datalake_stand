@@ -1,0 +1,2 @@
+apache-airflow-providers-apache-spark==6.3.2
+apache-airflow-providers-trino==6.7.0
