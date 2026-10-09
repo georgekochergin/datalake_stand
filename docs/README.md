@@ -95,26 +95,23 @@ REST API для наполнения источников синтетическ
 
 ## Быстрый старт
 
-`.env` уже в репозитории с рабочими значениями (`admin`/`password`) — ничего
-копировать/заполнять перед запуском не нужно:
-
 ```bash
 docker compose up -d --build
 ```
 
 Порты:
 
-| Сервис | Порт на хосте | Назначение |
-|---|---|---|
-| mssql-source | 1433 | T-SQL |
-| oracle-source | 1521 | SQL*Net |
-| datagen-api | 8090 | Swagger UI на `http://localhost:8090/docs` |
-| nessie | 19120 | Iceberg REST catalog |
-| silo (S3 API / консоль) | 9000 / 9001 | S3-совместимое хранилище |
-| spark-master UI | 8080 | |
-| spark-worker UI | 8081 | |
-| trino | 8082 | `http://localhost:8082` |
-| airflow webserver/api-server | 8089 | admin/password (см. `airflow-init`) |
+| Сервис                       | Порт на хосте |
+| ---------------------------- | ------------- |
+| mssql-source                 | 1433          |
+| oracle-source                | 1521          |
+| datagen-api                  | 8090          |
+| nessie                       | 19120         |
+| silo (S3 API / консоль)      | 9000 / 9001   |
+| spark-master UI              | 8080          |
+| spark-worker UI              | 8081          |
+| trino                        | 8082          |
+| airflow webserver/api-server | 8089          |
 
 ## Доступ к сервисам
 
