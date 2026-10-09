@@ -71,12 +71,12 @@ services:
     image: postgres:16.15-bookworm
     environment:
       POSTGRES_DB: nessie
-      POSTGRES_USER: nessie
+      POSTGRES_USER: ${PG_CATALOG_USER}
       POSTGRES_PASSWORD: ${PG_CATALOG_PASSWORD}
     volumes: ["pg_catalog_data:/var/lib/postgresql/data"]
     networks: [dlh-poc]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nessie"]
+      test: ["CMD-SHELL", "pg_isready -U ${PG_CATALOG_USER}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -87,7 +87,7 @@ services:
       nessie.version.store.type: JDBC
       quarkus.datasource.db-kind: postgresql
       quarkus.datasource.jdbc.url: jdbc:postgresql://pg-catalog:5432/nessie
-      quarkus.datasource.username: nessie
+      quarkus.datasource.username: ${PG_CATALOG_USER}
       quarkus.datasource.password: ${PG_CATALOG_PASSWORD}
     ports: ["19120:19120"]
     depends_on: {pg-catalog: {condition: service_healthy}}
@@ -158,12 +158,12 @@ services:
     image: postgres:16.15-bookworm
     environment:
       POSTGRES_DB: airflow
-      POSTGRES_USER: airflow
+      POSTGRES_USER: ${AIRFLOW_PG_USER}
       POSTGRES_PASSWORD: ${AIRFLOW_PG_PASSWORD}
     volumes: ["airflow_pg_data:/var/lib/postgresql/data"]
     networks: [dlh-poc]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      test: ["CMD-SHELL", "pg_isready -U ${AIRFLOW_PG_USER}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -171,9 +171,9 @@ services:
   airflow-init:
     build: ./airflow
     entrypoint: ["/bin/bash", "-c"]
-    command: ["airflow db migrate && airflow users create --username admin --password admin --firstname admin --lastname admin --role Admin --email admin@example.com || true"]
+    command: ["airflow db migrate && airflow users create --username ${AIRFLOW_UI_USER} --password ${AIRFLOW_UI_PASSWORD} --firstname admin --lastname admin --role Admin --email admin@example.com || true"]
     environment: &airflow-env
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_PG_PASSWORD}@airflow-postgres:5432/airflow
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_PG_USER}:${AIRFLOW_PG_PASSWORD}@airflow-postgres:5432/airflow
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW_CONN_SPARK_DEFAULT: "spark://spark-master:7077?deploy-mode=cluster&spark_binary=spark-submit"

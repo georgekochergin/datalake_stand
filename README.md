@@ -37,7 +37,18 @@ docker compose up -d --build
 | spark-master UI | 8080 | |
 | spark-worker UI | 8081 | |
 | trino | 8082 | `http://localhost:8082` |
-| airflow webserver/api-server | 8089 | admin/admin (см. `airflow-init`) |
+| airflow webserver/api-server | 8089 | admin/password (см. `airflow-init`) |
+
+## Учётные данные
+
+Тестовый стенд — везде, где логин/пароль настраиваемы, используется
+`admin` / `password` (см. `.env.example`). Исключение: MSSQL `sa` —
+имя пользователя фиксировано образом, а пароль не может быть буквально
+`password` (MSSQL требует длину ≥8 и минимум 3 из 4 категорий символов) —
+используется `AdminPassword1!`. SILO (консоль `:9001`), pg-catalog,
+airflow-postgres, Airflow UI (`:8089`), Oracle (`ORACLE_PASSWORD`,
+пользователь-схема `demo`) — везде `admin`/`password` (кроме Oracle, где
+имя пользователя-схемы фиксировано как `demo`, см. `docs/PLAN.md`).
 
 ## ⚠️ Важно: потеря данных при изменении схемы
 
