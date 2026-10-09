@@ -75,16 +75,16 @@ flowchart TB
 
 **Контур A (релевантно production DLH-архитектуре):**
 
-| Компонент | Образ/версия | Роль |
-|---|---|---|
-| mssql-source | `mcr.microsoft.com/mssql/server:2022-CU23-ubuntu-22.04`¹ | источник (DB `demo`, схема `demo`) |
-| oracle-source | `gvenzl/oracle-free:23-slim-faststart` | источник (PDB `demo`, пользователь/схема `demo`) |
-| pg-catalog | `postgres:16.15-bookworm` | metastore для Nessie |
-| nessie | `projectnessie/nessie:0.76.6` | Iceberg REST каталог, JDBC version-store |
-| silo | `pgsty/silo:RELEASE.2026-09-16T00-00-00Z` | S3-совместимое хранилище (форк MinIO), бакет `warehouse` |
-| spark-master/worker | база `tabulario/spark-iceberg:3.5.5_1.8.1` + `mssql-jdbc:12.10.0.jre11` + `ojdbc11:23.8.0.25.04` | AS IS загрузка источников → ODS |
-| trino | `trinodb/trino:479` | трансформации внутри лейка + ad-hoc доступ аналитиков |
-| airflow | `apache/airflow:3.3.2-python3.11`, LocalExecutor | оркестрация |
+| Компонент           | Образ/версия                                                                                     |
+| ------------------- | ------------------------------------------------------------------------------------------------ |
+| mssql-source        | `mcr.microsoft.com/mssql/server:2022-CU23-ubuntu-22.04`¹                                         |
+| oracle-source       | `gvenzl/oracle-free:23-slim-faststart`                                                           |
+| pg-catalog          | `postgres:16.15-bookworm`                                                                        |
+| nessie              | `projectnessie/nessie:0.76.6`                                                                    |
+| silo                | `pgsty/silo:RELEASE.2026-09-16T00-00-00Z`                                                        |
+| spark-master/worker | база `tabulario/spark-iceberg:3.5.5_1.8.1` + `mssql-jdbc:12.10.0.jre11` + `ojdbc11:23.8.0.25.04` |
+| trino               | `trinodb/trino:479`                                                                              |
+| airflow             | `apache/airflow:3.3.2-python3.11`, LocalExecutor                                                 |
 
 ¹ тег не подтверждён независимо (сетевые тайм-ауты при подборе) — перепроверить по каталогу MCR перед сборкой.
 
