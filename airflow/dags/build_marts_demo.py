@@ -1,6 +1,6 @@
 """build_marts_demo: учебная демонстрация двух способов трансформации
 данных внутри DataLake — Trino SQL и Spark. schedule=None, запуск вручную.
-Таски независимы, не обязаны давать идентичный результат (см. docs/PLAN.md).
+Таски независимы, не обязаны давать идентичный результат (см. docs/README.md).
 """
 from airflow import DAG
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator

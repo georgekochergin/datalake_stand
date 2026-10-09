@@ -1,4 +1,4 @@
-"""evolve: только rename_column и drop_column (см. docs/PLAN.md).
+"""evolve: только rename_column и drop_column (см. docs/README.md).
 
 drop_column запрещён для PK/FK-колонок. add_column/alter_column_type —
 не реализованы на этом этапе (backlog), любое иное значение ddl_operation

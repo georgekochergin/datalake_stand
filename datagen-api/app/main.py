@@ -1,4 +1,4 @@
-"""datagen-api — REST API без веб-UI (см. docs/PLAN.md).
+"""datagen-api — REST API без веб-UI (см. docs/README.md).
 
 Иерархия путей: rel_db -> host -> db -> schema -> tables. На этом этапе
 db/schema зафиксированы как demo/demo в обоих источниках — любое другое

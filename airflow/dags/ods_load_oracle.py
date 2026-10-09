@@ -10,7 +10,7 @@ ODS_ORACLE_DATASET = Dataset("ods://oracle")
 
 
 def _validate_load_placeholder(**_) -> None:
-    print("[validate_load] placeholder: метод валидации не определён (см. docs/PLAN.md)")
+    print("[validate_load] placeholder: метод валидации не определён (см. docs/README.md)")
 
 
 with DAG(

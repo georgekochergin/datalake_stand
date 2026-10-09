@@ -9,7 +9,7 @@ USER airflow
 # см. spark/Dockerfile) — нужен локально для SparkSubmitOperator.
 # ⚠ проверить на этапе реализации: provider apache-spark==6.3.2 требует
 # pyspark-client>=4.0.0 (Spark Connect) — подтвердить, что SparkSubmitOperator
-# всё ещё работает через классический spark-submit (см. docs/PLAN.md).
+# всё ещё работает через классический spark-submit (см. docs/README.md).
 RUN pip install --no-cache-dir --user pyspark==3.5.5
 ENV SPARK_HOME=/home/airflow/.local/lib/python3.11/site-packages/pyspark
 ENV PATH="${SPARK_HOME}/bin:${PATH}"

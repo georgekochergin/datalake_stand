@@ -1,7 +1,7 @@
 """ods_load_mssql: AS IS загрузка mssql-source -> Iceberg ods.mssql_*.
 
 task extract_load -> task validate_load (финальный, outlets=Dataset).
-Метод validate_load — открытый вопрос (см. docs/PLAN.md): простой COUNT(*)
+Метод validate_load — открытый вопрос (см. docs/README.md): простой COUNT(*)
 неверен, если в источнике были DELETE между загрузками. Здесь — заглушка.
 """
 from airflow import DAG
@@ -14,7 +14,7 @@ ODS_MSSQL_DATASET = Dataset("ods://mssql")
 
 def _validate_load_placeholder(**_) -> None:
     # Заглушка: полноценная методика сверки source vs ods — открытый вопрос.
-    print("[validate_load] placeholder: метод валидации не определён (см. docs/PLAN.md)")
+    print("[validate_load] placeholder: метод валидации не определён (см. docs/README.md)")
 
 
 with DAG(

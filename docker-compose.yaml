@@ -14,7 +14,7 @@ services:
   # ---------- Источники (эмуляция систем-доноров 1С) ----------
 
   mssql-source:
-    image: mcr.microsoft.com/mssql/server:2022-CU23-ubuntu-22.04 # ⚠ тег не подтверждён независимо, см. docs/PLAN.md
+    image: mcr.microsoft.com/mssql/server:2022-CU23-ubuntu-22.04 # ⚠ тег не подтверждён независимо, см. docs/README.md
     platform: linux/amd64
     environment:
       ACCEPT_EULA: "Y"
@@ -195,7 +195,7 @@ services:
 
   airflow-webserver:
     build: ./airflow
-    command: ["api-server"] # ⚠ Airflow 3.x: проверить точное имя команды/компонента на этапе реализации (см. docs/PLAN.md)
+    command: ["api-server"] # ⚠ Airflow 3.x: проверить точное имя команды/компонента на этапе реализации (см. docs/README.md)
     environment: *airflow-env
     ports: ["8089:8080"]
     volumes: ["./airflow/dags:/opt/airflow/dags"]

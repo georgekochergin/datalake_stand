@@ -1,7 +1,7 @@
 """AS IS загрузка demo.demo.* из mssql-source в Iceberg ods.mssql_*.
 
 Стратегия загрузки (APPEND vs MERGE/overwrite) — открытый вопрос,
-см. docs/PLAN.md ("validate_load"). Прототип реализует полный overwrite
+см. docs/README.md ("validate_load"). Прототип реализует полный overwrite
 таблицы на каждый запуск — простейший вариант, который точно отражает
 текущее состояние источника (включая DELETE), но не хранит историю.
 """

@@ -4,12 +4,93 @@
 источников (MSSQL, Oracle) в ODS-слой Iceberg **AS IS**, и демонстрация
 двух способов трансформации данных внутри DataLake (Trino SQL и Spark).
 
+## Архитектура
+
+```mermaid
+flowchart TB
+    ANALYST["Аналитик\n(Trino CLI / BI-инструмент)"]
+
+    subgraph Sources["Источники данных (эмуляция систем-доноров 1С)"]
+        MSSQL[("mssql-source\nmcr.microsoft.com/mssql/server:2022-CU23-ubuntu-22.04\nDB demo / schema demo")]
+        ORA[("oracle-source\ngvenzl/oracle-free:23-slim-faststart\nPDB demo / user(схема) demo")]
+    end
+
+    subgraph DataGen["ТОЛЬКО ДЛЯ ТЕСТОВОГО СТЕНДА — отсутствует в production"]
+        direction TB
+        Y1[("schema/sources/mssql.yaml")]
+        Y2[("schema/sources/oracle.yaml")]
+        API["datagen-api (FastAPI, без UI)\nappend / update / delete / evolve(rename|drop) + Swagger /docs"]
+        STATE[("datagen_state volume:\nlive_schema + schema_evolution_log + schema_hash")]
+        Y1 -. "bind-mount read-only" .-> API
+        Y2 -. "bind-mount read-only" .-> API
+        API --- STATE
+    end
+
+    subgraph Catalog["Каталог метаданных"]
+        PGC[("pg-catalog\npostgres:16.15-bookworm")]
+        NESSIE["nessie\nprojectnessie/nessie:0.76.6\nIceberg REST API"]
+        PGC --- NESSIE
+    end
+
+    SILO["silo\npgsty/silo:RELEASE.2026-09-16T00-00-00Z\nS3 API :9000, bucket warehouse"]
+
+    subgraph SparkCluster["Spark standalone-кластер"]
+        SM["spark-master :7077"]
+        SW["spark-worker"]
+        SM --- SW
+    end
+
+    TRINO["trino\ntrinodb/trino:479"]
+
+    subgraph Orchestration["Airflow 3.3.2-python3.11 (LocalExecutor)"]
+        D1["DAG ods_load_mssql\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (финальный, метод — TBD)\noutlets=Dataset(ods://mssql)"]
+        D2["DAG ods_load_oracle\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (финальный, метод — TBD)\noutlets=Dataset(ods://oracle)"]
+        D3["DAG build_marts_demo\nschedule=None (вручную)\nтаск A: TrinoOperator / таск B: SparkSubmitOperator"]
+    end
+
+    API -- "APPEND/UPDATE/DELETE\n(рекурсивный FK-aware каскад)" --> MSSQL
+    API -- "evolve: rename_column | drop_column" --> MSSQL
+    API -- "APPEND/UPDATE/DELETE" --> ORA
+    API -- "evolve: rename_column | drop_column" --> ORA
+
+    D1 --> SM
+    D2 --> SM
+    MSSQL -- "JDBC read" --> SW
+    ORA -- "JDBC read" --> SW
+    SW -- "write ods.mssql_*, ods.oracle_* AS IS" --> SILO
+    SM -. "catalog ops" .-> NESSIE
+
+    D3 -- "task mart_via_trino" --> TRINO
+    D3 -- "task mart_via_spark" --> SM
+    TRINO -. "catalog ops" .-> NESSIE
+    TRINO -- "read ods.* / write mart_trino.*" --> SILO
+    SW -- "write mart_spark.*" --> SILO
+
+    ANALYST --> TRINO
+
+    style DataGen stroke-dasharray: 6 4,stroke:#888,fill:#f5f5f5,color:#555
+```
+
+Исходник диаграммы также лежит отдельным файлом — [architecture.mmd](architecture.mmd)
+(тот же текст, GitHub рендерит Mermaid-блоки в `.md` автоматически, отдельный
+рендер в картинку не нужен). При изменении архитектуры стенда обновлять оба места синхронно.
+
 ## Состав стенда
 
-**Контур A (релевантно production DLH-архитектуре):** `mssql-source`,
-`oracle-source`, `pg-catalog`+`nessie` (каталог Iceberg), `silo` (S3-хранилище,
-форк MinIO), `spark-master`/`spark-worker` (AS IS загрузка в ODS),
-`trino` (трансформации + ad-hoc), `airflow-*` (оркестрация).
+**Контур A (релевантно production DLH-архитектуре):**
+
+| Компонент | Образ/версия | Роль |
+|---|---|---|
+| mssql-source | `mcr.microsoft.com/mssql/server:2022-CU23-ubuntu-22.04`¹ | источник (DB `demo`, схема `demo`) |
+| oracle-source | `gvenzl/oracle-free:23-slim-faststart` | источник (PDB `demo`, пользователь/схема `demo`) |
+| pg-catalog | `postgres:16.15-bookworm` | metastore для Nessie |
+| nessie | `projectnessie/nessie:0.76.6` | Iceberg REST каталог, JDBC version-store |
+| silo | `pgsty/silo:RELEASE.2026-09-16T00-00-00Z` | S3-совместимое хранилище (форк MinIO), бакет `warehouse` |
+| spark-master/worker | база `tabulario/spark-iceberg:3.5.5_1.8.1` + `mssql-jdbc:12.10.0.jre11` + `ojdbc11:23.8.0.25.04` | AS IS загрузка источников → ODS |
+| trino | `trinodb/trino:479` | трансформации внутри лейка + ad-hoc доступ аналитиков |
+| airflow | `apache/airflow:3.3.2-python3.11`, LocalExecutor | оркестрация |
+
+¹ тег не подтверждён независимо (сетевые тайм-ауты при подборе) — перепроверить по каталогу MCR перед сборкой.
 
 **Контур B (только тестовый стенд, нет в production):** `datagen-api` —
 REST API для наполнения источников синтетическими данными и ограниченной
