@@ -71,9 +71,6 @@ flowchart TB
     style DataGen stroke-dasharray: 6 4,stroke:#888,fill:#f5f5f5,color:#555
 ```
 
-Mermaid-код схемы хранится только здесь, в этом README (GitHub рендерит такие
-блоки в `.md` автоматически — отдельный файл или картинка не нужны).
-
 ## Состав стенда
 
 **Контур A (релевантно production DLH-архитектуре):**
