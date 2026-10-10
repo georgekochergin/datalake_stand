@@ -35,6 +35,10 @@ description: Проверяет полную работоспособность 
 
 - Nessie Iceberg REST `/iceberg/v1/config` → 200
 - datagen-api `/docs` → 200
+- datagen-api `/sources` → `mssql,oracle`
+- datagen-api `update`/`delete` (формализованный predicate) → 200 (предикат бьёт по 0 строк, данные не меняются)
+- datagen-api `update` на oracle → 200 (проверка bind-параметров `:1..:n`)
+- datagen-api отклоняет инъекцию через имя колонки → 422
 - Airflow login `admin`/`admin` → 201
 - Trino HTTPS statement `admin`/`admin` → 200 (неверный пароль → 401)
 - MSSQL БД `demo` + таблицы `customers`, `orders`, `products`

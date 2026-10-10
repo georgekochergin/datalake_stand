@@ -47,13 +47,19 @@ class AppendRequest(BaseModel):
     new_key_ratio: float = Field(default=0.1, ge=0.0, le=1.0)
 
 
+class Condition(BaseModel):
+    column: str
+    operator: Literal["=", "!=", "<", "<=", ">", ">="]
+    value: Any
+
+
 class UpdateRequest(BaseModel):
-    predicate: str
-    set: dict[str, Any]
+    predicate: list[Condition] = Field(min_length=1)
+    set: dict[str, Any] = Field(min_length=1)
 
 
 class DeleteRequest(BaseModel):
-    predicate: str
+    predicate: list[Condition] = Field(min_length=1)
     cascade: bool = False
 
 

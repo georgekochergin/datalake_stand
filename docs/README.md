@@ -178,8 +178,8 @@ REST-интерфейс: `http://localhost:8090`, Swagger UI — `http://localho
 | GET | `/tables/{source}` | список таблиц источника | — |
 | GET | `/tables/{source}/{schema}/{table}` | схема таблицы | — |
 | POST | `/tables/{source}/{schema}/{table}/append` | вставить N строк | `{"rows": N, "new_key_ratio": r}` |
-| POST | `/tables/{source}/{schema}/{table}/update` | обновить строки | `{"predicate": "...", "set": {...}}` |
-| POST | `/tables/{source}/{schema}/{table}/delete` | удалить строки | `{"predicate": "...", "cascade": bool}` |
+| POST | `/tables/{source}/{schema}/{table}/update` | обновить строки | `{"predicate": [{"column","operator","value"}, ...], "set": {...}}` |
+| POST | `/tables/{source}/{schema}/{table}/delete` | удалить строки | `{"predicate": [{"column","operator","value"}, ...], "cascade": bool}` |
 | POST | `/tables/{source}/{schema}/{table}/evolve` | rename/drop колонки | см. ниже |
 
 Как вызвать ручку в Swagger UI:
@@ -215,27 +215,39 @@ REST-интерфейс: `http://localhost:8090`, Swagger UI — `http://localho
 Пример: `source`=`mssql`, `schema`=`demo`, `table`=`orders`, тело `{"rows": 10, "new_key_ratio": 0.0}` — вставит 10 заказов со ссылками на уже существующих клиентов и товары.
 
 #### POST .../update — обновить строки
-Тело `{"predicate": "...", "set": {...}}`:
-- `predicate` — строка SQL-условия **без ключевого слова WHERE**, выбирает строки к обновлению: `customer_id = 1`, `price < 100 AND segment = 'Retail'`;
-- `set` — объект `{колонка: новое_значение}`; можно указать несколько колонок за раз, например `{"segment": "VIP", "name": "Acme"}`;
-- если в `set` попадает FK-колонка, а в родительской таблице нет строки с таким ключом — она создастся автоматически.
+Тело `{"predicate": [...], "set": {...}}`:
+- `predicate` — список условий, объединяемых через `AND`. Каждое условие — объект
+  `{"column": "...", "operator": "...", "value": ...}`:
+  - `column` — существующая колонка таблицы (иначе `422`);
+  - `operator` — один из `=`, `!=`, `<`, `<=`, `>`, `>=`;
+  - `value` — значение сравнения; подставляется как параметр запроса, а не как SQL-текст.
+- `set` — объект `{колонка: новое_значение}`; ключи должны быть колонками таблицы,
+  значения тоже параметризуются. Можно указать несколько колонок: `{"segment": "VIP", "name": "Acme"}`.
+- если в `set` попадает FK-колонка, а в родительской таблице нет строки с таким ключом —
+  она создастся автоматически.
 
-`predicate` и `set` — сырые SQL-фрагменты (инструмент внутренний, доверенный).
+Произвольные SQL-фрагменты не принимаются: имена колонок проверяются по схеме таблицы
+(allow-list), значения — bind-параметры, поэтому SQL-инъекция невозможна.
 
 Примеры:
-- `source`=`mssql`, `schema`=`demo`, `table`=`customers`, тело `{"predicate": "customer_id = 1", "set": {"segment": "VIP"}}`;
-- `source`=`oracle`, `schema`=`demo`, `table`=`products`, тело `{"predicate": "price < 100", "set": {"price": 99.99}}`.
+- `source`=`mssql`, `schema`=`demo`, `table`=`customers`,
+  `{"predicate": [{"column": "customer_id", "operator": "=", "value": 1}], "set": {"segment": "VIP"}}`;
+- `source`=`oracle`, `schema`=`demo`, `table`=`products`,
+  `{"predicate": [{"column": "price", "operator": "<", "value": 100}], "set": {"price": 99.99}}`.
 
 #### POST .../delete — удалить строки
-Тело `{"predicate": "...", "cascade": bool}`:
-- `predicate` — строка SQL-условия **без WHERE**, выбирает строки к удалению: `order_id = 5`;
+Тело `{"predicate": [...], "cascade": bool}`:
+- `predicate` — список условий (как в `update`), объединяемых через `AND`:
+  `column` — колонка таблицы, `operator` ∈ `= != < <= > >=`, `value` — параметр;
 - `cascade` — булево. Нужно, когда на таблицу ссылаются другие (на `customers` ссылается `orders`):
-  - `false` — если есть ссылки на удаляемые строки, запрос вернёт `409`;
+  - `false` — если на удаляемые строки есть ссылки, запрос вернёт `409`;
   - `true` — сначала удаляются ссылающиеся строки дочерних таблиц, затем целевые.
 
 Примеры:
-- `source`=`mssql`, `schema`=`demo`, `table`=`orders`, `{"predicate": "order_id = 5", "cascade": false}` — удалить один заказ;
-- `source`=`mssql`, `schema`=`demo`, `table`=`customers`, `{"predicate": "customer_id = 1", "cascade": true}` — удалить клиента вместе с его заказами.
+- `source`=`mssql`, `schema`=`demo`, `table`=`orders`,
+  `{"predicate": [{"column": "order_id", "operator": "=", "value": 5}], "cascade": false}` — удалить один заказ;
+- `source`=`mssql`, `schema`=`demo`, `table`=`customers`,
+  `{"predicate": [{"column": "customer_id", "operator": "=", "value": 1}], "cascade": true}` — удалить клиента вместе с его заказами.
 
 #### POST .../evolve — переименовать/удалить колонку
 Тело `{"ddl_operation": "...", "column_name": "...", "new_column_name": "...", "apply_to": "..."}`:

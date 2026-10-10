@@ -30,6 +30,27 @@ check "datagen-api /docs" "$code" "200"
 sources=$(curl -s http://localhost:8090/sources 2>/dev/null | python3 -c "import sys,json;print(','.join(json.load(sys.stdin).get('sources',[])))" 2>/dev/null)
 check "datagen-api /sources" "$sources" "mssql,oracle"
 
+# 1b. datagen-api update/delete — формализованный predicate, без SQL-инъекций
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/tables/mssql/demo/customers/update \
+  -H 'Content-Type: application/json' \
+  -d '{"predicate":[{"column":"customer_id","operator":"=","value":-999999}],"set":{"segment":"VIP"}}')
+check "datagen-api update formalized predicate" "$code" "200"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/tables/mssql/demo/customers/delete \
+  -H 'Content-Type: application/json' \
+  -d '{"predicate":[{"column":"customer_id","operator":"=","value":-999999}],"cascade":false}')
+check "datagen-api delete formalized predicate" "$code" "200"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/tables/oracle/demo/customers/update \
+  -H 'Content-Type: application/json' \
+  -d '{"predicate":[{"column":"customer_id","operator":"=","value":-999999}],"set":{"segment":"VIP"}}')
+check "datagen-api update oracle bind params" "$code" "200"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/tables/mssql/demo/customers/update \
+  -H 'Content-Type: application/json' \
+  -d '{"predicate":[{"column":"customer_id; DROP TABLE demo.customers --","operator":"=","value":1}],"set":{"segment":"VIP"}}')
+check "datagen-api rejects injected column" "$code" "422"
+
 # 2. Airflow
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8089/auth/token \
   -H 'Content-Type: application/x-www-form-urlencoded' --data 'username=admin&password=admin')

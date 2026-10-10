@@ -1,5 +1,14 @@
 # Диагностика отказов datalake_stand
 
+## datagen-api `update`/`delete` возвращают 422 или 409
+
+- `422` — ошибка валидации формализованного `predicate`/`set`: либо имя колонки
+  не входит в схему таблицы (allow-list в `datagen-api/app/generators.py`),
+  либо `operator` вне набора `= != < <= > >=`, либо `predicate`/`set` пусты.
+  Это защита от SQL-инъекции — произвольные SQL-фрагменты больше не принимаются.
+- `409` — каскадная блокировка `delete`: на удаляемые строки ссылаются дочерние
+  таблицы, а `cascade` не `true`.
+
 ## datagen-api падает при старте (exit 3)
 
 - `CREATE DATABASE statement not allowed within multi-statement transaction` —

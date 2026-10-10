@@ -9,7 +9,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 
 from . import generators, schema_evolution, schema_state, sources
-from .generators import GeneratorError
+from .generators import GeneratorError, PredicateError
 from .models import AppendRequest, DeleteRequest, EvolveRequest, UpdateRequest
 from .schema_evolution import EvolutionError
 
@@ -72,7 +72,10 @@ def update_table(source: str, schema: str, table: str, req: UpdateRequest):
     live_schema = schema_state.get_schema(source)
     if table not in live_schema.tables:
         raise HTTPException(404, f"Таблица '{table}' не найдена")
-    generators.update_rows(source, live_schema, table, req.predicate, req.set)
+    try:
+        generators.update_rows(source, live_schema, table, req.predicate, req.set)
+    except PredicateError as exc:
+        raise HTTPException(422, str(exc)) from exc
     return {"status": "ok"}
 
 
@@ -84,6 +87,8 @@ def delete_table(source: str, schema: str, table: str, req: DeleteRequest):
         raise HTTPException(404, f"Таблица '{table}' не найдена")
     try:
         generators.delete_rows(source, live_schema, table, req.predicate, req.cascade)
+    except PredicateError as exc:
+        raise HTTPException(422, str(exc)) from exc
     except GeneratorError as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"status": "ok"}

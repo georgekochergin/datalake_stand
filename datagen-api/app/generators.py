@@ -5,8 +5,10 @@
 имеет смысл батчить и дедуплицировать новые родительские строки перед
 вставкой (см. docs/README.md, раздел дизайна).
 
-predicate / set / payload — сырые SQL-фрагменты: осознанный риск
-(см. docs/README.md), инструмент предполагается доверенным и внутренним.
+predicate — формализованный список условий (column + operator + value),
+объединяемых через AND: имена колонок проверяются по схеме таблицы
+(allow-list), значения подставляются bind-параметрами, операторы — из
+фиксированного набора (models.Condition). SQL-инъекция исключена.
 """
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ from typing import Any
 from faker import Faker
 
 from .db_connectors import mssql_connection, oracle_connection
-from .models import ColumnSpec, ForeignKey, SourceSchema, TableSchema
+from .models import ColumnSpec, Condition, ForeignKey, SourceSchema, TableSchema
 
 _fake = Faker()
 
@@ -26,8 +28,16 @@ class GeneratorError(ValueError):
     pass
 
 
+class PredicateError(ValueError):
+    pass
+
+
 def _qualify(source: str, table_name: str) -> str:
     return f"demo.{table_name}" if source == "mssql" else table_name
+
+
+def _placeholder(source: str, index: int) -> str:
+    return "%s" if source == "mssql" else f":{index}"
 
 
 def _connection(source: str):
@@ -74,11 +84,11 @@ def _pick_existing_pk(conn, qualified: str, pk_cols: list[str]) -> dict[str, Any
     return dict(zip(pk_cols, row))
 
 
-def _insert_row(conn, qualified: str, values: dict[str, Any]) -> None:
-    cols = ", ".join(values.keys())
-    placeholders = ", ".join(["%s"] * len(values))
+def _insert_row(conn, source: str, qualified: str, values: dict[str, Any]) -> None:
+    cols = list(values.keys())
+    placeholders = ", ".join(_placeholder(source, i) for i in range(1, len(cols) + 1))
     cur = conn.cursor()
-    cur.execute(f"INSERT INTO {qualified} ({cols}) VALUES ({placeholders})", list(values.values()))
+    cur.execute(f"INSERT INTO {qualified} ({', '.join(cols)}) VALUES ({placeholders})", list(values.values()))
 
 
 def _resolve_fk_values(
@@ -112,7 +122,7 @@ def _mint_new_row(
         if pk_col not in values:
             values[pk_col] = _next_sequence_value(conn, source, qualified, pk_col)
 
-    _insert_row(conn, qualified, values)
+    _insert_row(conn, source, qualified, values)
     return {pk: values[pk] for pk in table.primary_key}
 
 
@@ -125,9 +135,35 @@ def append_rows(source: str, schema: SourceSchema, table_name: str, rows: int, n
     return rows
 
 
-def update_rows(source: str, schema: SourceSchema, table_name: str, predicate: str, set_values: dict[str, Any]) -> None:
+def _validate_column(table: TableSchema, column: str) -> None:
+    if column not in table.column_names:
+        raise PredicateError(f"Неизвестная колонка '{column}' таблицы '{table.name}'")
+
+
+def _validate_set(table: TableSchema, set_values: dict[str, Any]) -> None:
+    for column in set_values:
+        _validate_column(table, column)
+
+
+def _build_where(
+    table: TableSchema, conditions: list[Condition], source: str, start_index: int = 1
+) -> tuple[str, list[Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    for condition in conditions:
+        _validate_column(table, condition.column)
+        index = start_index + len(params)
+        clauses.append(f"{condition.column} {condition.operator} {_placeholder(source, index)}")
+        params.append(condition.value)
+    return " AND ".join(clauses), params
+
+
+def update_rows(
+    source: str, schema: SourceSchema, table_name: str, conditions: list[Condition], set_values: dict[str, Any]
+) -> None:
     table = schema.tables[table_name]
     qualified = _qualify(source, table_name)
+    _validate_set(table, set_values)
     with _connection(source) as conn:
         for col_name, value in set_values.items():
             fk = _fk_for_column(table, col_name)
@@ -136,13 +172,21 @@ def update_rows(source: str, schema: SourceSchema, table_name: str, predicate: s
                 parent_qualified = _qualify(source, parent_table.name)
                 ref_col = fk.ref_columns[fk.columns.index(col_name)]
                 cur = conn.cursor()
-                cur.execute(f"SELECT 1 FROM {parent_qualified} WHERE {ref_col} = %s", [value])
+                cur.execute(
+                    f"SELECT 1 FROM {parent_qualified} WHERE {ref_col} = {_placeholder(source, 1)}",
+                    [value],
+                )
                 if cur.fetchone() is None:
                     _mint_new_row_with_key(conn, source, schema, parent_table, {ref_col: value})
 
-        assignments = ", ".join(f"{c} = %s" for c in set_values)
+        set_cols = list(set_values.keys())
+        assignments = ", ".join(
+            f"{col} = {_placeholder(source, i)}" for i, col in enumerate(set_cols, start=1)
+        )
+        where, where_params = _build_where(table, conditions, source, start_index=len(set_cols) + 1)
+        params = list(set_values.values()) + where_params
         cur = conn.cursor()
-        cur.execute(f"UPDATE {qualified} SET {assignments} WHERE {predicate}", list(set_values.values()))
+        cur.execute(f"UPDATE {qualified} SET {assignments} WHERE {where}", params)
         conn.commit()
 
 
@@ -165,20 +209,26 @@ def _mint_new_row_with_key(conn, source: str, schema: SourceSchema, table: Table
         if pk_col not in values:
             values[pk_col] = _next_sequence_value(conn, source, qualified, pk_col)
 
-    _insert_row(conn, qualified, values)
+    _insert_row(conn, source, qualified, values)
 
 
-def delete_rows(source: str, schema: SourceSchema, table_name: str, predicate: str, cascade: bool) -> None:
+def delete_rows(
+    source: str, schema: SourceSchema, table_name: str, conditions: list[Condition], cascade: bool
+) -> None:
     table = schema.tables[table_name]
     qualified = _qualify(source, table_name)
     dependents = [
         (t, fk) for t in schema.tables.values() for fk in t.foreign_keys if fk.ref_table == table_name
     ]
+    where, where_params = _build_where(table, conditions, source)
 
     with _connection(source) as conn:
         cur = conn.cursor()
         if dependents:
-            cur.execute(f"SELECT {', '.join(table.primary_key)} FROM {qualified} WHERE {predicate}")
+            cur.execute(
+                f"SELECT {', '.join(table.primary_key)} FROM {qualified} WHERE {where}",
+                where_params,
+            )
             target_pks = cur.fetchall()
             if target_pks:
                 if not cascade:
@@ -190,11 +240,12 @@ def delete_rows(source: str, schema: SourceSchema, table_name: str, predicate: s
                     dep_qualified = _qualify(source, dep_table.name)
                     ref_idx = {c: i for i, c in enumerate(table.primary_key)}
                     for pk_row in target_pks:
-                        conditions = " AND ".join(
-                            f"{fk_col} = %s" for fk_col in fk.columns
+                        dep_where = " AND ".join(
+                            f"{fk_col} = {_placeholder(source, i)}"
+                            for i, fk_col in enumerate(fk.columns, start=1)
                         )
                         values = [pk_row[ref_idx[rc]] for rc in fk.ref_columns]
-                        cur.execute(f"DELETE FROM {dep_qualified} WHERE {conditions}", values)
+                        cur.execute(f"DELETE FROM {dep_qualified} WHERE {dep_where}", values)
 
-        cur.execute(f"DELETE FROM {qualified} WHERE {predicate}")
+        cur.execute(f"DELETE FROM {qualified} WHERE {where}", where_params)
         conn.commit()
