@@ -28,6 +28,7 @@ def main() -> None:
             .option("dbtable", f"demo.{table}")
             .option("user", "sa")
             .option("password", MSSQL_PASSWORD)
+            .option("driver", "com.microsoft.sqlserver.jdbc.SQLServerDriver")
             .load()
         )
         df.writeTo(f"iceberg.ods.mssql_{table}").createOrReplace()

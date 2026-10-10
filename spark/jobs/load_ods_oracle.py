@@ -7,7 +7,7 @@ from pyspark.sql import SparkSession
 
 ORACLE_HOST = os.environ.get("ORACLE_HOST", "oracle-source")
 ORACLE_PORT = os.environ.get("ORACLE_PORT", "1521")
-ORACLE_SERVICE = os.environ.get("ORACLE_SERVICE", "FREEPDB1")
+ORACLE_SERVICE = os.environ.get("ORACLE_SERVICE", "demo")
 ORACLE_APP_USER = os.environ.get("ORACLE_APP_USER", "demo")
 ORACLE_APP_PASSWORD = os.environ["ORACLE_APP_PASSWORD"]
 TABLES = ["customers", "products", "orders"]

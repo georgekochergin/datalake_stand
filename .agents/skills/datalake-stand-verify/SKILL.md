@@ -1,6 +1,6 @@
 ---
 name: datalake-stand-verify
-description: Проверяет полную работоспособность docker-compose стенда datalake_stand: дожидается сервисов и проверяет datagen-api (:8090), Airflow (:8089), Trino HTTPS (:8443), MSSQL (:1433), Oracle (:1521) и Spark. Использовать после `docker compose up -d --build`, при сбоях доступа к сервисам или для подтверждения, что сборка работает. Не для запуска DAG-ов Airflow и не для сквозной загрузки ODS в Iceberg.
+description: Проверяет полную работоспособность docker-compose стенда datalake_stand. Быстрая проверка компонентов — scripts/verify.sh; полный сквозной тест — scripts/full-test.sh (datagen CRUD + corner-case + DAG-и ODS и витрин, в конце гасит сборку с очисткой volume-ов).
 ---
 
 # Проверка сборки datalake_stand
@@ -9,15 +9,21 @@ description: Проверяет полную работоспособность 
 
 ## Шаги
 
-1. Поднять стенд из корня репозитория: `docker compose up -d --build`.
-   Если менялись пароли/DDL в `.env` или схема — сначала `docker compose down -v`
-   (именованные тома `airflow_pg_data`, `pg_catalog_data`, `silo_data`,
-   `datagen_state` хранят прежние креды/схему).
-2. Дождаться `healthy` у `mssql-source` и `oracle-source` (30–90 c) — только
-   после этого `datagen-api` выполняет provisioning БД.
-3. Запустить `scripts/verify.sh` — он выполнит все проверки и выведет
-   PASS/FAIL (exit code 0 при всех PASS).
-4. При FAIL — открыть `references/troubleshooting.md` и искать симптом.
+### Полный сквозной тест (рекомендуется)
+
+1. Из корня репозитория выполнить **одну** команду — `./scripts/full-test.sh`.
+   Скрипт сам: чистит прежние контейнеры/volume-ы (`down -v`), поднимает стек
+   (`up --build`), прогоняет весь флоу в контейнере `test-runner` и в конце
+   снова гасит сборку (`down -v --remove-orphans`). Агент и человек запускают
+   одну и ту же команду.
+2. Читать финальную строку `PASS=n FAIL=m` (exit-code 0 = всё прошло).
+3. При FAIL — открыть `references/troubleshooting.md`.
+
+### Быстрая проверка компонентов (без мутаций и без гашения)
+
+1. `docker compose up -d --build`.
+2. `bash .agents/skills/datalake-stand-verify/scripts/verify.sh`.
+3. При FAIL — `references/troubleshooting.md`.
 
 ## Креды
 

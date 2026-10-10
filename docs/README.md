@@ -43,9 +43,9 @@ flowchart TB
     TRINO["trino\ntrinodb/trino:479"]
 
     subgraph Orchestration["Airflow 3.3.2-python3.11 (LocalExecutor)"]
-        D1["DAG ods_load_mssql\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (финальный, метод — TBD)\noutlets=Dataset(ods://mssql)"]
-        D2["DAG ods_load_oracle\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (финальный, метод — TBD)\noutlets=Dataset(ods://oracle)"]
-        D3["DAG build_marts_demo\nschedule=None (вручную)\nтаск A: TrinoOperator / таск B: SparkSubmitOperator"]
+        D1["DAG ods_load_mssql\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (заглушка, метод валидации — TBD)"]
+        D2["DAG ods_load_oracle\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (заглушка, метод валидации — TBD)"]
+        D3["DAG build_marts_demo\nschedule=None (вручную)\nзадача A: PythonOperator+TrinoHook / задача B: SparkSubmitOperator"]
     end
 
     API -- "APPEND/UPDATE/DELETE\n(рекурсивный FK-aware каскад)" --> MSSQL
@@ -290,6 +290,39 @@ docker compose exec -T airflow-scheduler airflow dags trigger build_marts_demo
 ```
 
 Результат — таблицы `iceberg.mart_trino.customer_totals` и `iceberg.mart_spark.customer_totals` (читаются из Trino).
+
+## Полное тестирование стенда
+
+Полный флоу работы стенда проверяется автономным тестом: он поднимает стек,
+прогоняет все этапы в контейнере и в конце полностью гасит сборку.
+
+Запуск (из корня репозитория):
+
+```bash
+./scripts/full-test.sh
+```
+
+Скрипт делает:
+1. `docker compose down -v --remove-orphans` — чистит прежние контейнеры и volume-ы (прежние данные не влияют на запуск);
+2. `docker compose up -d --build` — собирает и поднимает весь стек;
+3. `docker compose run --rm test-runner` — в отдельном контейнере прогоняет тест:
+   - проверяет готовность Nessie / datagen-api / Trino / Airflow / Spark;
+   - наполняет таблицы `customers`, `products`, `orders` в `mssql` и `oracle`, обновляет и удаляет часть строк;
+   - corner-case: удаление FK-родителя без `cascade` (409), `drop_column` PK/FK (422), неизвестная колонка/оператор и SQL-инъекция (422);
+   - запускает DAG-и `ods_load_mssql`, `ods_load_oracle` и сверяет таблицы `iceberg.ods.*` через Trino;
+   - запускает DAG `build_marts_demo` и проверяет витрины `iceberg.mart_trino.customer_totals` и `iceberg.mart_spark.customer_totals`;
+   - печатает сводку `PASS=n FAIL=m`;
+4. `docker compose down -v --remove-orphans` — в любом исходе гасит сборку: удаляет контейнеры, сети и volume-ы (`pg_catalog_data`, `airflow_pg_data`, `silo_data`, `datagen_state`).
+
+Результат: финальная строка `PASS=… FAIL=…`; exit-code 0 — всё прошло, при
+FAIL — смотреть `.agents/skills/datalake-stand-verify/references/troubleshooting.md`.
+После прогона стенд погашен, данные удалены; образы остаются в локальном кеше.
+
+Предусловия: Docker + Docker Compose, склонированный репозиторий, `.env`
+(уже закоммичен). Интернет нужен только для первого `build` образов — повторные
+запуски работают офлайн.
+
+Для разработки (стенд остаётся поднятым) — обычный `docker compose up -d --build`.
 
 ## Учётные данные
 

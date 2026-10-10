@@ -140,6 +140,7 @@ services:
     environment:
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
       ORACLE_APP_PASSWORD: ${ORACLE_APP_PASSWORD}
+      ORACLE_SERVICE: demo
     depends_on: {nessie: {condition: service_started}, silo-init: {condition: service_completed_successfully}}
     networks: [dlh-poc]
 
@@ -150,6 +151,7 @@ services:
     environment:
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
       ORACLE_APP_PASSWORD: ${ORACLE_APP_PASSWORD}
+      ORACLE_SERVICE: demo
     ports: ["8081:8081"]
     depends_on: [spark-master]
     networks: [dlh-poc]
@@ -184,22 +186,29 @@ services:
       retries: 10
 
   airflow-init:
-    build: ./airflow
+    build: {context: ., dockerfile: airflow/Dockerfile}
+    image: dlh-poc-airflow:latest
     entrypoint: ["/bin/bash", "-c"]
     command: ["airflow db migrate"]
     environment: &airflow-env
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_PG_USER}:${AIRFLOW_PG_PASSWORD}@airflow-postgres:5432/airflow
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW_CONN_SPARK_DEFAULT: "spark://spark-master:7077?deploy-mode=cluster&spark_binary=spark-submit"
-      AIRFLOW_CONN_TRINO_DEFAULT: "trino://trino:8080"
+      AIRFLOW_CONN_SPARK_DEFAULT: "spark://spark-master:7077?spark_binary=spark-submit"
+      AIRFLOW_CONN_TRINO_DEFAULT: "trino://admin:admin@trino:8443/iceberg?protocol=https&verify=false"
       AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "${AIRFLOW_UI_USER}:ADMIN"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow-webserver:8080/execution/"
+      AIRFLOW__API_AUTH__JWT_SECRET: "datalake-stand-test-jwt-secret-0123456789abcdef"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+      ORACLE_APP_PASSWORD: ${ORACLE_APP_PASSWORD}
     depends_on: {airflow-postgres: {condition: service_healthy}}
     volumes: ["./airflow/dags:/opt/airflow/dags"]
     networks: [dlh-poc]
 
   airflow-scheduler:
-    build: ./airflow
+    build: {context: ., dockerfile: airflow/Dockerfile}
+    image: dlh-poc-airflow:latest
     command: ["scheduler"]
     environment: *airflow-env
     volumes:
@@ -211,8 +220,20 @@ services:
         condition: service_completed_successfully
     networks: [dlh-poc]
 
+  airflow-dag-processor:
+    build: {context: ., dockerfile: airflow/Dockerfile}
+    image: dlh-poc-airflow:latest
+    command: ["dag-processor"]
+    environment: *airflow-env
+    volumes: ["./airflow/dags:/opt/airflow/dags"]
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    networks: [dlh-poc]
+
   airflow-webserver:
-    build: ./airflow
+    build: {context: ., dockerfile: airflow/Dockerfile}
+    image: dlh-poc-airflow:latest
     command: ["api-server"] # ⚠ Airflow 3.x: проверить точное имя команды/компонента на этапе реализации (см. docs/README.md)
     environment: *airflow-env
     ports: ["8089:8080"]
@@ -220,4 +241,23 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
+    networks: [dlh-poc]
+
+  # ---------- Полный тестовый флоу (запускается через scripts/full-test.sh) ----------
+
+  test-runner:
+    build: ./test/runner
+    image: dlh-poc-test-runner
+    profiles: ["test"]
+    environment:
+      AIRFLOW_UI_USER: ${AIRFLOW_UI_USER}
+      AIRFLOW_UI_PASSWORD: ${AIRFLOW_UI_PASSWORD}
+    depends_on:
+      mssql-source: {condition: service_healthy}
+      oracle-source: {condition: service_healthy}
+      datagen-api: {condition: service_started}
+      nessie: {condition: service_started}
+      trino: {condition: service_started}
+      airflow-webserver: {condition: service_started}
+      spark-master: {condition: service_started}
     networks: [dlh-poc]

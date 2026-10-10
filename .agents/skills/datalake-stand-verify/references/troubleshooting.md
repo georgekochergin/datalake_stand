@@ -1,5 +1,31 @@
 # Диагностика отказов datalake_stand
 
+## DAG-и не подхватываются в Airflow (dags list пуст)
+
+Airflow 3.3.2 убрал/переименовал часть API из Airflow 2.x:
+- `from airflow.datasets import Dataset` → ModuleNotFoundError: используйте
+  `from airflow.sdk import Asset` (или вообще не нужен при `schedule=None`);
+- `airflow.providers.trino.operators.trino.TrinoOperator` → удалён: заменено на
+  `PythonOperator` + `airflow.providers.trino.hooks.trino.TrinoHook`;
+- `outlets=[...]` нет в `PythonOperator` — убрано.
+Проверка парсинга: `docker compose exec airflow-scheduler airflow dags list`
+(должен вернуть список, а не «No data found»).
+
+## DAG `ods_load_oracle` падает с ошибкой подключения
+
+Сервис Oracle в стенде — `demo` (`ORACLE_DATABASE: demo`), а не `FREEPDB1`.
+Драйвер Spark читает `ORACLE_SERVICE` из окружения воркера; если не задан —
+дефолт в `spark/jobs/load_ods_oracle.py` теперь `demo`.
+
+## Триггер DAG через REST не создаёт run / state ≠ success
+
+- Auth: `POST /auth/token` (form `username/password`) → `access_token`;
+  далее `Authorization: Bearer <token>`.
+- REST в Airflow 3 — `/api/v2/...` (не `/api/v1`).
+- Триггер: `POST /api/v2/dags/{dag_id}/dagRuns` body `{"dag_run_id": "..."}`;
+  статус: `GET /api/v2/dags/{dag_id}/dagRuns/{dag_run_id}` → поле `state`
+  (`queued`/`running`/`success`/`failed`).
+
 ## datagen-api `update`/`delete` возвращают 422 или 409
 
 - `422` — ошибка валидации формализованного `predicate`/`set`: либо имя колонки
