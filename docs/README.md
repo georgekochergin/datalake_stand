@@ -77,7 +77,7 @@ flowchart TB
 
 | Компонент           | Образ/версия                                                                                     |
 | ------------------- | ------------------------------------------------------------------------------------------------ |
-| mssql-source        | `mcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04`¹                                         |
+| mssql-source        | `mcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04`                                          |
 | oracle-source       | `gvenzl/oracle-free:23-slim-faststart`                                                           |
 | pg-catalog          | `postgres:16.15-bookworm`                                                                        |
 | nessie              | `ghcr.io/projectnessie/nessie:0.99.0`                                                           |
@@ -86,7 +86,7 @@ flowchart TB
 | trino               | `trinodb/trino:479`                                                                              |
 | airflow             | `apache/airflow:3.3.2-python3.11`, LocalExecutor                                                 |
 
-¹ Закреплено на конкретном CU: `2022-CU27-ubuntu-22.04` — этот тег совпадает с `2022-latest` на 2026-10-09 (для воспроизводимости). Для обновления взять следующий `2022-CUxx-ubuntu-22.04` из каталога MCR.
+<br />
 
 **Контур B (только тестовый стенд, нет в production):** `datagen-api` —
 REST API для наполнения источников синтетическими данными и ограниченной
