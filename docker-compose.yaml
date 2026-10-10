@@ -50,14 +50,12 @@ services:
   datagen-api:
     build: ./datagen-api
     environment:
-      MSSQL_HOST: mssql-source
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
-      ORACLE_HOST: oracle-source
       ORACLE_APP_USER: demo
       ORACLE_APP_PASSWORD: ${ORACLE_APP_PASSWORD}
-      ORACLE_SERVICE: demo
     volumes:
       - ./schema/sources:/app/schema/sources:ro
+      - ./datagen-api/config/sources.yaml:/app/config/sources.yaml:ro
       - datagen_state:/state
     ports: ["8090:8000"]
     depends_on:

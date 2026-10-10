@@ -27,6 +27,9 @@ check "Nessie /iceberg/v1/config" "$code" "200"
 code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8090/docs)
 check "datagen-api /docs" "$code" "200"
 
+sources=$(curl -s http://localhost:8090/sources 2>/dev/null | python3 -c "import sys,json;print(','.join(json.load(sys.stdin).get('sources',[])))" 2>/dev/null)
+check "datagen-api /sources" "$sources" "mssql,oracle"
+
 # 2. Airflow
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8089/auth/token \
   -H 'Content-Type: application/x-www-form-urlencoded' --data 'username=admin&password=admin')

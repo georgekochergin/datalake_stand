@@ -1,56 +1,64 @@
 """datagen-api — REST API без веб-UI (см. docs/README.md).
 
-Иерархия путей: rel_db -> host -> db -> schema -> tables. На этом этапе
-db/schema зафиксированы как demo/demo в обоих источниках — любое другое
-значение в пути считается ошибкой 404 (не "параметризуемо", см. план).
+Адресация таблиц: /tables/{source}/{schema}/{table}[/{action}].
+Источники и их подключение задаются в config/sources.yaml.
 Единственный интерфейс для ручных вызовов — Swagger UI на /docs.
 """
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException
 
-from . import generators, schema_evolution, schema_state
+from . import generators, schema_evolution, schema_state, sources
 from .generators import GeneratorError
 from .models import AppendRequest, DeleteRequest, EvolveRequest, UpdateRequest
 from .schema_evolution import EvolutionError
 
 app = FastAPI(title="datagen-api", description="Только для тестового стенда — отсутствует в production")
 
-_HOST_BY_ENGINE = {"mssql": "mssql-source", "oracle": "oracle-source"}
-
 
 @app.on_event("startup")
 def _startup() -> None:
-    for source in ("mssql", "oracle"):
+    sources.load_sources()
+    for source in sources.source_names():
         schema_state.init_source(source)
 
 
-def _resolve_source(engine: str, host: str, db: str, schema: str) -> str:
-    if engine not in _HOST_BY_ENGINE:
-        raise HTTPException(404, f"Неизвестный engine '{engine}'")
-    if host != _HOST_BY_ENGINE[engine] or db != "demo" or schema != "demo":
-        raise HTTPException(404, "На этом этапе поддерживается только db=demo, schema=demo")
-    return engine
+def _assert_source(source: str) -> str:
+    if source not in sources.source_names():
+        raise HTTPException(404, f"Неизвестный источник '{source}'")
+    return source
 
 
-@app.get("/rel_db/{engine}/hosts/{host}/dbs/{db}/schemas/{schema}/tables")
-def list_tables(engine: str, host: str, db: str, schema: str):
-    source = _resolve_source(engine, host, db, schema)
+def _resolve(source: str, schema: str) -> str:
+    _assert_source(source)
+    if schema != sources.get_source(source)["schema"]:
+        raise HTTPException(404, f"Неизвестная схема '{schema}' источника '{source}'")
+    return source
+
+
+@app.get("/sources")
+def list_sources():
+    return {"sources": sources.source_names()}
+
+
+@app.get("/tables/{source}")
+def list_tables(source: str):
+    _assert_source(source)
     return {"tables": list(schema_state.get_schema(source).tables.keys())}
 
 
-@app.get("/rel_db/{engine}/hosts/{host}/dbs/{db}/schemas/{schema}/tables/{table}")
-def get_table(engine: str, host: str, db: str, schema: str, table: str):
-    source = _resolve_source(engine, host, db, schema)
+@app.get("/tables/{source}/{schema}/{table}")
+def get_table(source: str, schema: str, table: str):
+    source = _resolve(source, schema)
     tbl = schema_state.get_schema(source).tables.get(table)
     if tbl is None:
         raise HTTPException(404, f"Таблица '{table}' не найдена")
     return tbl.model_dump()
 
 
-@app.post("/rel_db/{engine}/hosts/{host}/dbs/{db}/schemas/{schema}/tables/{table}/append")
-def append_table(engine: str, host: str, db: str, schema: str, table: str, req: AppendRequest):
-    source = _resolve_source(engine, host, db, schema)
+@app.post("/tables/{source}/{schema}/{table}/append")
+def append_table(source: str, schema: str, table: str, req: AppendRequest):
+    source = _resolve(source, schema)
     live_schema = schema_state.get_schema(source)
     if table not in live_schema.tables:
         raise HTTPException(404, f"Таблица '{table}' не найдена")
@@ -58,9 +66,9 @@ def append_table(engine: str, host: str, db: str, schema: str, table: str, req: 
     return {"inserted": inserted}
 
 
-@app.post("/rel_db/{engine}/hosts/{host}/dbs/{db}/schemas/{schema}/tables/{table}/update")
-def update_table(engine: str, host: str, db: str, schema: str, table: str, req: UpdateRequest):
-    source = _resolve_source(engine, host, db, schema)
+@app.post("/tables/{source}/{schema}/{table}/update")
+def update_table(source: str, schema: str, table: str, req: UpdateRequest):
+    source = _resolve(source, schema)
     live_schema = schema_state.get_schema(source)
     if table not in live_schema.tables:
         raise HTTPException(404, f"Таблица '{table}' не найдена")
@@ -68,9 +76,9 @@ def update_table(engine: str, host: str, db: str, schema: str, table: str, req: 
     return {"status": "ok"}
 
 
-@app.post("/rel_db/{engine}/hosts/{host}/dbs/{db}/schemas/{schema}/tables/{table}/delete")
-def delete_table(engine: str, host: str, db: str, schema: str, table: str, req: DeleteRequest):
-    source = _resolve_source(engine, host, db, schema)
+@app.post("/tables/{source}/{schema}/{table}/delete")
+def delete_table(source: str, schema: str, table: str, req: DeleteRequest):
+    source = _resolve(source, schema)
     live_schema = schema_state.get_schema(source)
     if table not in live_schema.tables:
         raise HTTPException(404, f"Таблица '{table}' не найдена")
@@ -81,9 +89,9 @@ def delete_table(engine: str, host: str, db: str, schema: str, table: str, req: 
     return {"status": "ok"}
 
 
-@app.post("/rel_db/{engine}/hosts/{host}/dbs/{db}/schemas/{schema}/tables/{table}/evolve")
-def evolve_table(engine: str, host: str, db: str, schema: str, table: str, req: EvolveRequest):
-    source = _resolve_source(engine, host, db, schema)
+@app.post("/tables/{source}/{schema}/{table}/evolve")
+def evolve_table(source: str, schema: str, table: str, req: EvolveRequest):
+    source = _resolve(source, schema)
     targets = ["mssql", "oracle"] if req.apply_to == "both" else [req.apply_to]
     try:
         for target in targets:

@@ -1,6 +1,7 @@
-"""Подключения к mssql-source / oracle-source.
+"""Подключения к источникам.
 
-Параметры читаются из переменных окружения (заданы в docker-compose.yaml).
+host/port/database берутся из реестра (config/sources.yaml),
+секреты — из переменных окружения.
 """
 from __future__ import annotations
 
@@ -10,15 +11,18 @@ from contextlib import contextmanager
 import oracledb
 import pymssql
 
+from . import sources
+
 
 @contextmanager
 def mssql_connection(database: str | None = None):
+    cfg = sources.get_source("mssql")
     conn = pymssql.connect(
-        server=os.environ.get("MSSQL_HOST", "mssql-source"),
-        port=int(os.environ.get("MSSQL_PORT", "1433")),
+        server=cfg["host"],
+        port=int(cfg["port"]),
         user="sa",
         password=os.environ["MSSQL_SA_PASSWORD"],
-        database=database or "master",
+        database=database or cfg["database"],
         autocommit=False,
     )
     try:
@@ -29,10 +33,11 @@ def mssql_connection(database: str | None = None):
 
 @contextmanager
 def oracle_connection(service_name: str | None = None):
+    cfg = sources.get_source("oracle")
     dsn = oracledb.makedsn(
-        os.environ.get("ORACLE_HOST", "oracle-source"),
-        int(os.environ.get("ORACLE_PORT", "1521")),
-        service_name=service_name or os.environ.get("ORACLE_SERVICE", "FREEPDB1"),
+        cfg["host"],
+        int(cfg["port"]),
+        service_name=service_name or cfg["database"],
     )
     conn = oracledb.connect(
         user=os.environ.get("ORACLE_APP_USER", "demo"),

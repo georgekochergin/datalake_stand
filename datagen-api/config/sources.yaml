@@ -1,0 +1,11 @@
+sources:
+  mssql:
+    host: mssql-source
+    port: 1433
+    database: demo
+    schema: demo
+  oracle:
+    host: oracle-source
+    port: 1521
+    database: demo
+    schema: demo

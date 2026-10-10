@@ -162,6 +162,123 @@ DBeaver подключается к `localhost` — порты опублико�
 - Дополнительных настроек/Oracle Instant Client не требуется (используется
   тонкий JDBC-драйвер).
 
+## Работа со стендом
+
+### Наполнение/изменение данных в источниках — datagen-api
+
+REST-интерфейс: `http://localhost:8090`, Swagger UI — `http://localhost:8090/docs`.
+Все примеры ниже выполняются через Swagger UI.
+
+Источники — реестр `datagen-api/config/sources.yaml`: `mssql`, `oracle`.
+Схема сейчас одна — `demo`; таблицы: `customers`, `products`, `orders`.
+
+| Метод | Путь | Назначение | Тело запроса |
+| --- | --- | --- | --- |
+| GET | `/sources` | список источников | — |
+| GET | `/tables/{source}` | список таблиц источника | — |
+| GET | `/tables/{source}/{schema}/{table}` | схема таблицы | — |
+| POST | `/tables/{source}/{schema}/{table}/append` | вставить N строк | `{"rows": N, "new_key_ratio": r}` |
+| POST | `/tables/{source}/{schema}/{table}/update` | обновить строки | `{"predicate": "...", "set": {...}}` |
+| POST | `/tables/{source}/{schema}/{table}/delete` | удалить строки | `{"predicate": "...", "cascade": bool}` |
+| POST | `/tables/{source}/{schema}/{table}/evolve` | rename/drop колонки | см. ниже |
+
+Как вызвать ручку в Swagger UI:
+1. Откройте `http://localhost:8090/docs`.
+2. Разверните нужную операцию (например `POST /tables/{source}/{schema}/{table}/append`).
+3. Нажмите **Try it out**.
+4. В блоке **Parameters** подставьте path-параметры: `source`=`mssql` (или `oracle`), `schema`=`demo`, `table`=`customers`/`products`/`orders`.
+5. В блоке **Request body** вставьте JSON из примера.
+6. Нажмите **Execute** — внизу появится тело ответа и код статуса.
+
+#### GET /sources — список источников
+Параметров и тела нет. **Execute** → `{"sources":["mssql","oracle"]}`.
+
+#### GET /tables/{source} — список таблиц
+- `source`=`mssql` → `{"tables":["customers","products","orders"]}`;
+- `source`=`oracle` → тот же список.
+
+#### GET /tables/{source}/{schema}/{table} — схема таблицы
+`source`=`mssql`, `schema`=`demo`, `table`=`orders` → JSON с `columns`, `primary_key`, `foreign_keys`.
+
+#### POST .../append — добавить строки
+Тело `{"rows": N, "new_key_ratio": r}`:
+- `rows` — сколько строк вставить (1..100000);
+- `new_key_ratio` — число 0..1, вероятность создания новой родительской записи по FK.
+
+Как работает `new_key_ratio`, когда FK несколько (`orders` ссылается на `customers` и `products`):
+- каждая FK-колонка обрабатывается **независимо**: с вероятностью `r` для неё создаётся новая запись в родительской таблице (рекурсивно), иначе берётся случайная существующая;
+- `r=0` — оба FK всегда ссылаются на существующих клиентов/товары (родители должны быть непусты);
+- `r=1` — каждый новый заказ создаёт и нового `customer`, и новый `product`;
+- `r=0.5` — каждая колонка решает «новый/существующий» независимо, примерно 50/50;
+- если родительская таблица пуста — новая родительская запись создаётся при любом `r` (переиспользовать нечего).
+
+Пример: `source`=`mssql`, `schema`=`demo`, `table`=`orders`, тело `{"rows": 10, "new_key_ratio": 0.0}` — вставит 10 заказов со ссылками на уже существующих клиентов и товары.
+
+#### POST .../update — обновить строки
+Тело `{"predicate": "...", "set": {...}}`:
+- `predicate` — строка SQL-условия **без ключевого слова WHERE**, выбирает строки к обновлению: `customer_id = 1`, `price < 100 AND segment = 'Retail'`;
+- `set` — объект `{колонка: новое_значение}`; можно указать несколько колонок за раз, например `{"segment": "VIP", "name": "Acme"}`;
+- если в `set` попадает FK-колонка, а в родительской таблице нет строки с таким ключом — она создастся автоматически.
+
+`predicate` и `set` — сырые SQL-фрагменты (инструмент внутренний, доверенный).
+
+Примеры:
+- `source`=`mssql`, `schema`=`demo`, `table`=`customers`, тело `{"predicate": "customer_id = 1", "set": {"segment": "VIP"}}`;
+- `source`=`oracle`, `schema`=`demo`, `table`=`products`, тело `{"predicate": "price < 100", "set": {"price": 99.99}}`.
+
+#### POST .../delete — удалить строки
+Тело `{"predicate": "...", "cascade": bool}`:
+- `predicate` — строка SQL-условия **без WHERE**, выбирает строки к удалению: `order_id = 5`;
+- `cascade` — булево. Нужно, когда на таблицу ссылаются другие (на `customers` ссылается `orders`):
+  - `false` — если есть ссылки на удаляемые строки, запрос вернёт `409`;
+  - `true` — сначала удаляются ссылающиеся строки дочерних таблиц, затем целевые.
+
+Примеры:
+- `source`=`mssql`, `schema`=`demo`, `table`=`orders`, `{"predicate": "order_id = 5", "cascade": false}` — удалить один заказ;
+- `source`=`mssql`, `schema`=`demo`, `table`=`customers`, `{"predicate": "customer_id = 1", "cascade": true}` — удалить клиента вместе с его заказами.
+
+#### POST .../evolve — переименовать/удалить колонку
+Тело `{"ddl_operation": "...", "column_name": "...", "new_column_name": "...", "apply_to": "..."}`:
+- `ddl_operation`: `rename_column` | `drop_column`;
+- `apply_to`: `mssql` | `oracle` | `both`;
+- `new_column_name` обязателен только для `rename_column`;
+- `drop_column` запрещён для PK/FK-колонок.
+
+Примеры:
+- `source`=`mssql`, `schema`=`demo`, `table`=`customers`, `{"ddl_operation": "rename_column", "column_name": "segment", "new_column_name": "tier", "apply_to": "both"}`;
+- `source`=`mssql`, `schema`=`demo`, `table`=`products`, `{"ddl_operation": "drop_column", "column_name": "price", "apply_to": "both"}`.
+
+### Обновление ODS-слоя Iceberg
+
+Отдельные DAG-и в Airflow (расписание `schedule=None` — запуск вручную):
+
+- `ods_load_mssql` → `spark/jobs/load_ods_mssql.py`: читает `demo.demo.*` из mssql-source и перезаписывает (AS IS) `iceberg.ods.mssql_customers`, `mssql_orders`, `mssql_products`;
+- `ods_load_oracle` → `spark/jobs/load_ods_oracle.py`: читает `demo.*` из oracle-source и перезаписывает (AS IS) `iceberg.ods.oracle_customers`, `oracle_orders`, `oracle_products`.
+
+Запуск — Airflow UI → DAGs → ▶, либо CLI:
+
+```bash
+docker compose exec -T airflow-scheduler airflow dags trigger ods_load_mssql
+docker compose exec -T airflow-scheduler airflow dags trigger ods_load_oracle
+```
+
+Проверка результата (Trino): `SELECT count(*) FROM iceberg.ods.mssql_orders;`
+
+### Обновление детального (mart) слоя
+
+DAG `build_marts_demo` (вручную, `schedule=None`) — две независимые задачи:
+
+- `mart_via_trino` → `trino/sql/build_mart_trino_demo.sql`: создаёт `iceberg.mart_trino.customer_totals` (`customer_id`, `orders_count`, `total_amount`) из `iceberg.ods.mssql_orders`;
+- `mart_via_spark` → `spark/jobs/build_mart_spark_demo.py`: создаёт `iceberg.mart_spark.customer_totals` (`customer_id`, `orders_count`, `total_amount`) из `iceberg.ods.mssql_orders`.
+
+Запуск:
+
+```bash
+docker compose exec -T airflow-scheduler airflow dags trigger build_marts_demo
+```
+
+Результат — таблицы `iceberg.mart_trino.customer_totals` и `iceberg.mart_spark.customer_totals` (читаются из Trino).
+
 ## Учётные данные
 
 Тестовый стенд — везде, где логин/пароль настраиваемы, используется
