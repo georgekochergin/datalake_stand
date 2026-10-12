@@ -44,8 +44,8 @@ flowchart TB
     TRINO["trino\ntrinodb/trino:479"]
 
     subgraph Orchestration["Airflow 3.3.2-python3.11 (LocalExecutor)"]
-        D1["DAG demo/ods_load_mssql_demo\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (заглушка, метод валидации — TBD)"]
-        D2["DAG demo/ods_load_oracle_demo\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (заглушка, метод валидации — TBD)"]
+        D1["DAG demo/ods_load_mssql\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (заглушка, метод валидации — TBD)"]
+        D2["DAG demo/ods_load_oracle\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (заглушка, метод валидации — TBD)"]
         D3["DAG demo/build_marts_demo\nschedule=None (вручную)\nзадача A: PythonOperator+TrinoHook / задача B: SparkSubmitOperator"]
     end
 
@@ -196,16 +196,16 @@ REST-интерфейс: `http://localhost:8090`, интерактивная д�
 
 Отдельные DAG-и в Airflow (расписание `schedule=None` — запуск вручную):
 
-- `ods_load_mssql_demo` → `spark/jobs/load_ods_mssql.py`: читает `demo.*` из mssql-source и перезаписывает (AS IS) `iceberg.ods.mssql_customers`, `mssql_orders`, `mssql_products`;
-- `ods_load_oracle_demo` → `spark/jobs/load_ods_oracle.py`: читает `demo.*` из oracle-source и перезаписывает (AS IS) `iceberg.ods.oracle_customers`, `oracle_orders`, `oracle_products`.
+- `ods_load_mssql` → `spark/jobs/load_ods_mssql.py`: читает `demo.*` из mssql-source и перезаписывает (AS IS) `iceberg.ods.mssql_customers`, `mssql_orders`, `mssql_products`;
+- `ods_load_oracle` → `spark/jobs/load_ods_oracle.py`: читает `demo.*` из oracle-source и перезаписывает (AS IS) `iceberg.ods.oracle_customers`, `oracle_orders`, `oracle_products`.
 
 Демо-DAG-и изолированы в подкаталоге `airflow/dags/demo/` и создаются в выключенном состоянии (`is_paused_upon_creation=True`). Запуск — Airflow UI → DAGs → unpause & ▶, либо CLI:
 
 ```bash
-docker compose exec -T airflow-scheduler airflow dags unpause ods_load_mssql_demo
-docker compose exec -T airflow-scheduler airflow dags trigger ods_load_mssql_demo
-docker compose exec -T airflow-scheduler airflow dags unpause ods_load_oracle_demo
-docker compose exec -T airflow-scheduler airflow dags trigger ods_load_oracle_demo
+docker compose exec -T airflow-scheduler airflow dags unpause ods_load_mssql
+docker compose exec -T airflow-scheduler airflow dags trigger ods_load_mssql
+docker compose exec -T airflow-scheduler airflow dags unpause ods_load_oracle
+docker compose exec -T airflow-scheduler airflow dags trigger ods_load_oracle
 ```
 
 Проверка результата (Trino): `SELECT count(*) FROM iceberg.ods.mssql_orders;`
@@ -244,7 +244,7 @@ docker compose exec -T airflow-scheduler airflow dags trigger build_marts_demo
    - получает метаданные таблиц через API sydafa (`GET /sources/{source}`);
    - очищает таблицы источников (`truncate`) через единый `POST /sources/{source}/exec`;
    - наполняет таблицы `customers`, `products`, `orders` через единый `POST /sources/{source}/exec` (`append`);
-   - активирует (unpause) и запускает демо-DAG-и `ods_load_mssql_demo`, `ods_load_oracle_demo`, сверяя выгрузку в `iceberg.ods.*` через Trino;
+   - активирует (unpause) и запускает демо-DAG-и `ods_load_mssql`, `ods_load_oracle`, сверяя выгрузку в `iceberg.ods.*` через Trino;
    - активирует и запускает витринный DAG `build_marts_demo`, проверяя витрины `iceberg.mart_trino.customer_totals` и `iceberg.mart_spark.customer_totals`;
    - печатает сводку `PASS=n FAIL=m`;
 4. `docker compose down -v --remove-orphans` — в любом исходе гасит сборку: удаляет контейнеры, сети и volume-ы (`pg_catalog_data`, `airflow_pg_data`, `silo_data`, `sydafa_state`).

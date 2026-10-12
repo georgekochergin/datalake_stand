@@ -310,7 +310,7 @@ def main():
 
     # 5. ODS DAGs: unpause -> trigger -> wait -> Iceberg asserts
     for src in sources:
-        dag_id = "ods_load_%s_demo" % src
+        dag_id = "ods_load_%s" % src
         run_id = "full-flow-ods-" + src
         code, _ = airflow_trigger_retry(token, dag_id, run_id)
         check("trigger %s" % dag_id, code, 200)

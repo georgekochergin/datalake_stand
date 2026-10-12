@@ -1,6 +1,6 @@
-"""Автоматически сгенерированный демо-DAG ods_load_oracle_demo.
-Сгенерирован сервисом sydafa на основе метаданных схемы источника 'oracle', схема 'demo'.
-По умолчанию DAG выключен (is_paused_upon_creation=True).
+"""ods_load_mssql: AS IS загрузка mssql-source -> Iceberg ods.mssql_*.
+Демонстрационный DAG уровня источника MSSQL.
+По умолчанию выключен (is_paused_upon_creation=True).
 """
 from airflow import DAG
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
@@ -12,15 +12,15 @@ def _validate_load_placeholder(**_) -> None:
 
 
 with DAG(
-    dag_id="ods_load_oracle_demo",
+    dag_id="ods_load_mssql",
     schedule=None,
     catchup=False,
     is_paused_upon_creation=True,
-    tags=["ods", "oracle", "demo", "demo"],
+    tags=["ods", "mssql", "demo"],
 ) as dag:
     extract_load = SparkSubmitOperator(
         task_id="extract_load",
-        application="/opt/spark-jobs/load_ods_oracle.py",
+        application="/opt/spark-jobs/load_ods_mssql.py",
         conn_id="spark_default",
         deploy_mode="client",
     )

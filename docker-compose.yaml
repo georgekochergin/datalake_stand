@@ -161,7 +161,7 @@ services:
     build: {context: ., dockerfile: airflow/Dockerfile}
     image: dlh-poc-airflow:latest
     entrypoint: ["/bin/bash", "-c"]
-    command: ["python3 /opt/airflow/sync_dags.py; airflow db migrate"]
+    command: ["airflow db migrate"]
     environment: &airflow-env
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_PG_USER}:${AIRFLOW_PG_PASSWORD}@airflow-postgres:5432/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
@@ -174,12 +174,8 @@ services:
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
       ORACLE_APP_PASSWORD: ${ORACLE_APP_PASSWORD}
       SYDAFA_URL: http://sydafa:8000
-    depends_on:
-      airflow-postgres: {condition: service_healthy}
-      sydafa: {condition: service_healthy}
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/sync_dags.py:/opt/airflow/sync_dags.py:ro
+    depends_on: {airflow-postgres: {condition: service_healthy}}
+    volumes: ["./airflow/dags:/opt/airflow/dags"]
     networks: [dlh-poc]
 
   airflow-scheduler:

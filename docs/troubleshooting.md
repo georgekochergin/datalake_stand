@@ -11,7 +11,7 @@ Airflow 3.3.2 убрал/переименовал часть API из Airflow 2.
 Проверка парсинга: `docker compose exec airflow-scheduler airflow dags list`
 (должен вернуть список, а не «No data found»).
 
-## DAG `ods_load_oracle_demo` падает с ошибкой подключения
+## DAG `ods_load_oracle` падает с ошибкой подключения
 
 Сервис Oracle в стенде — `demo` (`ORACLE_DATABASE: demo`), а не `FREEPDB1`.
 Драйвер Spark читает `ORACLE_SERVICE` из окружения воркера; если не задан —
