@@ -26,23 +26,20 @@ Airflow 3.3.2 убрал/переименовал часть API из Airflow 2.
   статус: `GET /api/v2/dags/{dag_id}/dagRuns/{dag_run_id}` → поле `state`
   (`queued`/`running`/`success`/`failed`).
 
-## datagen-api `update`/`delete` возвращают 422 или 409
+## sydafa `update`/`delete` возвращают 422 или 409
 
 - `422` — ошибка валидации формализованного `predicate`/`set`: либо имя колонки
-  не входит в схему таблицы (allow-list в `datagen-api/app/generators.py`),
+  не входит в схему таблицы (allow-list в `sydafa/app/generators.py`),
   либо `operator` вне набора `= != < <= > >=`, либо `predicate`/`set` пусты.
   Это защита от SQL-инъекции — произвольные SQL-фрагменты больше не принимаются.
 - `409` — каскадная блокировка `delete`: на удаляемые строки ссылаются дочерние
   таблицы, а `cascade` не `true`.
 
-## datagen-api падает при старте (exit 3)
+## sydafa `POST /sources/{source}/schema/evolve` возвращает 422
 
-- `CREATE DATABASE statement not allowed within multi-statement transaction` —
-  pymssql оборачивает DDL в транзакцию; нужен `conn.autocommit(True)`
-  (см. `datagen-api/app/provisioning.py`).
-- `Foreign key ... references invalid table ...` — FK-ссылки в
-  `datagen-api/app/render_ddl.py` были без квалификатора схемы; должно быть
-  `REFERENCES {qualify(fk.ref_table)}`.
+- Ошибка валидации структуры операций, неизвестные типы колонок, недопустимые символы
+  (пробелы) в именах идентификаторов, либо нарушение ссылочной целостности FK.
+- При возникновении ошибки транзакция СУБД откатывается целиком (All-or-Nothing).
 
 ## Airflow :8089 не пускает admin/admin
 

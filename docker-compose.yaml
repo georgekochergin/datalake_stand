@@ -7,60 +7,28 @@ volumes:
   pg_catalog_data:
   airflow_pg_data:
   silo_data:
-  datagen_state:
+  sydafa_state:
 
 services:
 
-  # ---------- Источники (эмуляция систем-доноров 1С) ----------
+  # ---------- Сервис sydafa (эмулятор и оркестратор СУБД-источников) ----------
 
-  mssql-source:
-    image: mcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04 # закреплённый CU (== 2022-latest на 2026-10-09)
-    platform: linux/amd64
-    environment:
-      ACCEPT_EULA: "Y"
-      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
-      MSSQL_PID: Developer
-    ports: ["1433:1433"]
-    networks: [dlh-poc]
-    healthcheck:
-      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
-
-  oracle-source:
-    image: gvenzl/oracle-free:23-slim-faststart
-    environment:
-      ORACLE_PASSWORD: ${ORACLE_PASSWORD}
-      ORACLE_DATABASE: demo
-      APP_USER: demo
-      APP_USER_PASSWORD: ${ORACLE_APP_PASSWORD}
-    ports: ["1521:1521"]
-    networks: [dlh-poc]
-    healthcheck:
-      test: ["CMD", "healthcheck.sh"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
-
-  # ---------- ТОЛЬКО ДЛЯ ТЕСТОВОГО СТЕНДА — отсутствует в production ----------
-
-  datagen-api:
-    build: ./datagen-api
+  sydafa:
+    build: ./sydafa
     environment:
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
-      ORACLE_APP_USER: demo
-      ORACLE_APP_PASSWORD: ${ORACLE_APP_PASSWORD}
     volumes:
-      - ./schema/sources:/app/schema/sources:ro
-      - ./datagen-api/config/sources.yaml:/app/config/sources.yaml:ro
-      - datagen_state:/state
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./sydafa/config/sources:/app/config/sources:ro
+      - ./docker:/docker:ro
+      - sydafa_state:/state
     ports: ["8090:8000"]
-    depends_on:
-      mssql-source: {condition: service_healthy}
-      oracle-source: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').getcode() == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
     networks: [dlh-poc]
 
   # ---------- Каталог метаданных ----------
@@ -140,8 +108,12 @@ services:
     environment:
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
       ORACLE_APP_PASSWORD: ${ORACLE_APP_PASSWORD}
-      ORACLE_SERVICE: demo
-    depends_on: {nessie: {condition: service_started}, silo-init: {condition: service_completed_successfully}}
+      ORACLE_SERVICE: sydafa
+      SYDAFA_URL: http://sydafa:8000
+    depends_on:
+      nessie: {condition: service_started}
+      silo-init: {condition: service_completed_successfully}
+      sydafa: {condition: service_healthy}
     networks: [dlh-poc]
 
   spark-worker:
@@ -151,7 +123,8 @@ services:
     environment:
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
       ORACLE_APP_PASSWORD: ${ORACLE_APP_PASSWORD}
-      ORACLE_SERVICE: demo
+      ORACLE_SERVICE: sydafa
+      SYDAFA_URL: http://sydafa:8000
     ports: ["8081:8081"]
     depends_on: [spark-master]
     networks: [dlh-poc]
@@ -202,6 +175,7 @@ services:
       AIRFLOW__API_AUTH__JWT_SECRET: "datalake-stand-test-jwt-secret-0123456789abcdef"
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
       ORACLE_APP_PASSWORD: ${ORACLE_APP_PASSWORD}
+      SYDAFA_URL: http://sydafa:8000
     depends_on: {airflow-postgres: {condition: service_healthy}}
     volumes: ["./airflow/dags:/opt/airflow/dags"]
     networks: [dlh-poc]
@@ -253,11 +227,10 @@ services:
       AIRFLOW_UI_USER: ${AIRFLOW_UI_USER}
       AIRFLOW_UI_PASSWORD: ${AIRFLOW_UI_PASSWORD}
     depends_on:
-      mssql-source: {condition: service_healthy}
-      oracle-source: {condition: service_healthy}
-      datagen-api: {condition: service_started}
+      sydafa: {condition: service_healthy}
       nessie: {condition: service_started}
       trino: {condition: service_started}
       airflow-webserver: {condition: service_started}
       spark-master: {condition: service_started}
+      spark-worker: {condition: service_started}
     networks: [dlh-poc]
