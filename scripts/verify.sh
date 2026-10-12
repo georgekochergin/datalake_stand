@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Проверка сборки datalake_stand.
-# Запуск: bash .agents/skills/datalake-stand-verify/scripts/verify.sh
+# Запуск: bash scripts/verify.sh
 # (можно из любого каталога — скрипт сам поднимется к корню репозитория).
 set -u
 
-# scripts/ -> datalake-stand-verify/ -> skills/ -> .agents/ -> корень репозитория
-cd "$(dirname "$0")/../../.." || exit 1
+cd "$(dirname "$0")/.." || exit 1
 
 PASS=0
 FAIL=0
