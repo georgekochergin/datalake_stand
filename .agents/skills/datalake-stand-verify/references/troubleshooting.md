@@ -65,10 +65,10 @@ Airflow 3.3.2 убрал/переименовал часть API из Airflow 2.
 
 - MinIO требует `MINIO_ROOT_PASSWORD` ≥ 8 символов → `admin123`, не `admin`.
 
-## MSSQL `Cannot open database "demo"`
+## MSSQL `Cannot open database "sydafa"`
 
-- БД `demo` и логин `admin`/`admin` создаёт `datagen-api` при первом старте.
-  Если datagen-api падал — БД/логина нет.
+- БД `sydafa`, суперпользователя `sydafa`/`sydafa` и читателя `reader`/`reader` создаёт `sydafa` при старте.
+  Если сервис sydafa не готов (healthcheck 503) — БД/логины ещё не созданы.
 
 ## MSSQL: закреплённый образ
 

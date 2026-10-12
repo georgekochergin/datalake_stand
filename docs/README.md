@@ -10,19 +10,19 @@
 flowchart TB
     ANALYST["Аналитик\n(Trino CLI / BI-инструмент)"]
 
-    subgraph Sources["Источники данных (эмуляция систем-доноров 1С)"]
-        MSSQL[("mssql-source\nmcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04\nDB demo / schema demo")]
-        ORA[("oracle-source\ngvenzl/oracle-free:23-slim-faststart\nPDB demo / user(схема) demo")]
+    subgraph Sources["Источники данных (оркестрируются sydafa)"]
+        MSSQL[("mssql-source\nmcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04\nDB: sydafa\nuser: reader (только чтение)")]
+        ORA[("oracle-source\ngvenzl/oracle-free:23-slim-faststart\nPDB: sydafa\nuser: reader (только чтение)")]
     end
 
-    subgraph DataGen["ТОЛЬКО ДЛЯ ТЕСТОВОГО СТЕНДА — отсутствует в production"]
+    subgraph SydafaService["Эмулятор источников (подключаемый модуль sydafa)"]
         direction TB
-        Y1[("schema/sources/mssql.yaml")]
-        Y2[("schema/sources/oracle.yaml")]
-        API["datagen-api (FastAPI, без UI)\nappend / update / delete / evolve(rename|drop) + Swagger /docs"]
-        STATE[("datagen_state volume:\nlive_schema + schema_evolution_log + schema_hash")]
-        Y1 -. "bind-mount read-only" .-> API
-        Y2 -. "bind-mount read-only" .-> API
+        CFG1[("config/sydafa/sources/mssql.yaml")]
+        CFG2[("config/sydafa/sources/oracle.yaml")]
+        API["sydafa:latest (FastAPI, Swagger /docs :8090)\nТранзакционная эволюция схем (API-first)\nСинтетическая генерация (append / update / delete)"]
+        STATE[("sydafa_state volume:\nlive-схема и состояние")]
+        CFG1 -. "bind-mount ro" .-> API
+        CFG2 -. "bind-mount ro" .-> API
         API --- STATE
     end
 
@@ -48,15 +48,15 @@ flowchart TB
         D3["DAG build_marts_demo\nschedule=None (вручную)\nзадача A: PythonOperator+TrinoHook / задача B: SparkSubmitOperator"]
     end
 
-    API -- "APPEND/UPDATE/DELETE\n(рекурсивный FK-aware каскад)" --> MSSQL
-    API -- "evolve: rename_column | drop_column" --> MSSQL
-    API -- "APPEND/UPDATE/DELETE" --> ORA
-    API -- "evolve: rename_column | drop_column" --> ORA
+    API -- "Docker SDK: запуск и bootstrap" --> MSSQL
+    API -- "Docker SDK: запуск и bootstrap" --> ORA
+    API -- "Транзакционный DDL (schema/evolve)\nDML (append/update/delete)" --> MSSQL
+    API -- "Транзакционный DDL (schema/evolve)\nDML (append/update/delete)" --> ORA
 
     D1 --> SM
     D2 --> SM
-    MSSQL -- "JDBC read" --> SW
-    ORA -- "JDBC read" --> SW
+    MSSQL -- "JDBC read (user: reader)" --> SW
+    ORA -- "JDBC read (user: reader)" --> SW
     SW -- "write ods.mssql_*, ods.oracle_* AS IS" --> SILO
     SM -. "catalog ops" .-> NESSIE
 
@@ -68,7 +68,7 @@ flowchart TB
 
     ANALYST --> TRINO
 
-    style DataGen stroke-dasharray: 6 4,stroke:#888,fill:#f5f5f5,color:#555
+    style SydafaService stroke-dasharray: 6 4,stroke:#888,fill:#f5f5f5,color:#555
 ```
 
 ## Состав стенда
@@ -88,10 +88,10 @@ flowchart TB
 
 <br />
 
-**Контур B (только тестовый стенд, нет в production):** `datagen-api` —
-REST API для наполнения источников синтетическими данными и ограниченной
-эволюции их схемы (`rename_column`/`drop_column`). Схема источников
-зафиксирована в `schema/sources/mssql.yaml` / `schema/sources/oracle.yaml`.
+**Контур B (эмуляция источников данных, подключаемый компонент):** `sydafa` —
+автономный сервис (Docker-образ `sydafa:latest`), оркестрирующий контейнеры СУБД,
+предоставляющий REST API для транзакционной эволюции схем и FK-aware генерации синтетических данных.
+Конфигурация источников стенда: `config/sydafa/sources/mssql.yaml` / `oracle.yaml`.
 
 ## Быстрый старт
 
@@ -105,7 +105,7 @@ docker compose up -d --build
 | ---------------------------- | ------------- |
 | mssql-source                 | 1433          |
 | oracle-source                | 1521          |
-| datagen-api                  | 8090          |
+| sydafa (Swagger UI :8090)    | 8090          |
 | nessie                       | 19120         |
 | silo (S3 API / консоль)      | 9000 / 9001   |
 | spark-master UI              | 8080          |
@@ -237,13 +237,13 @@ docker compose exec -T airflow-scheduler airflow dags trigger build_marts_demo
 1. `docker compose down -v --remove-orphans` — чистит прежние контейнеры и volume-ы (прежние данные не влияют на запуск);
 2. `docker compose up -d --build` — собирает и поднимает весь стек;
 3. `docker compose run --rm test-runner` — в отдельном контейнере прогоняет тест:
-   - проверяет готовность Nessie / datagen-api / Trino / Airflow / Spark;
+   - проверяет готовность Nessie / sydafa / Trino / Airflow / Spark;
    - наполняет таблицы `customers`, `products`, `orders` в `mssql` и `oracle`, обновляет и удаляет часть строк;
    - corner-case: удаление FK-родителя без `cascade` (409), `drop_column` PK/FK (422), неизвестная колонка/оператор и SQL-инъекция (422);
    - запускает DAG-и `ods_load_mssql`, `ods_load_oracle` и сверяет таблицы `iceberg.ods.*` через Trino;
    - запускает DAG `build_marts_demo` и проверяет витрины `iceberg.mart_trino.customer_totals` и `iceberg.mart_spark.customer_totals`;
    - печатает сводку `PASS=n FAIL=m`;
-4. `docker compose down -v --remove-orphans` — в любом исходе гасит сборку: удаляет контейнеры, сети и volume-ы (`pg_catalog_data`, `airflow_pg_data`, `silo_data`, `datagen_state`).
+4. `docker compose down -v --remove-orphans` — в любом исходе гасит сборку: удаляет контейнеры, сети и volume-ы (`pg_catalog_data`, `airflow_pg_data`, `silo_data`, `sydafa_state`).
 
 Результат: финальная строка `PASS=… FAIL=…`; exit-code 0 — всё прошло, при
 FAIL — смотреть `.agents/skills/datalake-stand-verify/references/troubleshooting.md`.
