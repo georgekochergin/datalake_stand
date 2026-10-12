@@ -1,6 +1,6 @@
 ---
 name: datalake-stand-verify
-description: Проверяет полную работоспособность docker-compose стенда datalake_stand. Быстрая проверка компонентов — scripts/verify.sh; полный сквозной тест — scripts/full-test.sh (datagen CRUD + corner-case + DAG-и ODS и витрин, в конце гасит сборку с очисткой volume-ов).
+description: Проверяет полную работоспособность docker-compose стенда datalake_stand. Быстрая проверка компонентов — scripts/verify.sh; полный сквозной тест — scripts/full-test.sh (sydafa CRUD + corner-case + DAG-и ODS и витрин, в конце гасит сборку с очисткой volume-ов).
 ---
 
 # Проверка сборки datalake_stand
