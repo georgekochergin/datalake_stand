@@ -122,7 +122,7 @@ docker compose up -d --build
 | Spark Master UI | http://localhost:8080 | без авторизации |
 | Spark Worker UI | http://localhost:8081 | без авторизации |
 | SILO (консоль, MinIO-совместимая) | http://localhost:9001 | `admin` / `admin123` (`SILO_ROOT_USER`/`SILO_ROOT_PASSWORD`) |
-| datagen-api (Swagger UI) | http://localhost:8090/docs | без авторизации (см. `## Учётные данные` про сам инструмент) |
+| sydafa (Swagger UI) | http://localhost:8090/docs | без авторизации (эмулятор источников СУБД) |
 | Airflow | http://localhost:8089 | `admin` / `admin` (`AIRFLOW_UI_USER`/`AIRFLOW_UI_PASSWORD`) |
 
 ### Подключение из DBeaver (на машине, где запущен docker)
@@ -142,122 +142,113 @@ DBeaver подключается к `localhost` — порты опублико�
 
 **mssql-source** — драйвер «SQL Server» (Microsoft):
 - Host: `localhost`, Port: `1433`
-- Database: `demo`
+- Database: `sydafa`
 - Authentication: SQL Server Authentication
-- Username: `admin`, Password: `admin`
-  (прикладной логин `admin`/`admin` с правами sysadmin создаёт `datagen-api`
-  при старте; системный bootstrap-логин `sa` использует сильный пароль
-  `MSSQL_SA_PASSWORD` из `.env`)
-- На вкладке Driver properties (или прямо в URL) нужно отключить шифрование/проверку
-  сертификата, иначе DBeaver откажется подключаться к самоподписанному сертификату
-  контейнера: `encrypt=false;trustServerCertificate=true`.
+- Username: `reader`, Password: `reader` (только чтение; для полного доступа — `sydafa` / `sydafa`)
+- На вкладке Driver properties (или прямо в URL): `encrypt=false;trustServerCertificate=true`.
 
 **oracle-source** — драйвер «Oracle»:
 - Host: `localhost`, Port: `1521`
-- Connection type: Service Name, значение `demo`
-  (это pluggable database `demo`, созданная переменной `ORACLE_DATABASE=demo`,
-  а не стандартный `FREEPDB1`)
-- Username: `demo`, Password: значение `ORACLE_APP_PASSWORD` из `.env`
-  (по умолчанию `admin`)
-- Дополнительных настроек/Oracle Instant Client не требуется (используется
-  тонкий JDBC-драйвер).
+- Connection type: Service Name, значение `sydafa`
+- Username: `reader`, Password: `reader` (только чтение; для полного доступа — `sydafa` / `sydafa`)
 
 ## Работа со стендом
 
-### Наполнение/изменение данных в источниках — datagen-api
+### Управление источниками и данными — sydafa
 
 REST-интерфейс: `http://localhost:8090`, Swagger UI — `http://localhost:8090/docs`.
-Все примеры ниже выполняются через Swagger UI.
+Сервис `sydafa` эмулирует источники данных: запускает контейнеры СУБД, создаёт рабочую базу `sydafa`, пользователя `reader/reader` и предоставляет API для управления схемами и генерацией данных.
 
-Источники — реестр `datagen-api/config/sources.yaml`: `mssql`, `oracle`.
-Схема сейчас одна — `demo`; таблицы: `customers`, `products`, `orders`.
+Таблицы и схемы данных **не хранятся на хосте в виде файлов**. Создание схем, таблиц и миграции выполняются через транзакционный эндпоинт `POST /sources/{source}/schema/evolve`.
 
 | Метод | Путь | Назначение | Тело запроса |
 | --- | --- | --- | --- |
+| GET | `/health` | статус готовности сервиса | — |
 | GET | `/sources` | список источников | — |
-| GET | `/tables/{source}` | список таблиц источника | — |
+| GET | `/sources/{source}` | реквизиты, параметры reader и список таблиц | — |
+| GET | `/sources/{source}/schema` | текущая live-схема источника (JSON) | — |
 | GET | `/tables/{source}/{schema}/{table}` | схема таблицы | — |
-| POST | `/tables/{source}/{schema}/{table}/append` | вставить N строк | `{"rows": N, "new_key_ratio": r}` |
-| POST | `/tables/{source}/{schema}/{table}/update` | обновить строки | `{"predicate": [{"column","operator","value"}, ...], "set": {...}}` |
-| POST | `/tables/{source}/{schema}/{table}/delete` | удалить строки | `{"predicate": [{"column","operator","value"}, ...], "cascade": bool}` |
-| POST | `/tables/{source}/{schema}/{table}/evolve` | rename/drop колонки | см. ниже |
+| POST | `/sources/{source}/schema/evolve` | транзакционная эволюция (All-or-Nothing) | `{"operations": [...]}` |
+| POST | `/tables/{source}/{schema}/{table}/append` | вставить N строк (FK-каскад) | `{"rows": N, "new_key_ratio": r}` |
+| POST | `/tables/{source}/{schema}/{table}/update` | обновить строки по предикату | `{"predicate": [...], "set": {...}}` |
+| POST | `/tables/{source}/{schema}/{table}/delete` | удалить строки по предикату | `{"predicate": [...], "cascade": bool}` |
 
-Как вызвать ручку в Swagger UI:
-1. Откройте `http://localhost:8090/docs`.
-2. Разверните нужную операцию (например `POST /tables/{source}/{schema}/{table}/append`).
-3. Нажмите **Try it out**.
-4. В блоке **Parameters** подставьте path-параметры: `source`=`mssql` (или `oracle`), `schema`=`demo`, `table`=`customers`/`products`/`orders`.
-5. В блоке **Request body** вставьте JSON из примера.
-6. Нажмите **Execute** — внизу появится тело ответа и код статуса.
+---
 
-#### GET /sources — список источников
-Параметров и тела нет. **Execute** → `{"sources":["mssql","oracle"]}`.
+### Спецификация API эволюции схемы (POST /sources/{source}/schema/evolve)
 
-#### GET /tables/{source} — список таблиц
-- `source`=`mssql` → `{"tables":["customers","products","orders"]}`;
-- `source`=`oracle` → тот же список.
+Эндпоинт принимает JSON-документ со списком упорядоченных операций. Все операции выполняются строго по очереди в рамках **одной транзакции СУБД**. При ошибке на любом шаге выполняется полный `ROLLBACK` (All-or-Nothing) и возвращается HTTP 422.
 
-#### GET /tables/{source}/{schema}/{table} — схема таблицы
-`source`=`mssql`, `schema`=`demo`, `table`=`orders` → JSON с `columns`, `primary_key`, `foreign_keys`.
+#### Доступные операции (`op`):
+1. **`create_schema`**: создание схемы (MSSQL schema / Oracle user).
+   `{"op": "create_schema", "name": "demo"}`
+2. **`create_table`**: создание таблицы со спецификацией колонок, PK и FK.
+   ```json
+   {
+     "op": "create_table",
+     "schema": "demo",
+     "name": "customers",
+     "primary_key": ["customer_id"],
+     "columns": [
+       {"name": "customer_id", "type": "bigint", "generator": {"kind": "sequence"}},
+       {"name": "name", "type": "string", "generator": {"kind": "faker", "provider": "company"}},
+       {"name": "segment", "type": "string", "generator": {"kind": "choice", "values": ["Retail", "Corporate", "VIP"]}}
+     ],
+     "foreign_keys": []
+   }
+   ```
+3. **`rename_table`**: переименование таблицы.
+   `{"op": "rename_table", "schema": "demo", "from_name": "customers", "to_name": "clients"}`
+4. **`drop_table`**: удаление таблицы.
+   `{"op": "drop_table", "schema": "demo", "name": "customers"}`
+5. **`add_column`**: добавление колонки в таблицу.
+   `{"op": "add_column", "schema": "demo", "table": "customers", "column": {"name": "discount", "type": "decimal(5,2)"}}`
+6. **`rename_column`**: переименование колонки.
+   `{"op": "rename_column", "schema": "demo", "table": "customers", "from_name": "discount", "to_name": "special_discount"}`
+7. **`drop_column`**: удаление колонки.
+   `{"op": "drop_column", "schema": "demo", "table": "customers", "name": "discount"}`
+8. **`transfer_table`**: перенос таблицы между схемами.
+   `{"op": "transfer_table", "table": "clients", "from_schema": "demo", "to_schema": "core"}`
+9. **`rename_schema`**: переименование схемы с переносом её таблиц.
+   `{"op": "rename_schema", "from_name": "demo", "to_name": "core"}`
+10. **`drop_schema`**: удаление пустой схемы.
+    `{"op": "drop_schema", "name": "core"}`
+
+---
+
+### Семантика объявления колонок и генераторов данных (`generator`)
+
+Каждая колонка таблицы описывается объектом:
+- `name`: имя колонки (латиница, цифры, подчёркивание);
+- `type`: логический тип данных (`bigint`, `string`, `date`, `timestamp`, `decimal(p,s)`);
+- `generator`: конфигурация генератора синтетических данных (объект с полем `kind`):
+  - **`sequence`** (`{"kind": "sequence"}`): автоинкрементный числовой генератор для первичных ключей (`MAX(pk) + 1`).
+  - **`faker`** (`{"kind": "faker", "provider": "company"}`): вызов провайдера библиотеки Faker. Поддерживаются: `company`, `name`, `word`, `address`, `email`.
+  - **`choice`** (`{"kind": "choice", "values": ["Retail", "VIP"]}`): выбор случайного значения из списка `values`.
+  - **`random_decimal`** (`{"kind": "random_decimal", "min": 1, "max": 1000}`): случайное число с 2 знаками после запятой.
+  - **`random_date`** (`{"kind": "random_date"}`): случайная дата за последние 365 дней.
+  - **`null`** (`null`): для колонок внешних ключей (FK), заполняемых автоматически из родительской таблицы при генерации.
+
+---
+
+### Манипуляция данными (DML API)
 
 #### POST .../append — добавить строки
 Тело `{"rows": N, "new_key_ratio": r}`:
-- `rows` — сколько строк вставить (1..100000);
-- `new_key_ratio` — число 0..1, вероятность создания новой родительской записи по FK.
+- `rows`: количество строк (1..100000);
+- `new_key_ratio`: вероятность (0..1) создания новой родительской строки по внешнему ключу (FK). При 0 переиспользуются существующие ключи.
 
-Как работает `new_key_ratio`, когда FK несколько (`orders` ссылается на `customers` и `products`):
-- каждая FK-колонка обрабатывается **независимо**: с вероятностью `r` для неё создаётся новая запись в родительской таблице (рекурсивно), иначе берётся случайная существующая;
-- `r=0` — оба FK всегда ссылаются на существующих клиентов/товары (родители должны быть непусты);
-- `r=1` — каждый новый заказ создаёт и нового `customer`, и новый `product`;
-- `r=0.5` — каждая колонка решает «новый/существующий» независимо, примерно 50/50;
-- если родительская таблица пуста — новая родительская запись создаётся при любом `r` (переиспользовать нечего).
+#### POST .../update — обновить строки по предикату
+Тело `{"predicate": [{"column": "...", "operator": "...", "value": ...}], "set": {"col": "val"}}`:
+- Операторы предиката: `=`, `!=`, `<`, `<=`, `>`, `>=`.
+- Все условия объединяются через `AND` с безопасной bind-параметризацией.
+- Ответ: `{"updated": N}`.
 
-Пример: `source`=`mssql`, `schema`=`demo`, `table`=`orders`, тело `{"rows": 10, "new_key_ratio": 0.0}` — вставит 10 заказов со ссылками на уже существующих клиентов и товары.
-
-#### POST .../update — обновить строки
-Тело `{"predicate": [...], "set": {...}}`:
-- `predicate` — список условий, объединяемых через `AND`. Каждое условие — объект
-  `{"column": "...", "operator": "...", "value": ...}`:
-  - `column` — существующая колонка таблицы (иначе `422`);
-  - `operator` — один из `=`, `!=`, `<`, `<=`, `>`, `>=`;
-  - `value` — значение сравнения; подставляется как параметр запроса, а не как SQL-текст.
-- `set` — объект `{колонка: новое_значение}`; ключи должны быть колонками таблицы,
-  значения тоже параметризуются. Можно указать несколько колонок: `{"segment": "VIP", "name": "Acme"}`.
-- если в `set` попадает FK-колонка, а в родительской таблице нет строки с таким ключом —
-  она создастся автоматически.
-
-Произвольные SQL-фрагменты не принимаются: имена колонок проверяются по схеме таблицы
-(allow-list), значения — bind-параметры, поэтому SQL-инъекция невозможна.
-
-Примеры:
-- `source`=`mssql`, `schema`=`demo`, `table`=`customers`,
-  `{"predicate": [{"column": "customer_id", "operator": "=", "value": 1}], "set": {"segment": "VIP"}}`;
-- `source`=`oracle`, `schema`=`demo`, `table`=`products`,
-  `{"predicate": [{"column": "price", "operator": "<", "value": 100}], "set": {"price": 99.99}}`.
-
-#### POST .../delete — удалить строки
-Тело `{"predicate": [...], "cascade": bool}`:
-- `predicate` — список условий (как в `update`), объединяемых через `AND`:
-  `column` — колонка таблицы, `operator` ∈ `= != < <= > >=`, `value` — параметр;
-- `cascade` — булево. Нужно, когда на таблицу ссылаются другие (на `customers` ссылается `orders`):
-  - `false` — если на удаляемые строки есть ссылки, запрос вернёт `409`;
-  - `true` — сначала удаляются ссылающиеся строки дочерних таблиц, затем целевые.
-
-Примеры:
-- `source`=`mssql`, `schema`=`demo`, `table`=`orders`,
-  `{"predicate": [{"column": "order_id", "operator": "=", "value": 5}], "cascade": false}` — удалить один заказ;
-- `source`=`mssql`, `schema`=`demo`, `table`=`customers`,
-  `{"predicate": [{"column": "customer_id", "operator": "=", "value": 1}], "cascade": true}` — удалить клиента вместе с его заказами.
-
-#### POST .../evolve — переименовать/удалить колонку
-Тело `{"ddl_operation": "...", "column_name": "...", "new_column_name": "...", "apply_to": "..."}`:
-- `ddl_operation`: `rename_column` | `drop_column`;
-- `apply_to`: `mssql` | `oracle` | `both`;
-- `new_column_name` обязателен только для `rename_column`;
-- `drop_column` запрещён для PK/FK-колонок.
-
-Примеры:
-- `source`=`mssql`, `schema`=`demo`, `table`=`customers`, `{"ddl_operation": "rename_column", "column_name": "segment", "new_column_name": "tier", "apply_to": "both"}`;
+#### POST .../delete — удалить строки по предикату
+Тело `{"predicate": [{"column": "...", "operator": "...", "value": ...}], "cascade": bool}`:
+- При `cascade: false` удаление отклоняется с `409 Conflict`, если на строку ссылаются дочерние записи.
+- При `cascade: true` каскадно удаляются зависимые строки во всех дочерних таблицах.
+- Ответ: `{"deleted": N}`.
 - `source`=`mssql`, `schema`=`demo`, `table`=`products`, `{"ddl_operation": "drop_column", "column_name": "price", "apply_to": "both"}`.
 
 ### Обновление ODS-слоя Iceberg
@@ -338,12 +329,10 @@ Airflow UI (`:8089`), Trino (`:8443`) — везде `admin`/`admin`. У Oracle 
 прикладной пользователь-схема `demo` (бизнес-схема данных, имя сознательно
 оставлено `demo`) — пароль `admin`.
 
-## ⚠️ Важно: потеря данных при изменении схемы
+## Транзакционная эволюция схем через API sydafa
 
-Если изменить `schema/sources/mssql.yaml` или `schema/sources/oracle.yaml`
-и перезапустить контейнер `datagen-api` — **все данные этого источника
-будут удалены**, а таблицы пересозданы пустыми по новой схеме. Это
-осознанное упрощение для тестового стенда: предыдущее состояние не
-архивируется. Пока контейнер работает без перезапуска, изменения файла
-на хосте не подхватываются — реакция происходит только при следующем
-(пере)старте контейнера `datagen-api`.
+В отличие от устаревших подходов с хранением файлов схем на хосте, в `sydafa`:
+- База данных при старте всегда чистая.
+- Все схемы и таблицы создаются и модифицируются через вызов API `POST /sources/{source}/schema/evolve`.
+- Любая эволюция атомарна (All-or-Nothing): либо все операции из пакета применяются, либо ни одна.
+- Данные при переименованиях таблиц и колонок сохраняются в полном объёме.

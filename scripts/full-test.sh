@@ -9,6 +9,7 @@ cleanup() {
     echo "$ids" | xargs docker rm -f >/dev/null 2>&1 || true
   fi
   docker compose down -v --remove-orphans
+  docker rm -f mssql-source oracle-source >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
