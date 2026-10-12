@@ -19,7 +19,7 @@ services:
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./config/sydafa/sources:/app/config/sources:ro
+      - ./sydafa:/app/config:ro
       - sydafa_state:/state
     ports: ["8090:8000"]
     healthcheck:
@@ -161,10 +161,9 @@ services:
     build: {context: ., dockerfile: airflow/Dockerfile}
     image: dlh-poc-airflow:latest
     entrypoint: ["/bin/bash", "-c"]
-    command: ["airflow db migrate"]
+    command: ["python3 /opt/airflow/sync_dags.py; airflow db migrate"]
     environment: &airflow-env
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_PG_USER}:${AIRFLOW_PG_PASSWORD}@airflow-postgres:5432/airflow
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW_CONN_SPARK_DEFAULT: "spark://spark-master:7077?spark_binary=spark-submit"
       AIRFLOW_CONN_TRINO_DEFAULT: "trino://admin:admin@trino:8443/iceberg?protocol=https&verify=false"
@@ -175,8 +174,12 @@ services:
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
       ORACLE_APP_PASSWORD: ${ORACLE_APP_PASSWORD}
       SYDAFA_URL: http://sydafa:8000
-    depends_on: {airflow-postgres: {condition: service_healthy}}
-    volumes: ["./airflow/dags:/opt/airflow/dags"]
+    depends_on:
+      airflow-postgres: {condition: service_healthy}
+      sydafa: {condition: service_healthy}
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/sync_dags.py:/opt/airflow/sync_dags.py:ro
     networks: [dlh-poc]
 
   airflow-scheduler:

@@ -32,26 +32,29 @@ check "sydafa /docs" "$code" "200"
 sources=$(curl -s http://localhost:8090/sources 2>/dev/null | python3 -c "import sys,json;print(','.join(json.load(sys.stdin).get('sources',[])))" 2>/dev/null)
 check "sydafa /sources" "$sources" "mssql,oracle"
 
-# 1b. sydafa update/delete — формализованный predicate, без SQL-инъекций
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/tables/mssql/demo/customers/update \
+# 1b. sydafa exec update/delete — формализованный predicate, без SQL-инъекций
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/mssql/exec \
   -H 'Content-Type: application/json' \
-  -d '{"predicate":[{"column":"customer_id","operator":"=","value":-999999}],"set":{"segment":"VIP"}}')
-check "sydafa update formalized predicate" "$code" "200"
+  -d '{"operations":[{"op":"update","schema":"demo","table":"customers","predicate":[{"column":"customer_id","operator":"=","value":-999999}],"set":{"segment":"VIP"}}]ready:true}')
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/mssql/exec \
+  -H 'Content-Type: application/json' \
+  -d '{"operations":[{"op":"update","schema":"demo","table":"customers","predicate":[{"column":"customer_id","operator":"=","value":-999999}],"set":{"segment":"VIP"}}]}')
+check "sydafa exec update formalized predicate" "$code" "200"
 
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/tables/mssql/demo/customers/delete \
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/mssql/exec \
   -H 'Content-Type: application/json' \
-  -d '{"predicate":[{"column":"customer_id","operator":"=","value":-999999}],"cascade":false}')
-check "sydafa delete formalized predicate" "$code" "200"
+  -d '{"operations":[{"op":"delete","schema":"demo","table":"customers","predicate":[{"column":"customer_id","operator":"=","value":-999999}],"cascade":false}]}')
+check "sydafa exec delete formalized predicate" "$code" "200"
 
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/tables/oracle/demo/customers/update \
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/oracle/exec \
   -H 'Content-Type: application/json' \
-  -d '{"predicate":[{"column":"customer_id","operator":"=","value":-999999}],"set":{"segment":"VIP"}}')
-check "sydafa update oracle bind params" "$code" "200"
+  -d '{"operations":[{"op":"update","schema":"demo","table":"customers","predicate":[{"column":"customer_id","operator":"=","value":-999999}],"set":{"segment":"VIP"}}]}')
+check "sydafa exec update oracle bind params" "$code" "200"
 
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/tables/mssql/demo/customers/update \
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/mssql/exec \
   -H 'Content-Type: application/json' \
-  -d '{"predicate":[{"column":"customer_id; DROP TABLE demo.customers --","operator":"=","value":1}],"set":{"segment":"VIP"}}')
-check "sydafa rejects injected column" "$code" "422"
+  -d '{"operations":[{"op":"update","schema":"demo","table":"customers","predicate":[{"column":"customer_id; DROP TABLE demo.customers --","operator":"=","value":1}],"set":{"segment":"VIP"}}]}')
+check "sydafa exec rejects injected column" "$code" "422"
 
 # 2. Airflow
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8089/auth/token \

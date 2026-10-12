@@ -20,6 +20,7 @@ with DAG(
     dag_id="build_marts_demo",
     schedule=None,
     catchup=False,
+    is_paused_upon_creation=True,
     tags=["mart", "demo"],
 ) as dag:
     mart_via_trino = PythonOperator(
