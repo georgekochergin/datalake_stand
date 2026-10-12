@@ -1,0 +1,16 @@
+# datalake_stand — Инструкции проекта
+
+## Контекст и архитектура
+- Проект стенда КХД/DLH: Trino, Spark, Nessie (Iceberg REST), Airflow, SILO (S3 storage), Postgres каталоги.
+- Эмуляция реляционных источников (MSSQL, Oracle) выполняется внешним сервисом `sydafa` (`ghcr.io/georgekochergin/sydafa:latest` или локальный `sydafa:latest`).
+- Конфигурация источников стенда: `config/sydafa/sources/` (`mssql.yaml`, `oracle.yaml`).
+- Учетные данные инспектора источников: `reader`/`reader` (только SELECT).
+
+## Git
+- Все новые изменения оформляются в отдельных ветках с префиксом `kodik/` (например, `kodik/feature-name`).
+- Запрещено коммитить напрямую в `main`.
+
+## Testing
+- Для проверки этого стенда используется строго команда: `./scripts/full-test.sh`
+- Скрипт поднимает весь стек, при необходимости собирает `sydafa` из `../sydafa`, прогоняет 66 тестов в контейнере `test-runner` и корректно гасит окружение с очисткой динамических контейнеров (`mssql-source`, `oracle-source`).
+- Критерий успешности: вывод `PASS=66 FAIL=0` с кодом возврата `0`.
