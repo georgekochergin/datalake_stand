@@ -156,100 +156,40 @@ DBeaver подключается к `localhost` — порты опублико�
 
 ### Управление источниками и данными — sydafa
 
-REST-интерфейс: `http://localhost:8090`, Swagger UI — `http://localhost:8090/docs`.
-Сервис `sydafa` эмулирует источники данных: запускает контейнеры СУБД, создаёт рабочую базу `sydafa`, пользователя `reader/reader` и предоставляет API для управления схемами и генерацией данных.
+Сервис **sydafa** (Synthetic Data Factory & DB Orchestrator) вынесен в отдельный независимый репозиторий [georgekochergin/sydafa](https://github.com/georgekochergin/sydafa) и поставляется в виде Docker-образа (`ghcr.io/georgekochergin/sydafa:latest` или локальный `sydafa:latest`).
 
-Таблицы и схемы данных **не хранятся на хосте в виде файлов**. Создание схем, таблиц и миграции выполняются через транзакционный эндпоинт `POST /sources/{source}/schema/evolve`.
+На данном стенде `sydafa` эмулирует реляционные источники данных:
+- Автоматически оркестрирует контейнеры СУБД `mssql-source` и `oracle-source` через Docker API;
+- Создаёт рабочую базу/PDB `sydafa` и пользователя-инспектора `reader` / `reader` с доступом строго на чтение;
+- Предоставляет REST API для транзакционной эволюции схем данных (API-first) и синтетической генерации данных с соблюдением целостности внешних ключей.
 
-| Метод | Путь | Назначение | Тело запроса |
-| --- | --- | --- | --- |
-| GET | `/health` | статус готовности сервиса | — |
-| GET | `/sources` | список источников | — |
-| GET | `/sources/{source}` | реквизиты, параметры reader и список таблиц | — |
-| GET | `/sources/{source}/schema` | текущая live-схема источника (JSON) | — |
-| GET | `/tables/{source}/{schema}/{table}` | схема таблицы | — |
-| POST | `/sources/{source}/schema/evolve` | транзакционная эволюция (All-or-Nothing) | `{"operations": [...]}` |
-| POST | `/tables/{source}/{schema}/{table}/append` | вставить N строк (FK-каскад) | `{"rows": N, "new_key_ratio": r}` |
-| POST | `/tables/{source}/{schema}/{table}/update` | обновить строки по предикату | `{"predicate": [...], "set": {...}}` |
-| POST | `/tables/{source}/{schema}/{table}/delete` | удалить строки по предикату | `{"predicate": [...], "cascade": bool}` |
+Конфигурации источников стенда расположены в директории: `config/sydafa/sources/` (`mssql.yaml`, `oracle.yaml`).
 
----
+REST-интерфейс: `http://localhost:8090`, интерактивная документация: `http://localhost:8090/docs`.
 
-### Спецификация API эволюции схемы (POST /sources/{source}/schema/evolve)
+#### Основные эндпоинты
 
-Эндпоинт принимает JSON-документ со списком упорядоченных операций. Все операции выполняются строго по очереди в рамках **одной транзакции СУБД**. При ошибке на любом шаге выполняется полный `ROLLBACK` (All-or-Nothing) и возвращается HTTP 422.
+| Метод | Путь | Назначение |
+| --- | --- | --- |
+| GET | `/health` | Проверка готовности источников (200 OK) |
+| GET | `/sources` | Список зарегистрированных источников |
+| GET | `/sources/{source}` | Метаданные источника, статус reader и список таблиц |
+| GET | `/sources/{source}/schema` | Текущая live-схема источника (JSON) |
+| GET | `/tables/{source}/{schema}/{table}` | Схема конкретной таблицы |
+| POST | `/sources/{source}/schema/evolve` | Транзакционная эволюция схем (All-or-Nothing rollback) |
+| POST | `/tables/{source}/{schema}/{table}/append` | Генерация и вставка строк с соблюдением связей (FK) |
+| POST | `/tables/{source}/{schema}/{table}/update` | Параметризованное обновление строк по предикату |
+| POST | `/tables/{source}/{schema}/{table}/delete` | Удаление строк по предикату (с контролем связей FK) |
 
-#### Доступные операции (`op`):
-1. **`create_schema`**: создание схемы (MSSQL schema / Oracle user).
-   `{"op": "create_schema", "name": "demo"}`
-2. **`create_table`**: создание таблицы со спецификацией колонок, PK и FK.
-   ```json
-   {
-     "op": "create_table",
-     "schema": "demo",
-     "name": "customers",
-     "primary_key": ["customer_id"],
-     "columns": [
-       {"name": "customer_id", "type": "bigint", "generator": {"kind": "sequence"}},
-       {"name": "name", "type": "string", "generator": {"kind": "faker", "provider": "company"}},
-       {"name": "segment", "type": "string", "generator": {"kind": "choice", "values": ["Retail", "Corporate", "VIP"]}}
-     ],
-     "foreign_keys": []
-   }
-   ```
-3. **`rename_table`**: переименование таблицы.
-   `{"op": "rename_table", "schema": "demo", "from_name": "customers", "to_name": "clients"}`
-4. **`drop_table`**: удаление таблицы.
-   `{"op": "drop_table", "schema": "demo", "name": "customers"}`
-5. **`add_column`**: добавление колонки в таблицу.
-   `{"op": "add_column", "schema": "demo", "table": "customers", "column": {"name": "discount", "type": "decimal(5,2)"}}`
-6. **`rename_column`**: переименование колонки.
-   `{"op": "rename_column", "schema": "demo", "table": "customers", "from_name": "discount", "to_name": "special_discount"}`
-7. **`drop_column`**: удаление колонки.
-   `{"op": "drop_column", "schema": "demo", "table": "customers", "name": "discount"}`
-8. **`transfer_table`**: перенос таблицы между схемами.
-   `{"op": "transfer_table", "table": "clients", "from_schema": "demo", "to_schema": "core"}`
-9. **`rename_schema`**: переименование схемы с переносом её таблиц.
-   `{"op": "rename_schema", "from_name": "demo", "to_name": "core"}`
-10. **`drop_schema`**: удаление пустой схемы.
-    `{"op": "drop_schema", "name": "core"}`
+#### Документация и спецификация API sydafa
+
+Вся детальная документация, правила интеграции и спецификации вынесены в репозиторий проекта:
+- 📖 [Руководство по интеграции sydafa в другие проекты](https://github.com/georgekochergin/sydafa#интеграция-в-сторонние-проекты) (docker-compose, сеть, volumes, healthcheck);
+- 🔄 [Спецификация API эволюции схемы (10 операций миграций)](https://github.com/georgekochergin/sydafa#транзакционная-эволюция-схем-post-sourcessourceschemaevolve);
+- 🧬 [Семантика колонок и генераторов данных (`sequence`, `faker`, `choice`, `random_decimal`, `random_date`)](https://github.com/georgekochergin/sydafa#семантика-колонок-и-генераторов-данных-generator);
+- 💾 [Спецификация DML API (`append`, `update`, `delete`)](https://github.com/georgekochergin/sydafa#манипуляция-данными-dml-api).
 
 ---
-
-### Семантика объявления колонок и генераторов данных (`generator`)
-
-Каждая колонка таблицы описывается объектом:
-- `name`: имя колонки (латиница, цифры, подчёркивание);
-- `type`: логический тип данных (`bigint`, `string`, `date`, `timestamp`, `decimal(p,s)`);
-- `generator`: конфигурация генератора синтетических данных (объект с полем `kind`):
-  - **`sequence`** (`{"kind": "sequence"}`): автоинкрементный числовой генератор для первичных ключей (`MAX(pk) + 1`).
-  - **`faker`** (`{"kind": "faker", "provider": "company"}`): вызов провайдера библиотеки Faker. Поддерживаются: `company`, `name`, `word`, `address`, `email`.
-  - **`choice`** (`{"kind": "choice", "values": ["Retail", "VIP"]}`): выбор случайного значения из списка `values`.
-  - **`random_decimal`** (`{"kind": "random_decimal", "min": 1, "max": 1000}`): случайное число с 2 знаками после запятой.
-  - **`random_date`** (`{"kind": "random_date"}`): случайная дата за последние 365 дней.
-  - **`null`** (`null`): для колонок внешних ключей (FK), заполняемых автоматически из родительской таблицы при генерации.
-
----
-
-### Манипуляция данными (DML API)
-
-#### POST .../append — добавить строки
-Тело `{"rows": N, "new_key_ratio": r}`:
-- `rows`: количество строк (1..100000);
-- `new_key_ratio`: вероятность (0..1) создания новой родительской строки по внешнему ключу (FK). При 0 переиспользуются существующие ключи.
-
-#### POST .../update — обновить строки по предикату
-Тело `{"predicate": [{"column": "...", "operator": "...", "value": ...}], "set": {"col": "val"}}`:
-- Операторы предиката: `=`, `!=`, `<`, `<=`, `>`, `>=`.
-- Все условия объединяются через `AND` с безопасной bind-параметризацией.
-- Ответ: `{"updated": N}`.
-
-#### POST .../delete — удалить строки по предикату
-Тело `{"predicate": [{"column": "...", "operator": "...", "value": ...}], "cascade": bool}`:
-- При `cascade: false` удаление отклоняется с `409 Conflict`, если на строку ссылаются дочерние записи.
-- При `cascade: true` каскадно удаляются зависимые строки во всех дочерних таблицах.
-- Ответ: `{"deleted": N}`.
-- `source`=`mssql`, `schema`=`demo`, `table`=`products`, `{"ddl_operation": "drop_column", "column_name": "price", "apply_to": "both"}`.
 
 ### Обновление ODS-слоя Iceberg
 
@@ -322,17 +262,8 @@ FAIL — смотреть `.agents/skills/datalake-stand-verify/references/troub
 bootstrap-логин MSSQL `sa`: имя фиксировано образом, а пароль не может быть
 буквально `admin` (MSSQL требует длину ≥8 и минимум 3 из 4 категорий символов),
 поэтому у `sa` остаётся сильный пароль `AdminPassword1!`, а для доступа извне
-`datagen-api` автоматически создаёт логин `admin`/`admin` с ролью sysadmin.
+`sydafa` автоматически создаёт логин `sydafa`/`sydafa` с ролью sysadmin (а для чтения — `reader`/`reader`).
 SILO (консоль `:9001`) — `admin`/`admin123` (MinIO требует пароль ≥8 символов,
 поэтому буквально `admin` невозможен), pg-catalog, airflow-postgres,
 Airflow UI (`:8089`), Trino (`:8443`) — везде `admin`/`admin`. У Oracle системные SYS/SYSTEM и
-прикладной пользователь-схема `demo` (бизнес-схема данных, имя сознательно
-оставлено `demo`) — пароль `admin`.
-
-## Транзакционная эволюция схем через API sydafa
-
-В отличие от устаревших подходов с хранением файлов схем на хосте, в `sydafa`:
-- База данных при старте всегда чистая.
-- Все схемы и таблицы создаются и модифицируются через вызов API `POST /sources/{source}/schema/evolve`.
-- Любая эволюция атомарна (All-or-Nothing): либо все операции из пакета применяются, либо ни одна.
-- Данные при переименованиях таблиц и колонок сохраняются в полном объёме.
+технический суперпользователь `sydafa` — пароль `sydafa`, читатель — `reader` / `reader`.
