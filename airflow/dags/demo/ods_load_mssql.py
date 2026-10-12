@@ -1,8 +1,6 @@
 """ods_load_mssql: AS IS загрузка mssql-source -> Iceberg ods.mssql_*.
-
-task extract_load -> task validate_load (финальный, заглушка).
-Метод validate_load — открытый вопрос (см. docs/README.md): простой COUNT(*)
-неверен, если в источнике были DELETE между загрузками. Здесь — заглушка.
+Демонстрационный DAG уровня источника MSSQL.
+По умолчанию выключен (is_paused_upon_creation=True).
 """
 from airflow import DAG
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
@@ -10,15 +8,15 @@ from airflow.providers.standard.operators.python import PythonOperator
 
 
 def _validate_load_placeholder(**_) -> None:
-    # Заглушка: полноценная методика сверки source vs ods — открытый вопрос.
-    print("[validate_load] placeholder: метод валидации не определён (см. docs/README.md)")
+    print("[validate_load] placeholder: метод валидации (см. docs/README.md)")
 
 
 with DAG(
     dag_id="ods_load_mssql",
     schedule=None,
     catchup=False,
-    tags=["ods", "mssql"],
+    is_paused_upon_creation=True,
+    tags=["ods", "mssql", "demo"],
 ) as dag:
     extract_load = SparkSubmitOperator(
         task_id="extract_load",

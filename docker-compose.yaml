@@ -19,7 +19,7 @@ services:
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./config/sydafa/sources:/app/config/sources:ro
+      - ./sydafa:/app/config:ro
       - sydafa_state:/state
     ports: ["8090:8000"]
     healthcheck:
@@ -164,7 +164,6 @@ services:
     command: ["airflow db migrate"]
     environment: &airflow-env
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_PG_USER}:${AIRFLOW_PG_PASSWORD}@airflow-postgres:5432/airflow
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW_CONN_SPARK_DEFAULT: "spark://spark-master:7077?spark_binary=spark-submit"
       AIRFLOW_CONN_TRINO_DEFAULT: "trino://admin:admin@trino:8443/iceberg?protocol=https&verify=false"

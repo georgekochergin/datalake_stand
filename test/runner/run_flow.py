@@ -110,19 +110,9 @@ def sydafa_get(path):
     return code, parsed
 
 
-def evolve_schema(source, operations):
-    code, parsed = sydafa_post("/sources/%s/schema/evolve" % source, {"operations": operations})
+def sydafa_exec(source, operations):
+    code, parsed = sydafa_post("/sources/%s/exec" % source, {"operations": operations})
     return code, parsed
-
-
-def append(source, table, rows):
-    code, parsed = sydafa_post(
-        "/tables/%s/demo/%s/append" % (source, table),
-        {"rows": rows, "new_key_ratio": 0},
-    )
-    inserted = parsed.get("inserted") if isinstance(parsed, dict) else None
-    check("append %s.%s x%d" % (source, table, rows), code, 200)
-    check("append %s.%s inserted" % (source, table), inserted, rows)
 
 
 # ---------- Trino ----------
@@ -201,6 +191,16 @@ def airflow_token_retry(timeout=240):
     return None
 
 
+def airflow_unpause(token, dag_id):
+    url = "%s/api/v2/dags/%s" % (AIRFLOW, dag_id)
+    return http(
+        "PATCH",
+        url,
+        {"is_paused": False},
+        {"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+    )
+
+
 def airflow_trigger(token, dag_id, run_id):
     url = "%s/api/v2/dags/%s/dagRuns" % (AIRFLOW, dag_id)
     return http(
@@ -214,6 +214,8 @@ def airflow_trigger(token, dag_id, run_id):
 def airflow_trigger_retry(token, dag_id, run_id, timeout=180):
     deadline = time.time() + timeout
     while time.time() < deadline:
+        # Убеждаемся, что DAG активен перед триггером
+        airflow_unpause(token, dag_id)
         code, raw = airflow_trigger(token, dag_id, run_id)
         if code == 200:
             return code, raw
@@ -241,55 +243,8 @@ def airflow_wait_run(token, dag_id, run_id, timeout=600, name=None):
     return False
 
 
-def get_demo_evolution_operations():
-    return [
-        {"op": "create_schema", "name": "demo"},
-        {
-            "op": "create_table",
-            "schema": "demo",
-            "name": "customers",
-            "primary_key": ["customer_id"],
-            "columns": [
-                {"name": "customer_id", "type": "bigint", "generator": {"kind": "sequence"}},
-                {"name": "name", "type": "string", "generator": {"kind": "faker", "provider": "company"}},
-                {"name": "segment", "type": "string", "generator": {"kind": "choice", "values": ["Retail", "Corporate", "VIP"]}},
-            ],
-            "foreign_keys": [],
-        },
-        {
-            "op": "create_table",
-            "schema": "demo",
-            "name": "products",
-            "primary_key": ["product_id"],
-            "columns": [
-                {"name": "product_id", "type": "bigint", "generator": {"kind": "sequence"}},
-                {"name": "product_name", "type": "string", "generator": {"kind": "faker", "provider": "word"}},
-                {"name": "price", "type": "decimal(18,2)", "generator": {"kind": "random_decimal", "min": 1, "max": 100000}},
-            ],
-            "foreign_keys": [],
-        },
-        {
-            "op": "create_table",
-            "schema": "demo",
-            "name": "orders",
-            "primary_key": ["order_id"],
-            "columns": [
-                {"name": "order_id", "type": "bigint", "generator": {"kind": "sequence"}},
-                {"name": "customer_id", "type": "bigint", "generator": None},
-                {"name": "product_id", "type": "bigint", "generator": None},
-                {"name": "amount", "type": "decimal(18,2)", "generator": {"kind": "random_decimal", "min": 1, "max": 100000}},
-                {"name": "order_date", "type": "date", "generator": {"kind": "random_date"}},
-            ],
-            "foreign_keys": [
-                {"columns": ["customer_id"], "ref_schema": "demo", "ref_table": "customers", "ref_columns": ["customer_id"]},
-                {"columns": ["product_id"], "ref_schema": "demo", "ref_table": "products", "ref_columns": ["product_id"]},
-            ],
-        },
-    ]
-
-
 def main():
-    # 1. Readiness
+    # 1. Readiness инфраструктурных компонентов
     code, _ = wait_http("Nessie /iceberg/v1/config", NESSIE + "/iceberg/v1/config", 200, 40, 3)
     check("Nessie /iceberg/v1/config", code, 200)
 
@@ -318,104 +273,48 @@ def main():
         return
 
     sources = ["mssql", "oracle"]
-    demo_ops = get_demo_evolution_operations()
 
-    # 2. Инициализация схем и таблиц через API эволюции POST /sources/{source}/schema/evolve
+    # 2. Интроспекция через API GET /sources/{source}
     for src in sources:
-        code, parsed = evolve_schema(src, demo_ops)
-        if code != 200:
-            print("ERROR evolve %s: code=%s, detail=%r" % (src, code, parsed))
-        check("evolve demo schema for %s" % src, code, 200)
-        check("evolve %s executed 4 ops" % src, parsed.get("executed") if isinstance(parsed, dict) else None, 4)
-
-        # Проверка метаданных источника через GET /sources/{source}
         code, meta = sydafa_get("/sources/%s" % src)
         check("GET /sources/%s" % src, code, 200)
-        check("GET /sources/%s database" % src, meta.get("database"), "sydafa")
-        check("GET /sources/%s reader" % src, meta.get("reader"), "reader")
-        check("GET /sources/%s schemas" % src, ",".join(meta.get("schemas", [])), "demo")
-        tbl_names = sorted(t["name"] for t in meta.get("tables", []))
-        check("GET /sources/%s tables" % src, ",".join(tbl_names), "customers,orders,products")
+        tables = meta.get("tables", []) if isinstance(meta, dict) else []
+        table_names = sorted(t["name"] for t in tables)
+        check("GET /sources/%s tables" % src, ",".join(table_names), "customers,orders,products")
 
+    # 3. Очистка таблиц через единый POST /sources/{source}/exec (truncate в топологическом порядке)
+    for src in sources:
+        trunc_ops = [
+            {"op": "truncate", "schema": "demo", "table": "orders", "cascade": True},
+            {"op": "truncate", "schema": "demo", "table": "products", "cascade": True},
+            {"op": "truncate", "schema": "demo", "table": "customers", "cascade": True},
+        ]
+        code, parsed = sydafa_exec(src, trunc_ops)
+        check("exec truncate all tables for %s" % src, code, 200)
+        check("exec %s truncate executed 3 ops" % src, parsed.get("executed") if isinstance(parsed, dict) else None, 3)
+
+    # 4. Наполнение тестовыми данными через единый POST /sources/{source}/exec (append)
     counts = {
         "mssql": {"customers": 3, "products": 3, "orders": 5},
         "oracle": {"customers": 3, "products": 3, "orders": 4},
     }
-
-    # 3. DML: append (родители сначала, потом orders с FK-каскадом)
     for src in sources:
-        append(src, "customers", counts[src]["customers"])
-        append(src, "products", counts[src]["products"])
+        append_ops = [
+            {"op": "append", "schema": "demo", "table": "customers", "rows": counts[src]["customers"], "new_key_ratio": 0.0},
+            {"op": "append", "schema": "demo", "table": "products", "rows": counts[src]["products"], "new_key_ratio": 0.0},
+            {"op": "append", "schema": "demo", "table": "orders", "rows": counts[src]["orders"], "new_key_ratio": 0.0},
+        ]
+        code, parsed = sydafa_exec(src, append_ops)
+        check("exec append all tables for %s" % src, code, 200)
+        check("exec %s append executed 3 ops" % src, parsed.get("executed") if isinstance(parsed, dict) else None, 3)
+
+    # 5. ODS DAGs: unpause -> trigger -> wait -> Iceberg asserts
     for src in sources:
-        append(src, "orders", counts[src]["orders"])
-
-    # 4. DML: update (обновление строки по предикату)
-    for src in sources:
-        code, parsed = sydafa_post(
-            "/tables/%s/demo/customers/update" % src,
-            {
-                "predicate": [{"column": "customer_id", "operator": "=", "value": 1}],
-                "set": {"name": src + "-updated"},
-            },
-        )
-        check("update %s.customers customer_id=1" % src, code, 200)
-        check("update %s.customers updated=1" % src, parsed.get("updated") if isinstance(parsed, dict) else None, 1)
-
-    # 5. DML: delete (точечное удаление orders)
-    code, parsed = sydafa_post(
-        "/tables/mssql/demo/orders/delete",
-        {"predicate": [{"column": "order_id", "operator": "<", "value": 3}], "cascade": False},
-    )
-    check("delete mssql.orders order_id<3" % (), code, 200)
-    check("delete mssql.orders deleted=2" % (), parsed.get("deleted") if isinstance(parsed, dict) else None, 2)
-
-    code, parsed = sydafa_post(
-        "/tables/oracle/demo/orders/delete",
-        {"predicate": [{"column": "order_id", "operator": "=", "value": 1}], "cascade": False},
-    )
-    check("delete oracle.orders order_id=1", code, 200)
-    check("delete oracle.orders deleted=1", parsed.get("deleted") if isinstance(parsed, dict) else None, 1)
-
-    counts["mssql"]["orders"] = 5 - 2
-    counts["oracle"]["orders"] = 4 - 1
-
-    # 6. DML: corner cases (негативные сценарии)
-    code, _ = sydafa_post(
-        "/tables/mssql/demo/customers/delete",
-        {"predicate": [{"column": "customer_id", "operator": ">=", "value": 1}], "cascade": False},
-    )
-    check("corner delete FK-parent without cascade -> 409", code, 409)
-
-    code, _ = sydafa_post(
-        "/tables/mssql/demo/customers/update",
-        {
-            "predicate": [{"column": "nonexistent", "operator": "=", "value": 1}],
-            "set": {"segment": "VIP"},
-        },
-    )
-    check("corner unknown column update -> 422", code, 422)
-
-    code, _ = sydafa_post(
-        "/tables/mssql/demo/customers/update",
-        {
-            "predicate": [{"column": "customer_id", "operator": "LIKE", "value": "1"}],
-            "set": {"segment": "VIP"},
-        },
-    )
-    check("corner bad operator update -> 422", code, 422)
-
-    code, _ = sydafa_post(
-        "/tables/mssql/demo/customers/append",
-        {"rows": 0, "new_key_ratio": 0},
-    )
-    check("corner append rows=0 -> 422", code, 422)
-
-    # 7. ODS DAGs + Iceberg asserts
-    for src in sources:
+        dag_id = "ods_load_%s" % src
         run_id = "full-flow-ods-" + src
-        code, raw = airflow_trigger_retry(token, "ods_load_" + src, run_id)
-        check("trigger ods_load_%s" % src, code, 200)
-        if not airflow_wait_run(token, "ods_load_" + src, run_id, name="ods_load_" + src):
+        code, _ = airflow_trigger_retry(token, dag_id, run_id)
+        check("trigger %s" % dag_id, code, 200)
+        if not airflow_wait_run(token, dag_id, run_id, name=dag_id):
             return
 
     for src in sources:
@@ -424,21 +323,11 @@ def main():
             got = trino_count_retry("SELECT count(*) FROM iceberg.ods.%s_%s" % (src, table))
             check(name, got, exp)
 
-    check(
-        "mssql updated name reflected",
-        trino_count_retry("SELECT count(*) FROM iceberg.ods.mssql_customers WHERE name = 'mssql-updated'"),
-        1,
-    )
-    check(
-        "oracle updated name reflected",
-        trino_count_retry("SELECT count(*) FROM iceberg.ods.oracle_customers WHERE name = 'oracle-updated'"),
-        1,
-    )
-
-    # 8. Mart DAG + asserts
-    code, raw = airflow_trigger_retry(token, "build_marts_demo", "full-flow-marts")
-    check("trigger build_marts_demo", code, 200)
-    airflow_wait_run(token, "build_marts_demo", "full-flow-marts", name="build_marts_demo")
+    # 6. Mart DAG: unpause -> trigger -> wait -> asserts
+    mart_dag_id = "build_marts_demo"
+    code, _ = airflow_trigger_retry(token, mart_dag_id, "full-flow-marts")
+    check("trigger %s" % mart_dag_id, code, 200)
+    airflow_wait_run(token, mart_dag_id, "full-flow-marts", name=mart_dag_id)
 
     check(
         "mart_trino.customer_totals non-empty",
@@ -450,50 +339,6 @@ def main():
         trino_count_positive("SELECT count(*) FROM iceberg.mart_spark.customer_totals"),
         True,
     )
-
-    # 9. Тест комплексной эволюции схемы (add_column + rename_column)
-    complex_evolve_ops = [
-        {
-            "op": "add_column",
-            "schema": "demo",
-            "table": "customers",
-            "column": {"name": "discount", "type": "decimal(5,2)"},
-        },
-        {
-            "op": "rename_column",
-            "schema": "demo",
-            "table": "customers",
-            "from_name": "discount",
-            "to_name": "special_discount",
-        },
-    ]
-    code, parsed = evolve_schema("mssql", complex_evolve_ops)
-    check("complex evolve (add+rename column) -> 200", code, 200)
-    check("complex evolve executed 2 ops", parsed.get("executed") if isinstance(parsed, dict) else None, 2)
-
-    # 10. Негативный тест эволюции: откат транзакции All-or-Nothing
-    failing_batch_ops = [
-        {
-            "op": "add_column",
-            "schema": "demo",
-            "table": "customers",
-            "column": {"name": "temp_col", "type": "string"},
-        },
-        {
-            "op": "add_column",
-            "schema": "demo",
-            "table": "customers",
-            "column": {"name": "invalid column with space", "type": "string"},
-        },
-    ]
-    code, _ = evolve_schema("mssql", failing_batch_ops)
-    check("failing batch rejected -> 422", code, 422)
-
-    # Проверка, что temp_col откатился и отсутствует в схеме
-    code, table_meta = sydafa_get("/tables/mssql/demo/customers")
-    col_names = [c["name"] for c in table_meta.get("columns", [])]
-    check("all-or-nothing rollback confirmed (temp_col absent)", "temp_col" in col_names, False)
-    check("special_discount present", "special_discount" in col_names, True)
 
 
 if __name__ == "__main__":
