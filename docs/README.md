@@ -156,6 +156,9 @@ DBeaver подключается к `localhost` — порты опублико�
 
 ### Управление источниками и данными — sydafa
 
+Сервис **sydafa** вынесен в отдельный репозиторий [georgekochergin/sydafa](https://github.com/georgekochergin/sydafa) и поставляется в виде независимого Docker-образа (`sydafa:latest` или `ghcr.io/georgekochergin/sydafa:latest`).
+В рамках стенда `datalake_stand` конфигурация источников монтируется из локальной директории `config/sydafa/sources/` (`mssql.yaml`, `oracle.yaml`).
+
 REST-интерфейс: `http://localhost:8090`, Swagger UI — `http://localhost:8090/docs`.
 Сервис `sydafa` эмулирует источники данных: запускает контейнеры СУБД, создаёт рабочую базу `sydafa`, пользователя `reader/reader` и предоставляет API для управления схемами и генерацией данных.
 
