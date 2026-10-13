@@ -28,16 +28,15 @@ flowchart TB
     ANALYST["Аналитик\n(Trino CLI / BI-инструмент)"]
 
     subgraph Sources["Источники данных (оркестрируются sydafa)"]
-        MSSQL[("mssql-source\nmcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04\nDB: sydafa\nuser: reader (только чтение)")]
-        ORA[("oracle-source\ngvenzl/oracle-free:23-slim-faststart\nPDB: sydafa\nuser: reader (только чтение)")]
+        MSSQL[("sydafa-mssql-source\nmcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04\nDB: sydafa\nuser: sydafa (только чтение)")]
+        ORA[("sydafa-oracle-source\ngvenzl/oracle-free:23-slim-faststart\nPDB: sydafa\nuser: sydafa (только чтение)")]
     end
 
     subgraph SydafaService["Эмулятор источников (подключаемый модуль sydafa)"]
         direction TB
-        CFG1[("conf/sydafa/mssql.yaml")]
-        CFG2[("test/sydafa/sources/*.yaml (демо)")]
-        INIT[("test/sydafa/init.json (демо)")]
-        API["sydafa:latest (FastAPI, Swagger /docs :8090)\nТранзакционная эволюция схем (API-first)\nСинтетическая генерация (append / update / delete)"]
+        CFG1[("conf/sydafa/init.json")]
+        CFG2[("test/sydafa/init.json (демо)")]
+        API["sydafa:latest (FastAPI, Swagger /docs :8090)\nТранзакционная эволюция схем (API-first)\nСинтетическая генерация данных (POST /exec)"]
         STATE[("sydafa_state volume:\nlive-схема и состояние")]
         CFG1 -. "bind-mount ro" .-> API
         CFG2 -. "bind-mount ro" .-> API
@@ -95,8 +94,8 @@ flowchart TB
 
 | Компонент           | Образ/версия                                                                                     |
 | ------------------- | ------------------------------------------------------------------------------------------------ |
-| mssql-source        | `mcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04`                                          |
-| oracle-source       | `gvenzl/oracle-free:23-slim-faststart`                                                           |
+| sydafa-mssql-source | `mcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04`                                          |
+| sydafa-oracle-source| `gvenzl/oracle-free:23-slim-faststart`                                                           |
 | pg-catalog          | `postgres:16.15-bookworm`                                                                        |
 | nessie              | `ghcr.io/projectnessie/nessie:0.99.0`                                                           |
 | silo                | `pgsty/silo:RELEASE.2026-09-16T00-00-00Z`                                                        |
@@ -109,7 +108,7 @@ flowchart TB
 **Контур B (эмуляция источников данных, подключаемый компонент):** `sydafa` —
 автономный сервис (Docker-образ `sydafa:latest`), оркестрирующий контейнеры СУБД,
 предоставляющий REST API для транзакционной эволюции схем и FK-aware генерации синтетических данных.
-Конфигурация живого стенда: `conf/sydafa/mssql.yaml`. Демо (оба источника + `init.json`) — `test/sydafa/`, подключается override-ом теста.
+Конфигурация живого стенда: `conf/sydafa/init.json`. Демо (оба источника + тестовые таблицы) — `test/sydafa/init.json`, подключается override-ом теста.
 
 ## Быстрый старт
 
@@ -175,11 +174,12 @@ docker compose up -d --build
 Сервис **sydafa** (Synthetic Data Factory & DB Orchestrator) вынесен в отдельный независимый репозиторий [georgekochergin/sydafa](https://github.com/georgekochergin/sydafa) и поставляется в виде Docker-образа (`ghcr.io/georgekochergin/sydafa:latest` или локальный `sydafa:latest`).
 
 На данном стенде `sydafa` эмулирует реляционные источники данных:
-- Лениво оркестрирует контейнеры СУБД `mssql-source` / `oracle-source` через Docker API (named volume, без постоянного host-порта);
-- Создаёт рабочую базу/PDB `sydafa` и инспектора `reader` / `reader` (только чтение); пароль администратора `sydafa` случайный и сервису-only;
-- REST API: транзакционный DDL/DML и lifecycle (`activate` / `deactivate` / `status`).
+- Лениво оркестрирует контейнеры СУБД `sydafa-mssql-source` / `sydafa-oracle-source` через Docker API (данные живут в named volume);
+- Создаёт рабочую базу/PDB `sydafa` и читателя `sydafa` / `sydafa` (только чтение); пароль внутреннего администратора случайный и доступен только сервису;
+- Внешний доступ для DBeaver: `SYDAFA_EXT_PORT_MSSQL=14330` в `docker-compose.yaml`;
+- REST API: транзакционный DDL/DML через `POST /sources/{source}/exec` и lifecycle (`activate` / `deactivate` / `status`).
 
-Конфиг живого стенда: `conf/sydafa/` (`mssql.yaml`). Демо-init: `test/sydafa/init.json`.
+Конфиг живого стенда: `conf/sydafa/init.json`. Демо-init: `test/sydafa/init.json`.
 
 REST-интерфейс: `http://localhost:8090`, интерактивная документация: `http://localhost:8090/docs`.
 
@@ -214,8 +214,8 @@ REST-интерфейс: `http://localhost:8090`, интерактивная д�
 
 Отдельные DAG-и в Airflow (расписание `schedule=None` — запуск вручную):
 
-- `ods_load_mssql` → `test/spark-jobs/load_ods_mssql.py`: читает `demo.*` из mssql-source и перезаписывает (AS IS) `iceberg.ods.mssql_customers`, `mssql_orders`, `mssql_products`;
-- `ods_load_oracle` → `test/spark-jobs/load_ods_oracle.py`: читает `demo.*` из oracle-source и перезаписывает (AS IS) `iceberg.ods.oracle_customers`, `oracle_orders`, `oracle_products`.
+- `ods_load_mssql` → `test/spark-jobs/load_ods_mssql.py`: читает `demo.*` из sydafa-mssql-source и перезаписывает (AS IS) `iceberg.ods.mssql_customers`, `mssql_orders`, `mssql_products`;
+- `ods_load_oracle` → `test/spark-jobs/load_ods_oracle.py`: читает `demo.*` из sydafa-oracle-source и перезаписывает (AS IS) `iceberg.ods.oracle_customers`, `oracle_orders`, `oracle_products`.
 
 Демо-DAG-и изолированы в `test/dags/demo/` и подключаются override-ом теста. Запуск — Airflow UI → DAGs → unpause & ▶, либо CLI:
 

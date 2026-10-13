@@ -1,4 +1,4 @@
-"""ods_load_mssql: AS IS загрузка mssql-source -> Iceberg ods.mssql_*.
+"""ods_load_mssql: AS IS загрузка sydafa-mssql-source -> Iceberg ods.mssql_*.
 Демонстрационный DAG уровня источника MSSQL.
 По умолчанию выключен (is_paused_upon_creation=True).
 """

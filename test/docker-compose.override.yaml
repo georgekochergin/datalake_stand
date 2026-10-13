@@ -1,17 +1,30 @@
 services:
   sydafa:
+    environment:
+      - SYDAFA_CONTAINER_PREFIX=sydafa-test-
+      - SYDAFA_MAX_TTL_MINUTES=30
+      - SYDAFA_TTL_MINUTES=15
     volumes: !override
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./test/sydafa:/app/config:ro
+      - ./test/sydafa/init.json:/app/config/init.json:ro
       - sydafa_state:/state
+    ports: !override []
+
+  nessie:
+    ports: !override []
+
+  silo:
+    ports: !override []
 
   spark-master:
     volumes: !override
       - ./test/spark-jobs:/opt/spark-jobs:ro
+    ports: !override []
 
   spark-worker:
     volumes: !override
       - ./test/spark-jobs:/opt/spark-jobs:ro
+    ports: !override []
 
   trino:
     volumes: !override
@@ -21,6 +34,7 @@ services:
       - ./conf/trino/password.db:/etc/trino/password.db:ro
       - ./conf/trino/keystore.p12:/etc/trino/keystore.p12:ro
       - ./test/trino-sql:/opt/trino-sql:ro
+    ports: !override []
 
   airflow-init:
     volumes: !override
@@ -39,3 +53,4 @@ services:
   airflow-webserver:
     volumes: !override
       - ./test/dags:/opt/airflow/dags
+    ports: !override []

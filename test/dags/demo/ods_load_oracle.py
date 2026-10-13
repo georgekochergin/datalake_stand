@@ -1,4 +1,4 @@
-"""ods_load_oracle: AS IS загрузка oracle-source -> Iceberg ods.oracle_*.
+"""ods_load_oracle: AS IS загрузка sydafa-oracle-source -> Iceberg ods.oracle_*.
 Демонстрационный DAG уровня источника Oracle.
 По умолчанию выключен (is_paused_upon_creation=True).
 """

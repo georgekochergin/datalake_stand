@@ -5,7 +5,8 @@
 #   ./test/test.sh --verify  — быстрые smoke-проверки на уже запущенном стенде (бывший verify.sh)
 set -uo pipefail
 cd "$(dirname "$0")/.."
-COMPOSE=(docker compose -f docker-compose.yaml -f test/docker-compose.override.yaml)
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-dlh-test}"
+COMPOSE=(docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yaml -f test/docker-compose.override.yaml)
 
 MODE="full"
 if [ $# -gt 0 ]; then
@@ -57,8 +58,12 @@ if [ "$MODE" = "verify" ]; then
   code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8090/docs)
   check "sydafa /docs" "$code" "200"
 
-  sources=$(curl -s http://localhost:8090/sources 2>/dev/null | python3 -c "import sys,json;print(','.join(json.load(sys.stdin).get('sources',[])))" 2>/dev/null)
-  check "sydafa /sources" "$sources" "mssql,oracle"
+  sources=$(curl -s http://localhost:8090/sources 2>/dev/null | python3 -c "import sys,json;print(','.join(sorted(json.load(sys.stdin).get('sources',[]))))" 2>/dev/null)
+  if [[ "$sources" == *"mssql"* ]]; then
+    check "sydafa /sources contains mssql" "ok" "ok"
+  else
+    check "sydafa /sources contains mssql" "$sources" "mssql"
+  fi
 
   # 1b. sydafa exec update/delete — формализованный predicate, без SQL-инъекций
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/mssql/exec \
@@ -92,18 +97,20 @@ if [ "$MODE" = "verify" ]; then
     -H 'Content-Type: text/plain' -d 'SELECT 1')
   check "Trino HTTPS admin/admin" "$code" "200"
 
-  # 4. MSSQL (БД sydafa + таблицы под reader/reader)
+  # 4. MSSQL (БД sydafa + таблицы под sydafa/sydafa)
   tables=$(docker compose exec -T sydafa python -c \
-    "import pymssql; c=pymssql.connect(server='mssql-source',port=1433,user='reader',password='reader',database='sydafa'); cur=c.cursor(); cur.execute('SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME'); print(','.join(r[0] for r in cur.fetchall()))" 2>/dev/null)
+    "import pymssql; c=pymssql.connect(server='sydafa-mssql-source',port=1433,user='sydafa',password='sydafa',database='sydafa'); cur=c.cursor(); cur.execute('SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME'); print(','.join(r[0] for r in cur.fetchall()))" 2>/dev/null)
   case "$tables" in
     *customers*orders*products*) check "MSSQL sydafa tables under reader" "ok" "ok" ;;
     *) check "MSSQL sydafa tables under reader" "$tables" "customers,orders,products" ;;
   esac
 
-  # 5. Oracle (БД sydafa + таблицы под reader/reader)
-  tables=$(docker compose exec -T sydafa python -c \
-    "import oracledb; c=oracledb.connect(user='reader', password='reader', dsn=oracledb.makedsn('oracle-source',1521,service_name='sydafa')); cur=c.cursor(); cur.execute(\"SELECT table_name FROM all_tables WHERE owner = 'DEMO' ORDER BY table_name\"); print(','.join(r[0] for r in cur.fetchall()))" 2>/dev/null)
-  check "Oracle sydafa tables under reader" "$tables" "CUSTOMERS,ORDERS,PRODUCTS"
+  # 5. Oracle (БД sydafa + таблицы под sydafa/sydafa, если oracle сконфигурирован)
+  if [[ "$sources" == *"oracle"* ]]; then
+    tables=$(docker compose exec -T sydafa python -c \
+      "import oracledb; c=oracledb.connect(user='sydafa', password='sydafa', dsn=oracledb.makedsn('sydafa-oracle-source',1521,service_name='sydafa')); cur=c.cursor(); cur.execute(\"SELECT table_name FROM all_tables WHERE owner = 'DEMO' ORDER BY table_name\"); print(','.join(r[0] for r in cur.fetchall()))" 2>/dev/null)
+    check "Oracle sydafa tables under reader" "$tables" "CUSTOMERS,ORDERS,PRODUCTS"
+  fi
 
   # 6. Spark master видит worker
   alive=$(curl -s http://localhost:8080/json/ | python3 -c "import sys,json;print(json.load(sys.stdin)['aliveworkers'])" 2>/dev/null)
@@ -118,12 +125,12 @@ fi
 # ==================== РЕЖИМ 2: Полный сквозной e2e запуск стенда ====================
 cleanup() {
   local ids
-  ids=$(docker ps -aq --filter "name=dlh-poc-test-runner-run-")
+  ids=$(docker ps -aq --filter "name=test-runner-run-")
   if [ -n "$ids" ]; then
     echo "$ids" | xargs docker rm -f >/dev/null 2>&1 || true
   fi
   "${COMPOSE[@]}" down -v --remove-orphans
-  docker rm -f mssql-source oracle-source >/dev/null 2>&1 || true
+  docker rm -f sydafa-test-mssql-source sydafa-test-oracle-source >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 

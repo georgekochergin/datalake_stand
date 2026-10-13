@@ -1,4 +1,4 @@
-"""AS IS загрузка demo.demo.* из mssql-source в Iceberg ods.mssql_*.
+"""AS IS загрузка demo.demo.* из sydafa-mssql-source в Iceberg ods.mssql_*.
 
 Стратегия загрузки (APPEND vs MERGE/overwrite) — открытый вопрос,
 см. README.md ("validate_load"). Прототип реализует полный overwrite
@@ -11,7 +11,7 @@ import urllib.request
 
 from pyspark.sql import SparkSession
 
-MSSQL_HOST = os.environ.get("MSSQL_HOST", "mssql-source")
+MSSQL_HOST = os.environ.get("MSSQL_HOST", "sydafa-mssql-source")
 MSSQL_PORT = os.environ.get("MSSQL_PORT", "1433")
 SYDAFA_URL = os.environ.get("SYDAFA_URL", "http://sydafa:8000")
 
@@ -25,7 +25,7 @@ def _get_source_metadata() -> dict:
         print(f"[load_ods_mssql] Внимание: не удалось получить метаданные от {url} ({e}). Используются дефолтные параметры.")
         return {
             "database": "sydafa",
-            "reader": "reader",
+            "reader": "sydafa",
             "tables": [
                 {"schema": "demo", "name": "customers"},
                 {"schema": "demo", "name": "products"},
@@ -37,7 +37,7 @@ def _get_source_metadata() -> dict:
 def main() -> None:
     meta = _get_source_metadata()
     database = meta.get("database", "sydafa")
-    reader = meta.get("reader", "reader")
+    reader = meta.get("reader", "sydafa")
     tables = meta.get("tables", [])
 
     jdbc_url = f"jdbc:sqlserver://{MSSQL_HOST}:{MSSQL_PORT};databaseName={database};encrypt=false"
