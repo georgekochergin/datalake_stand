@@ -8,7 +8,7 @@ from airflow.providers.standard.operators.python import PythonOperator
 
 
 def _validate_load_placeholder(**_) -> None:
-    print("[validate_load] placeholder: метод валидации (см. docs/README.md)")
+    print("[validate_load] placeholder: метод валидации (см. README.md)")
 
 
 with DAG(
