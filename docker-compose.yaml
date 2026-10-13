@@ -15,19 +15,11 @@ services:
 
   sydafa:
     image: ${SYDAFA_IMAGE:-sydafa:latest}
-    environment:
-      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./sydafa:/app/config:ro
       - sydafa_state:/state
     ports: ["8090:8000"]
-    healthcheck:
-      test: ["CMD", "python3", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').getcode() == 200 else 1)"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 90s
     networks: [dlh-poc]
 
   # ---------- Каталог метаданных ----------
