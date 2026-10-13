@@ -15,7 +15,7 @@ Airflow 3.3.2 убрал/переименовал часть API из Airflow 2.
 
 Сервис Oracle в стенде — `demo` (`ORACLE_DATABASE: demo`), а не `FREEPDB1`.
 Драйвер Spark читает `ORACLE_SERVICE` из окружения воркера; если не задан —
-дефолт в `spark/jobs/load_ods_oracle.py` теперь `demo`.
+дефолт в `test/spark-jobs/load_ods_oracle.py` теперь `demo`.
 
 ## Триггер DAG через REST не создаёт run / state ≠ success
 
@@ -68,8 +68,8 @@ Airflow 3.3.2 убрал/переименовал часть API из Airflow 2.
 
 ## MSSQL `Cannot open database "sydafa"`
 
-- БД `sydafa`, суперпользователя `sydafa`/`sydafa` и читателя `reader`/`reader` создаёт `sydafa` при старте.
-  Если сервис sydafa не готов (healthcheck 503) — БД/логины ещё не созданы.
+- БД `sydafa` и reader создаёт sydafa при **первом wake_up** (не при старте API).
+  `/health` 200 значит готов API, не обязательно прогрета СУБД. Вызовите `/exec` или `/activate`.
 
 ## MSSQL: закреплённый образ
 

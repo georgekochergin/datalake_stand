@@ -1,0 +1,41 @@
+services:
+  sydafa:
+    volumes: !override
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./test/sydafa:/app/config:ro
+      - sydafa_state:/state
+
+  spark-master:
+    volumes: !override
+      - ./test/spark-jobs:/opt/spark-jobs:ro
+
+  spark-worker:
+    volumes: !override
+      - ./test/spark-jobs:/opt/spark-jobs:ro
+
+  trino:
+    volumes: !override
+      - ./conf/trino/catalog:/etc/trino/catalog:ro
+      - ./conf/trino/config.properties:/etc/trino/config.properties:ro
+      - ./conf/trino/password-authenticator.properties:/etc/trino/password-authenticator.properties:ro
+      - ./conf/trino/password.db:/etc/trino/password.db:ro
+      - ./conf/trino/keystore.p12:/etc/trino/keystore.p12:ro
+      - ./test/trino-sql:/opt/trino-sql:ro
+
+  airflow-init:
+    volumes: !override
+      - ./test/dags:/opt/airflow/dags
+
+  airflow-scheduler:
+    volumes: !override
+      - ./test/dags:/opt/airflow/dags
+      - ./test/spark-jobs:/opt/spark-jobs:ro
+      - ./test/trino-sql:/opt/airflow/sql:ro
+
+  airflow-dag-processor:
+    volumes: !override
+      - ./test/dags:/opt/airflow/dags
+
+  airflow-webserver:
+    volumes: !override
+      - ./test/dags:/opt/airflow/dags

@@ -5,6 +5,7 @@
 #   ./test/test.sh --verify  — быстрые smoke-проверки на уже запущенном стенде (бывший verify.sh)
 set -uo pipefail
 cd "$(dirname "$0")/.."
+COMPOSE=(docker compose -f docker-compose.yaml -f test/docker-compose.override.yaml)
 
 MODE="full"
 if [ $# -gt 0 ]; then
@@ -121,7 +122,7 @@ cleanup() {
   if [ -n "$ids" ]; then
     echo "$ids" | xargs docker rm -f >/dev/null 2>&1 || true
   fi
-  docker compose down -v --remove-orphans
+  "${COMPOSE[@]}" down -v --remove-orphans
   docker rm -f mssql-source oracle-source >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
@@ -138,7 +139,7 @@ if ! docker image inspect "$SYDAFA_IMG" >/dev/null 2>&1; then
   fi
 fi
 
-docker compose up -d --build
-docker compose run --rm --build test-runner
+"${COMPOSE[@]}" up -d --build
+"${COMPOSE[@]}" run --rm --build test-runner
 rc=$?
 exit $rc
