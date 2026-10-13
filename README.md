@@ -187,26 +187,39 @@ REST-интерфейс: `http://localhost:8090`, интерактивная д�
 
 | Метод | Путь | Назначение |
 | --- | --- | --- |
-| GET | `/health` | Готовность API sydafa (не прогрев БД) |
+| GET | `/health` | Готовность API sydafa |
 | GET | `/sources` | Список зарегистрированных источников |
-| GET | `/sources/{source}` | Метаданные источника, статус reader и список таблиц |
+| POST | `/sources` | Динамическая регистрация нового инстанса `{"name": "...", "type": "..."}` |
+| DELETE | `/sources/{source}` | Удаление инстанса СУБД и контейнера |
+| GET | `/sources/{source}` | Метаданные источника, статус reader, схема и connection |
 | GET | `/sources/{source}/schema` | Текущая live-схема источника (JSON) |
-| GET | `/sources/{source}/status` | Состояние контейнера, `host_port` |
-| POST | `/sources/{source}/activate` | Разбудить и опубликовать host-порт (`?ttl_minutes=15`) |
-| POST | `/sources/{source}/deactivate` | Остановить контейнер |
-| GET | `/tables/{source}/{schema}/{table}` | Схема конкретной таблицы |
-| POST | `/sources/{source}/schema/evolve` | Транзакционная эволюция схем (All-or-Nothing rollback) |
-| POST | `/tables/{source}/{schema}/{table}/append` | Генерация и вставка строк с соблюдением связей (FK) |
-| POST | `/tables/{source}/{schema}/{table}/update` | Параметризованное обновление строк по предикату |
-| POST | `/tables/{source}/{schema}/{table}/delete` | Удаление строк по предикату (с контролем связей FK) |
+| GET | `/sources/{source}/status` | Состояние контейнера, TTL, реквизиты `connection` |
+| POST | `/sources/{source}/activate` | Разбудить базу и продлить TTL (`?ttl_minutes=15`) |
+| POST | `/sources/{source}/deactivate` | Остановить контейнер для освобождения RAM |
+| POST | `/sources/{source}/exec` | Единый транзакционный метод DDL + DML (All-or-Nothing) |
 
 #### Документация и спецификация API sydafa
 
 Вся детальная документация, правила интеграции и спецификации вынесены в репозиторий проекта:
-- 📖 [Руководство по интеграции sydafa в другие проекты](https://github.com/georgekochergin/sydafa#интеграция-в-сторонние-проекты) (docker-compose, сеть, volumes, healthcheck);
-- 🔄 [Спецификация API эволюции схемы (10 операций миграций)](https://github.com/georgekochergin/sydafa#транзакционная-эволюция-схем-post-sourcessourceschemaevolve);
-- 🧬 [Семантика колонок и генераторов данных (`sequence`, `faker`, `choice`, `random_decimal`, `random_date`)](https://github.com/georgekochergin/sydafa#семантика-колонок-и-генераторов-данных-generator);
-- 💾 [Спецификация DML API (`append`, `update`, `delete`)](https://github.com/georgekochergin/sydafa#манипуляция-данными-dml-api).
+- 📖 [Руководство по sydafa](https://github.com/georgekochergin/sydafa);
+- 🔄 Спецификация транзакционного метода `POST /sources/{source}/exec` (DDL + DML);
+- 🧬 Семантика генераторов синтетических данных (`sequence`, `faker`, `choice`, `random_decimal`, `random_date`).
+
+---
+
+### Сценарий подключения к внешней sydafa (раздельный контур)
+
+Если сервис `sydafa` развернут на отдельном сервере или в отдельном независимом Compose-проекте, стенд КХД настраивается следующим образом:
+1. В `docker-compose.yaml` стенда сервис `sydafa` отключается (комментируется блок `sydafa:`).
+2. В файле `.env` (или переменных сервисов Spark/Airflow) задаются внешние адреса:
+   ```bash
+   SYDAFA_URL=http://<IP_ИЛИ_HOST_SYDAFA>:8090
+   MSSQL_HOST=<IP_ИЛИ_HOST_SYDAFA>
+   MSSQL_PORT=14330
+   ORACLE_HOST=<IP_ИЛИ_HOST_SYDAFA>
+   ORACLE_PORT=15210
+   ```
+3. Если оба Compose работают на одном локальном компьютере, в качестве хоста используется `host.docker.internal` (с директивой `extra_hosts: ["host.docker.internal:host-gateway"]`). Spark и Airflow подключаются под пользователем `sydafa` / `sydafa`.
 
 ---
 
@@ -214,8 +227,8 @@ REST-интерфейс: `http://localhost:8090`, интерактивная д�
 
 Отдельные DAG-и в Airflow (расписание `schedule=None` — запуск вручную):
 
-- `ods_load_mssql` → `test/spark-jobs/load_ods_mssql.py`: читает `demo.*` из sydafa-mssql-source и перезаписывает (AS IS) `iceberg.ods.mssql_customers`, `mssql_orders`, `mssql_products`;
-- `ods_load_oracle` → `test/spark-jobs/load_ods_oracle.py`: читает `demo.*` из sydafa-oracle-source и перезаписывает (AS IS) `iceberg.ods.oracle_customers`, `oracle_orders`, `oracle_products`.
+- `ods_load_mssql` → `test/spark-jobs/load_ods_mssql.py`: читает `demo.*` из sydafa-mssql-mssql-source и перезаписывает (AS IS) `iceberg.ods.mssql_customers`, `mssql_orders`, `mssql_products`;
+- `ods_load_oracle` → `test/spark-jobs/load_ods_oracle.py`: читает `demo.*` из sydafa-oracle-oracle-source и перезаписывает (AS IS) `iceberg.ods.oracle_customers`, `oracle_orders`, `oracle_products`.
 
 Демо-DAG-и изолированы в `test/dags/demo/` и подключаются override-ом теста. Запуск — Airflow UI → DAGs → unpause & ▶, либо CLI:
 
