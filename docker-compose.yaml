@@ -206,7 +206,7 @@ services:
   airflow-webserver:
     build: {context: ., dockerfile: airflow/Dockerfile}
     image: dlh-poc-airflow:latest
-    command: ["api-server"] # ⚠ Airflow 3.x: проверить точное имя команды/компонента на этапе реализации (см. docs/README.md)
+    command: ["api-server"] # ⚠ Airflow 3.x: проверить точное имя команды/компонента на этапе реализации (см. README.md)
     environment: *airflow-env
     ports: ["8089:8080"]
     volumes: ["./airflow/dags:/opt/airflow/dags"]
@@ -215,10 +215,10 @@ services:
         condition: service_completed_successfully
     networks: [dlh-poc]
 
-  # ---------- Полный тестовый флоу (запускается через scripts/full-test.sh) ----------
+  # ---------- Полный тестовый флоу (запускается через test/test.sh) ----------
 
   test-runner:
-    build: ./test/runner
+    build: ./test
     image: dlh-poc-test-runner
     profiles: ["test"]
     environment:

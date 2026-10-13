@@ -233,7 +233,7 @@ docker compose exec -T airflow-scheduler airflow dags trigger build_marts_demo
 Запуск (из корня репозитория):
 
 ```bash
-./scripts/full-test.sh
+./test/test.sh
 ```
 
 Скрипт делает:
@@ -250,7 +250,7 @@ docker compose exec -T airflow-scheduler airflow dags trigger build_marts_demo
 4. `docker compose down -v --remove-orphans` — в любом исходе гасит сборку: удаляет контейнеры, сети и volume-ы (`pg_catalog_data`, `airflow_pg_data`, `silo_data`, `sydafa_state`).
 
 Результат: финальная строка `PASS=… FAIL=…`; exit-code 0 — всё прошло, при
-FAIL — смотреть `docs/troubleshooting.md`.
+FAIL — смотреть `test/troubleshooting.md`.
 После прогона стенд погашен, данные удалены; образы остаются в локальном кеше.
 
 Предусловия: Docker + Docker Compose, склонированный репозиторий, `.env`

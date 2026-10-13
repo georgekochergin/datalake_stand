@@ -251,6 +251,9 @@ def main():
     code, _ = wait_http("sydafa /health", SYDAFA + "/health", 200, 60, 3)
     check("sydafa /health", code, 200)
 
+    code, _ = http("GET", SYDAFA + "/docs", None, None, timeout=10)
+    check("sydafa /docs", code, 200)
+
     code, raw = wait_http("sydafa /sources", SYDAFA + "/sources", 200, 40, 3)
     check("sydafa /sources", code, 200)
     try:
@@ -281,6 +284,16 @@ def main():
         tables = meta.get("tables", []) if isinstance(meta, dict) else []
         table_names = sorted(t["name"] for t in tables)
         check("GET /sources/%s tables" % src, ",".join(table_names), "customers,orders,products")
+
+    # 2b. Проверка безопасности sydafa exec (отклонение инъекций в именах колонок)
+    inj_code, _ = sydafa_exec("mssql", [{
+        "op": "update",
+        "schema": "demo",
+        "table": "customers",
+        "predicate": [{"column": "customer_id; DROP TABLE demo.customers --", "operator": "=", "value": 1}],
+        "set": {"segment": "VIP"},
+    }])
+    check("sydafa exec rejects injected column", inj_code, 422)
 
     # 3. Очистка таблиц через единый POST /sources/{source}/exec (truncate в топологическом порядке)
     for src in sources:
