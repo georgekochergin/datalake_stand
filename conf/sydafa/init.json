@@ -1,5 +1,8 @@
 {
   "sources": {
-    "mssql": []
+    "mssql": {
+      "type": "mssql",
+      "operations": []
+    }
   }
 }
