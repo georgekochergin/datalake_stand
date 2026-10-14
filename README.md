@@ -9,8 +9,8 @@
 | Путь | Назначение |
 |---|---|
 | `airflow/` | Пользовательские DAG-и (каркас удерживается `.gitkeep`). Содержит плагин `airflow/plugins/sydafa_plugin.py` (`SydafaActivateOperator`). |
-| `spark/` | Пользовательские Spark-job-ы (каркас удерживается `.gitkeep`). Не коммитятся. |
-| `trino/` | Пользовательский SQL (каркас удерживается `.gitkeep`). Не коммитятся. |
+| `spark/`              | Пользовательские Spark-job-ы (каркас удерживается `.gitkeep`).                                                                          |
+| `trino/`              | Пользовательский SQL (каркас удерживается `.gitkeep`).                                                                                  |
 | `conf/airflow` | Dockerfile, requirements, пароли UI |
 | `conf/spark` | Dockerfile, spark-defaults.conf |
 | `conf/trino` | runtime-конфиг Trino (catalog, TLS, password.db) |
@@ -287,11 +287,27 @@ DAG `build_marts_demo` демонстрирует расчет витрин дв
 
 ## Учётные данные
 
-Тестовый стенд — везде, где логин/пароль настраиваемы, используется
-`admin` / `admin` (см. `.env`). Исключение по имени — системный
-bootstrap-логин MSSQL `sa`: имя фиксировано образом, а пароль не может быть
-буквально `admin` (MSSQL требует длину ≥8 и минимум 3 из 4 категорий символов),
-поэтому у `sa` остаётся сильный пароль `AdminPassword1!`, после первичного bootstrap системный `sa` отключается (`DISABLE`), внешний админский доступ закрыт, а для чтения создаётся публичная учетная запись `sydafa`/`sydafa` (только `SELECT`).
-SILO (консоль `:9001`) — `admin`/`admin123` (MinIO требует пароль ≥8 символов,
-поэтому буквально `admin` невозможен), pg-catalog, airflow-postgres,
-Airflow UI (`:8089`), Trino (`:8443`) — везде `admin`/`admin`. У Oracle системные SYS/SYSTEM и pdbadmin блокируются/удаляются, читатель — `sydafa` / `sydafa`.
+Реквизиты доступа к сервисам стенда для пользователей и инструментов разработки:
+
+- **Источники СУБД (MSSQL, Oracle)**:
+  - Пользователь: `sydafa`
+  - Пароль: `sydafa`
+  - Назначение: чтение данных (`SELECT`) для Spark, Airflow, Trino и подключений из DBeaver.
+- **Trino** (`https://localhost:8443`):
+  - Пользователь: `admin`
+  - Пароль: `admin`
+  - Назначение: выполнение SQL-запросов через CLI или DBeaver.
+- **Airflow UI** (`http://localhost:8089`):
+  - Пользователь: `admin`
+  - Пароль: `admin`
+  - Назначение: веб-интерфейс оркестрации пайплайнов.
+- **SILO (S3-хранилище)**:
+  - Веб-консоль (`http://localhost:9001`): `admin` / `admin123`
+  - S3 API (`http://localhost:9000`): `admin` / `admin123`
+- **Базы метаданных (pg-catalog, airflow-postgres)**:
+  - Пользователь: `admin`
+  - Пароль: `admin` (настраиваются в файле `.env`).
+- **Сервисы без авторизации**:
+  - Spark Master UI: `http://localhost:8080`
+  - Spark Worker UI: `http://localhost:8081`
+  - sydafa Swagger UI: `http://localhost:8090/docs`
