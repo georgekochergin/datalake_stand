@@ -1,20 +1,20 @@
 # datalake_stand — Инструкции проекта
 
 ## Контекст и архитектура
-- Проект стенда КХД/DLH: Trino, Spark, Nessie (Iceberg REST), Airflow, SILO (S3 storage), Postgres каталоги.
-- Эмуляция реляционных источников (MSSQL, Oracle) выполняется внешним сервисом `sydafa` (`ghcr.io/georgekochergin/sydafa:latest` или локальный `sydafa:latest`).
-- Конфигурация источников стенда: `sydafa/sources/` (`mssql.yaml`, `oracle.yaml`) и `sydafa/init.json`.
-- Учетные данные инспектора источников: `reader`/`reader` (только SELECT).
-- Даги витрин (datamart DAGs) должны опираться на таблицы, имеющиеся в источниках согласно `sydafa/init.json`.
-- Все демонстрационные DAG-и изолируются в `airflow/dags/demo/` и создаются в выключенном состоянии (`is_paused_upon_creation=True`).
+- Стенд КХД/DLH: Trino, Spark, Nessie, Airflow, SILO, Postgres. Источники — `sydafa`.
+- Каркас: `airflow/` `spark/` `trino/` (пользовательский код, не в git), `conf/` (как запущен стенд), `test/` (демо + e2e).
+- Конфигурация источников sydafa: через `init.json` (`conf/sydafa/init.json` на живом стенде, `test/sydafa/init.json` в тестах).
+- Читатель источников: `sydafa`/`sydafa` (только SELECT). Админ снаружи недоступен.
+- Внутренние DNS-имена СУБД: `sydafa-mssql-mssql-source:1433`, `sydafa-oracle-oracle-source:1521`.
+- Демо-DAG-и: `test/dags/`, подключаются `test/docker-compose.override.yaml`.
+- Инспекция БД: `POST /sources/{source}/activate` → объект `connection` в ответе; внешний порт хоста задается переменной `SYDAFA_EXT_PORT_MSSQL`.
+- Плагин sydafa: `airflow/plugins/sydafa_plugin.py` (`SydafaActivateOperator`) для явного пробуждения СУБД перед чтением.
 
 ## Git
-- Все новые изменения оформляются в отдельных ветках с префиксом `kodik/` (например, `kodik/feature-name`).
-- Запрещено коммитить напрямую в `main`.
-- Обязательно создавай Pull Request и возвращай ссылки на pull request (-ы) в финальном резюме по доработкам.
+- Ветки с префиксом `kodik/`. Не коммитить в `main`. Обязателен Pull Request.
 
 ## Testing
-- Для проверки этого стенда используется строго команда: `./test/test.sh`
-- Скрипт поднимает весь стек, при необходимости собирает `sydafa` из `../sydafa`, прогоняет сквозные проверки стенда в контейнере `test-runner` и корректно гасит окружение с очисткой динамических контейнеров (`mssql-source`, `oracle-source`).
-- Для быстрых проверок компонентов на уже работающем стенде можно использовать `./test/test.sh --verify`.
-- Критерий успешности: вывод `FAIL=0` с кодом возврата `0`.
+- Обязательное правило: Любой новый или измененный функционал пайплайнов, операторов и интеграций должен сопровождаться тестами (модульными или e2e) с проверкой обработки краевых случаев.
+- Полный e2e-прогон: `./test/test.sh` (полностью изолированный тестовый проект `dlh-test`, безопасен для параллельного запуска с живым стендом).
+- Verify на уже поднятом стеке: `./test/test.sh --verify`.
+- Критерий: `FAIL=0`, exit 0. Не допускается сдача задач и мерж при непройденных проверках.

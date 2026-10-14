@@ -13,7 +13,7 @@ ADD https://repo1.maven.org/maven2/com/microsoft/sqlserver/mssql-jdbc/12.10.0.jr
 ADD https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc11/23.8.0.25.04/ojdbc11-23.8.0.25.04.jar \
     /opt/spark/jars/ojdbc11-23.8.0.25.04.jar
 
-COPY spark/conf/spark-defaults.conf /opt/spark/conf/spark-defaults.conf
+COPY conf/spark/spark-defaults.conf /opt/spark/conf/spark-defaults.conf
 
 RUN chmod -R a+rX /opt/spark
 
@@ -24,7 +24,7 @@ RUN pip install --no-cache-dir --user pyspark==3.5.5
 ENV SPARK_HOME=/opt/spark
 ENV PATH="/opt/spark/bin:${PATH}"
 
-COPY airflow/requirements.txt /requirements.txt
+COPY conf/airflow/requirements.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
 
-COPY --chown=50000:0 airflow/simple_auth_manager_passwords.json /opt/airflow/simple_auth_manager_passwords.json.generated
+COPY --chown=50000:0 conf/airflow/simple_auth_manager_passwords.json /opt/airflow/simple_auth_manager_passwords.json.generated

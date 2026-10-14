@@ -3,3 +3,15 @@ __pycache__/
 .venv/
 *.log
 .DS_Store
+
+# Пользовательский код стенда (каркас каталогов удерживается через .gitkeep)
+/airflow/*
+!/airflow/.gitkeep
+!/airflow/plugins/
+!/airflow/plugins/**
+
+/spark/*
+!/spark/.gitkeep
+
+/trino/*
+!/trino/.gitkeep

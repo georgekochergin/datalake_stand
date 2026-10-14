@@ -1,4 +1,4 @@
-"""AS IS загрузка demo.* (схема=пользователь demo) из oracle-source
+"""AS IS загрузка demo.* (схема=пользователь demo) из sydafa-oracle-source
 в Iceberg ods.oracle_*. См. замечание о стратегии загрузки в load_ods_mssql.py.
 """
 import json
@@ -7,7 +7,7 @@ import urllib.request
 
 from pyspark.sql import SparkSession
 
-ORACLE_HOST = os.environ.get("ORACLE_HOST", "oracle-source")
+ORACLE_HOST = os.environ.get("ORACLE_HOST", "sydafa-oracle-oracle-source")
 ORACLE_PORT = os.environ.get("ORACLE_PORT", "1521")
 SYDAFA_URL = os.environ.get("SYDAFA_URL", "http://sydafa:8000")
 
@@ -21,7 +21,7 @@ def _get_source_metadata() -> dict:
         print(f"[load_ods_oracle] Внимание: не удалось получить метаданные от {url} ({e}). Используются дефолтные параметры.")
         return {
             "database": "sydafa",
-            "reader": "reader",
+            "reader": "sydafa",
             "tables": [
                 {"schema": "demo", "name": "customers"},
                 {"schema": "demo", "name": "products"},
@@ -33,7 +33,7 @@ def _get_source_metadata() -> dict:
 def main() -> None:
     meta = _get_source_metadata()
     database = meta.get("database", "sydafa")
-    reader = meta.get("reader", "reader")
+    reader = meta.get("reader", "sydafa")
     tables = meta.get("tables", [])
 
     jdbc_url = f"jdbc:oracle:thin:@//{ORACLE_HOST}:{ORACLE_PORT}/{database}"

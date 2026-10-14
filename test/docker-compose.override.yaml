@@ -1,0 +1,60 @@
+services:
+  sydafa:
+    environment:
+      - SYDAFA_CONTAINER_PREFIX=sydafa-test-
+      - SYDAFA_MAX_TTL_MINUTES=30
+      - SYDAFA_TTL_MINUTES=15
+    volumes: !override
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./test/sydafa/init.json:/app/config/init.json:ro
+      - sydafa_state:/state
+    ports: !override []
+
+  nessie:
+    ports: !override []
+
+  silo:
+    ports: !override []
+
+  spark-master:
+    volumes: !override
+      - ./test/spark-jobs:/opt/spark-jobs:ro
+    ports: !override []
+
+  spark-worker:
+    volumes: !override
+      - ./test/spark-jobs:/opt/spark-jobs:ro
+    ports: !override []
+
+  trino:
+    volumes: !override
+      - ./conf/trino/catalog:/etc/trino/catalog:ro
+      - ./conf/trino/config.properties:/etc/trino/config.properties:ro
+      - ./conf/trino/password-authenticator.properties:/etc/trino/password-authenticator.properties:ro
+      - ./conf/trino/password.db:/etc/trino/password.db:ro
+      - ./conf/trino/keystore.p12:/etc/trino/keystore.p12:ro
+      - ./test/trino-sql:/opt/trino-sql:ro
+    ports: !override []
+
+  airflow-init:
+    volumes: !override
+      - ./test/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins:ro
+
+  airflow-scheduler:
+    volumes: !override
+      - ./test/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins:ro
+      - ./test/spark-jobs:/opt/spark-jobs:ro
+      - ./test/trino-sql:/opt/airflow/sql:ro
+
+  airflow-dag-processor:
+    volumes: !override
+      - ./test/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins:ro
+
+  airflow-webserver:
+    volumes: !override
+      - ./test/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins:ro
+    ports: !override []

@@ -4,6 +4,23 @@
 источников (MSSQL, Oracle) в ODS-слой Iceberg **AS IS**, и демонстрация
 двух способов трансформации данных внутри DataLake (Trino SQL и Spark).
 
+## Структура директорий стенда
+
+| Путь | Назначение |
+|---|---|
+| `airflow/` | Пользовательские DAG-и (каркас удерживается `.gitkeep`). Содержит плагин `airflow/plugins/sydafa_plugin.py` (`SydafaActivateOperator`). |
+| `spark/`              | Пользовательские Spark-job-ы (каркас удерживается `.gitkeep`).                                                                          |
+| `trino/`              | Пользовательский SQL (каркас удерживается `.gitkeep`).                                                                                  |
+| `conf/airflow` | Dockerfile, requirements, пароли UI |
+| `conf/spark` | Dockerfile, spark-defaults.conf |
+| `conf/trino` | runtime-конфиг Trino (catalog, TLS, password.db) |
+| `conf/silo` | `init-bucket.sh` |
+| `conf/sydafa` | декларативный манифест `init.json` источников СУБД |
+| `test/` | демо-DAG-и (`test/dags/`), spark-jobs, trino-sql, `test/sydafa/init.json`, `test.sh`, `run_flow.py`, `README.md`, override |
+| `docker-compose.yaml` | каркас стенда без демо-наполнения |
+
+Пользовательский код кладётся в `airflow/`, `spark/`, `trino/` на хосте — compose монтирует эти каталоги в контейнеры (а каталог `airflow/plugins` монтируется в `/opt/airflow/plugins:ro`).
+
 ## Архитектура
 
 ```mermaid
@@ -11,17 +28,16 @@ flowchart TB
     ANALYST["Аналитик\n(Trino CLI / BI-инструмент)"]
 
     subgraph Sources["Источники данных (оркестрируются sydafa)"]
-        MSSQL[("mssql-source\nmcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04\nDB: sydafa\nuser: reader (только чтение)")]
-        ORA[("oracle-source\ngvenzl/oracle-free:23-slim-faststart\nPDB: sydafa\nuser: reader (только чтение)")]
+        MSSQL[("sydafa-mssql-mssql-source:1433\nmcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04\nDB: sydafa\nuser: sydafa (только чтение)")]
+        ORA[("sydafa-oracle-oracle-source:1521\ngvenzl/oracle-free:23-slim-faststart\nPDB: sydafa\nuser: sydafa (только чтение)")]
     end
 
     subgraph SydafaService["Эмулятор источников (подключаемый модуль sydafa)"]
         direction TB
-        CFG1[("sydafa/sources/mssql.yaml")]
-        CFG2[("sydafa/sources/oracle.yaml")]
-        INIT[("sydafa/init.json")]
-        API["sydafa:latest (FastAPI, Swagger /docs :8090)\nТранзакционная эволюция схем (API-first)\nСинтетическая генерация (append / update / delete)"]
-        STATE[("sydafa_state volume:\nlive-схема и состояние")]
+        CFG1[("conf/sydafa/init.json")]
+        CFG2[("test/sydafa/init.json (демо)")]
+        API["sydafa:latest (FastAPI, Swagger /docs :8090)\nТранзакционная эволюция схем (API-first)\nСинтетическая генерация данных (POST /exec)\nЧестный TTL и Safe GET (RFC 7231)"]
+        STATE[("sydafa_state volume:\nlive-схема и статус")]
         CFG1 -. "bind-mount ro" .-> API
         CFG2 -. "bind-mount ro" .-> API
         API --- STATE
@@ -44,9 +60,9 @@ flowchart TB
     TRINO["trino\ntrinodb/trino:479"]
 
     subgraph Orchestration["Airflow 3.3.2-python3.11 (LocalExecutor)"]
-        D1["DAG demo/ods_load_mssql\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (заглушка, метод валидации — TBD)"]
-        D2["DAG demo/ods_load_oracle\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (заглушка, метод валидации — TBD)"]
-        D3["DAG demo/build_marts_demo\nschedule=None (вручную)\nзадача A: PythonOperator+TrinoHook / задача B: SparkSubmitOperator"]
+        D1["DAG ods_load_mssql\ntask: activate_source (SydafaActivateOperator)\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (заглушка)"]
+        D2["DAG ods_load_oracle\ntask: activate_source (SydafaActivateOperator)\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (заглушка)"]
+        D3["DAG build_marts_demo\nschedule=None (вручную)\nзадача A: PythonOperator+TrinoHook / задача B: SparkSubmitOperator"]
     end
 
     API -- "Docker SDK: запуск и bootstrap" --> MSSQL
@@ -54,10 +70,13 @@ flowchart TB
     API -- "Транзакционный DDL (schema/evolve)\nDML (append/update/delete)" --> MSSQL
     API -- "Транзакционный DDL (schema/evolve)\nDML (append/update/delete)" --> ORA
 
+    D1 -- "task activate_source\n(POST /activate)" --> API
+    D2 -- "task activate_source\n(POST /activate)" --> API
+
     D1 --> SM
     D2 --> SM
-    MSSQL -- "JDBC read (user: reader)" --> SW
-    ORA -- "JDBC read (user: reader)" --> SW
+    MSSQL -- "JDBC read (user: sydafa)" --> SW
+    ORA -- "JDBC read (user: sydafa)" --> SW
     SW -- "write ods.mssql_*, ods.oracle_* AS IS" --> SILO
     SM -. "catalog ops" .-> NESSIE
 
@@ -78,8 +97,8 @@ flowchart TB
 
 | Компонент           | Образ/версия                                                                                     |
 | ------------------- | ------------------------------------------------------------------------------------------------ |
-| mssql-source        | `mcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04`                                          |
-| oracle-source       | `gvenzl/oracle-free:23-slim-faststart`                                                           |
+| sydafa-mssql-source | `mcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04`                                          |
+| sydafa-oracle-source| `gvenzl/oracle-free:23-slim-faststart`                                                           |
 | pg-catalog          | `postgres:16.15-bookworm`                                                                        |
 | nessie              | `ghcr.io/projectnessie/nessie:0.99.0`                                                           |
 | silo                | `pgsty/silo:RELEASE.2026-09-16T00-00-00Z`                                                        |
@@ -92,7 +111,7 @@ flowchart TB
 **Контур B (эмуляция источников данных, подключаемый компонент):** `sydafa` —
 автономный сервис (Docker-образ `sydafa:latest`), оркестрирующий контейнеры СУБД,
 предоставляющий REST API для транзакционной эволюции схем и FK-aware генерации синтетических данных.
-Конфигурация источников стенда: `sydafa/sources/mssql.yaml` / `oracle.yaml` и файл начальной структуры `sydafa/init.json`.
+Конфигурация живого стенда: `conf/sydafa/init.json`. Демо (оба источника + тестовые таблицы) — `test/sydafa/init.json`, подключается override-ом теста.
 
 ## Быстрый старт
 
@@ -104,8 +123,6 @@ docker compose up -d --build
 
 | Сервис                       | Порт на хосте |
 | ---------------------------- | ------------- |
-| mssql-source                 | 1433          |
-| oracle-source                | 1521          |
 | sydafa (Swagger UI :8090)    | 8090          |
 | nessie                       | 19120         |
 | silo (S3 API / консоль)      | 9000 / 9001   |
@@ -128,30 +145,39 @@ docker compose up -d --build
 
 ### Подключение из DBeaver (на машине, где запущен docker)
 
-DBeaver подключается к `localhost` — порты опубликованы в `docker-compose.yaml`
-(см. таблицу портов выше).
-
 **Trino** — драйвер «Trino» (встроен в DBeaver):
 - Host: `localhost`, Port: `8443`
 - Use SSL: да (Trino работает по HTTPS с самоподписанным сертификатом)
 - Catalog/Database: `iceberg`
 - Username: `admin`, Password: `admin`
-  (включена авторизация файловым password-authenticator'ом — см. `trino/etc/`)
-- На вкладке Driver properties отключить проверку сертификата:
-  `SSL=true;SSLVerification=NONE` (самоподписанный сертификат контейнера)
-- JDBC URL целиком: `jdbc:trino://localhost:8443/iceberg?SSL=true&SSLVerification=NONE`
+  (password-authenticator — `conf/trino/`)
+- Driver properties: `SSL=true;SSLVerification=NONE`
+- JDBC URL: `jdbc:trino://localhost:8443/iceberg?SSL=true&SSLVerification=NONE`
 
-**mssql-source** — драйвер «SQL Server» (Microsoft):
-- Host: `localhost`, Port: `1433`
-- Database: `sydafa`
-- Authentication: SQL Server Authentication
-- Username: `reader`, Password: `reader` (только чтение; для полного доступа — `sydafa` / `sydafa`)
-- На вкладке Driver properties (или прямо в URL): `encrypt=false;trustServerCertificate=true`.
+**Источники, управляемые sydafa**:
 
-**oracle-source** — драйвер «Oracle»:
-- Host: `localhost`, Port: `1521`
-- Connection type: Service Name, значение `sydafa`
-- Username: `reader`, Password: `reader` (только чтение; для полного доступа — `sydafa` / `sydafa`)
+1. Откройте в браузере Swagger UI: `http://localhost:8090/docs`.
+2. Выполните метод `POST /sources/{mssql|oracle}/activate?ttl_minutes=15` (нажмите "Try it out" -> "Execute").
+3. Из ответа возьмите параметры подключения `connection`.
+4. По истечении `ttl_minutes` контейнер аккуратно останавливается демоном sydafa. 
+
+### Добавление источника на живом стенде
+
+Манифест `init.json` является **стартовым семенем (Seed)** и применяется sydafa **строго один раз** при чистом томе состояния (`/state`). На уже запущенном стенде добавление и настройка источников выполняется **динамически через REST API**:
+
+1. **Регистрация источника** (Orchestration API):
+   ```bash
+   # Регистрация нового инстанса СУБД (например, crm типа oracle)
+   curl -X POST http://localhost:8090/sources \
+     -H 'Content-Type: application/json' \
+     -d '{"name": "crm", "type": "oracle"}'
+   ```
+2. **Создание схем, таблиц и наполнение данными** (Data & Schema API):
+   Отправьте транзакционный батч операций через `POST /sources/{name}/exec` (или через Swagger UI: `http://localhost:8090/docs`). База автоматически запустится, создаст таблицы и сгенерирует данные.
+3. **Внешний порт для DBeaver**:
+   Если для нового источника требуется постоянный проброс порта на хост, укажите переменную `SYDAFA_EXT_PORT_<NAME>` в `docker-compose.yaml` (например, `SYDAFA_EXT_PORT_CRM=15211`) и перезапустите контейнер `sydafa`: `docker compose up -d sydafa`.
+
+> **Сброс к init.json**: если требуется пересоздать базы с нуля строго по файлу `conf/sydafa/init.json`, выполните сброс томов Compose: `docker compose down -v`.
 
 ## Работа со стендом
 
@@ -160,11 +186,12 @@ DBeaver подключается к `localhost` — порты опублико�
 Сервис **sydafa** (Synthetic Data Factory & DB Orchestrator) вынесен в отдельный независимый репозиторий [georgekochergin/sydafa](https://github.com/georgekochergin/sydafa) и поставляется в виде Docker-образа (`ghcr.io/georgekochergin/sydafa:latest` или локальный `sydafa:latest`).
 
 На данном стенде `sydafa` эмулирует реляционные источники данных:
-- Автоматически оркестрирует контейнеры СУБД `mssql-source` и `oracle-source` через Docker API;
-- Создаёт рабочую базу/PDB `sydafa` и пользователя-инспектора `reader` / `reader` с доступом строго на чтение;
-- Предоставляет REST API для транзакционной эволюции схем данных (API-first) и синтетической генерации данных с соблюдением целостности внешних ключей.
+- Лениво оркестрирует контейнеры СУБД `sydafa-mssql-mssql-source` / `sydafa-oracle-oracle-source` через Docker API (данные живут в named volume);
+- Создаёт рабочую базу/PDB `sydafa` и читателя `sydafa` / `sydafa` (только чтение); админский доступ извне заблокирован;
+- Внешний доступ для DBeaver: `SYDAFA_EXT_PORT_MSSQL=14330` в `docker-compose.yaml`;
+- REST API: транзакционный DDL/DML через `POST /sources/{source}/exec` и lifecycle (`activate` / `deactivate` / `status`).
 
-Конфигурации источников стенда расположены в директории: `sydafa/sources/` (`mssql.yaml`, `oracle.yaml`), а исходная схема таблиц задается через `sydafa/init.json`.
+Конфиг начального семени (Seed) стенда: `conf/sydafa/init.json`. Демо-init: `test/sydafa/init.json`.
 
 REST-интерфейс: `http://localhost:8090`, интерактивная документация: `http://localhost:8090/docs`.
 
@@ -172,86 +199,85 @@ REST-интерфейс: `http://localhost:8090`, интерактивная д�
 
 | Метод | Путь | Назначение |
 | --- | --- | --- |
-| GET | `/health` | Проверка готовности источников (200 OK) |
+| GET | `/health` | Готовность API sydafa |
 | GET | `/sources` | Список зарегистрированных источников |
-| GET | `/sources/{source}` | Метаданные источника, статус reader и список таблиц |
-| GET | `/sources/{source}/schema` | Текущая live-схема источника (JSON) |
-| GET | `/tables/{source}/{schema}/{table}` | Схема конкретной таблицы |
-| POST | `/sources/{source}/schema/evolve` | Транзакционная эволюция схем (All-or-Nothing rollback) |
-| POST | `/tables/{source}/{schema}/{table}/append` | Генерация и вставка строк с соблюдением связей (FK) |
-| POST | `/tables/{source}/{schema}/{table}/update` | Параметризованное обновление строк по предикату |
-| POST | `/tables/{source}/{schema}/{table}/delete` | Удаление строк по предикату (с контролем связей FK) |
+| POST | `/sources` | Динамическая регистрация нового инстанса `{"name": "...", "type": "..."}` |
+| DELETE | `/sources/{source}` | Удаление инстанса СУБД и контейнера |
+| GET | `/sources/{source}` | Метаданные источника, статус reader, объект connection и плоский список таблиц (Safe GET, не будит базу) |
+| GET | `/sources/{source}/schema` | Детальная live-схема источника: таблицы, колонки, типы, генераторы, PK/FK (Safe GET) |
+| GET | `/sources/{source}/status` | Состояние контейнера (idle/running), TTL, реквизиты `connection` (Safe GET) |
+| POST | `/sources/{source}/activate` | Физический запуск СУБД в Docker и установка TTL (`?ttl_minutes=15`) |
+| POST | `/sources/{source}/deactivate` | Принудительная остановка контейнера для освобождения RAM |
+| POST | `/sources/{source}/exec` | Единый транзакционный метод DDL + DML (All-or-Nothing). Будит базу при необходимости |
 
 #### Документация и спецификация API sydafa
 
 Вся детальная документация, правила интеграции и спецификации вынесены в репозиторий проекта:
-- 📖 [Руководство по интеграции sydafa в другие проекты](https://github.com/georgekochergin/sydafa#интеграция-в-сторонние-проекты) (docker-compose, сеть, volumes, healthcheck);
-- 🔄 [Спецификация API эволюции схемы (10 операций миграций)](https://github.com/georgekochergin/sydafa#транзакционная-эволюция-схем-post-sourcessourceschemaevolve);
-- 🧬 [Семантика колонок и генераторов данных (`sequence`, `faker`, `choice`, `random_decimal`, `random_date`)](https://github.com/georgekochergin/sydafa#семантика-колонок-и-генераторов-данных-generator);
-- 💾 [Спецификация DML API (`append`, `update`, `delete`)](https://github.com/georgekochergin/sydafa#манипуляция-данными-dml-api).
+- 📖 [Руководство по sydafa](https://github.com/georgekochergin/sydafa);
+- 🔄 Спецификация транзакционного метода `POST /sources/{source}/exec` (DDL + DML);
+- 🧬 Семантика генераторов синтетических данных (`sequence`, `faker`, `choice`, `random_decimal`, `random_date`).
 
 ---
 
-### Обновление ODS-слоя Iceberg
+### Сценарий подключения к внешней sydafa (раздельный контур)
 
-Отдельные DAG-и в Airflow (расписание `schedule=None` — запуск вручную):
+Если сервис `sydafa` развернут на отдельном сервере или в отдельном независимом Compose-проекте, стенд КХД настраивается следующим образом:
+1. В `docker-compose.yaml` стенда сервис `sydafa` отключается (комментируется блок `sydafa:`).
+2. В файле `.env` (или переменных сервисов Spark/Airflow) задаются внешние адреса:
+   ```bash
+   SYDAFA_URL=http://<IP_ИЛИ_HOST_SYDAFA>:8090
+   MSSQL_HOST=<IP_ИЛИ_HOST_SYDAFA>
+   MSSQL_PORT=14330
+   ORACLE_HOST=<IP_ИЛИ_HOST_SYDAFA>
+   ORACLE_PORT=15210
+   ```
+3. Если оба Compose работают на одном локальном компьютере, в качестве хоста используется `host.docker.internal` (с директивой `extra_hosts: ["host.docker.internal:host-gateway"]`). Spark и Airflow подключаются под пользователем `sydafa` / `sydafa`.
 
-- `ods_load_mssql` → `spark/jobs/load_ods_mssql.py`: читает `demo.*` из mssql-source и перезаписывает (AS IS) `iceberg.ods.mssql_customers`, `mssql_orders`, `mssql_products`;
-- `ods_load_oracle` → `spark/jobs/load_ods_oracle.py`: читает `demo.*` из oracle-source и перезаписывает (AS IS) `iceberg.ods.oracle_customers`, `oracle_orders`, `oracle_products`.
+---
 
-Демо-DAG-и изолированы в подкаталоге `airflow/dags/demo/` и создаются в выключенном состоянии (`is_paused_upon_creation=True`). Запуск — Airflow UI → DAGs → unpause & ▶, либо CLI:
+### Демонстрационные пайплайны (в тестовом контуре)
 
+На живом стенде каталоги `airflow/`, `spark/`, `trino/` предназначены для прикладного кода пользователя. 
+
+Для проверки архитектуры и сквозного тестирования в каталоге `test/` подготовлены эталонные демонстрационные пайплайны (подключаются оверрайдом `test/docker-compose.override.yaml` или при запуске `./test/test.sh`):
+
+#### 1. Демо-загрузка ODS-слоя Iceberg
+Тестовые DAG-и в Airflow (`schedule=None` — ручной запуск или через `run_flow.py`):
+- `ods_load_mssql`:
+  1. Таск `activate_source` (`SydafaActivateOperator` из `airflow/plugins/sydafa_plugin.py`) отправляет `POST /sources/mssql/activate?ttl_minutes=15`, гарантируя запуск СУБД;
+  2. Таск `extract_load` (`SparkSubmitOperator`) запускает `test/spark-jobs/load_ods_mssql.py`: выгружает `demo.*` по JDBC под учеткой `sydafa`/`sydafa` через внутреннюю Docker-сеть в таблицы Iceberg `iceberg.ods.mssql_customers`, `mssql_orders`, `mssql_products`;
+  3. Таск `validate_load` (`PythonOperator`): валидация выгрузки.
+- `ods_load_oracle`:
+  1. Таск `activate_source` (`SydafaActivateOperator`) будит `oracle` через `POST /sources/oracle/activate?ttl_minutes=15`;
+  2. Таск `extract_load` (`SparkSubmitOperator`) запускает `test/spark-jobs/load_ods_oracle.py`: выгружает `demo.*` по JDBC в таблицы Iceberg `iceberg.ods.oracle_customers`, `oracle_orders`, `oracle_products`;
+  3. Таск `validate_load` (`PythonOperator`): валидация выгрузки.
+
+Запуск вручную из UI Airflow или CLI (в тестовом контуре):
 ```bash
-docker compose exec -T airflow-scheduler airflow dags unpause ods_load_mssql
-docker compose exec -T airflow-scheduler airflow dags trigger ods_load_mssql
-docker compose exec -T airflow-scheduler airflow dags unpause ods_load_oracle
-docker compose exec -T airflow-scheduler airflow dags trigger ods_load_oracle
+docker compose -f docker-compose.yaml -f test/docker-compose.override.yaml exec -T airflow-scheduler airflow dags unpause ods_load_mssql
+docker compose -f docker-compose.yaml -f test/docker-compose.override.yaml exec -T airflow-scheduler airflow dags trigger ods_load_mssql
 ```
 
 Проверка результата (Trino): `SELECT count(*) FROM iceberg.ods.mssql_orders;`
 
-### Обновление детального (mart) слоя
+#### 2. Демо-построение детального (mart) слоя
+DAG `build_marts_demo` демонстрирует расчет витрин двумя независимыми движками:
+- `mart_via_trino` → `test/trino-sql/build_mart_trino_demo.sql`: создает витрину `iceberg.mart_trino.customer_totals` средствами Trino SQL;
+- `mart_via_spark` → `test/spark-jobs/build_mart_spark_demo.py`: создает витрину `iceberg.mart_spark.customer_totals` средствами Spark.
 
-DAG `build_marts_demo` (вручную, `schedule=None`) — две независимые задачи:
+---
 
-- `mart_via_trino` → `trino/sql/build_mart_trino_demo.sql`: создаёт `iceberg.mart_trino.customer_totals` (`customer_id`, `orders_count`, `total_amount`) из `iceberg.ods.mssql_orders`;
-- `mart_via_spark` → `spark/jobs/build_mart_spark_demo.py`: создаёт `iceberg.mart_spark.customer_totals` (`customer_id`, `orders_count`, `total_amount`) из `iceberg.ods.mssql_orders`.
+## Тестирование стенда
 
-Запуск:
+Вся подробная информация по архитектуре тестового контура `dlh-test`, сценариям и проверкам краевых случаев вынесена в документацию **[test/README.md](test/README.md)**.
 
-```bash
-docker compose exec -T airflow-scheduler airflow dags trigger build_marts_demo
-```
+Для проверки стенда используются два сценария:
+- **Полный сквозной e2e-прогон** (`./test/test.sh`):
+  Автономно разворачивает изолированный тестовый проект `dlh-test` (не затрагивая рабочий стенд), выполняет сквозной флоу `run_flow.py` (readiness, генерация синтетики в sydafa, запуск Airflow DAG-ов, выгрузка Spark в Iceberg, расчет витрин в Trino и сверка контрольных сумм) и полностью гасит тестовое окружение с удалением томов.
+- **Быстрая проверка запущенного стенда** (`./test/test.sh --verify`):
+  За 5 секунд опрашивает ключевые сервисы (Nessie, sydafa, Trino HTTPS, Airflow API, Spark воркеры, таблицы СУБД) на уже работающем локальном стенде.
 
-Результат — таблицы `iceberg.mart_trino.customer_totals` и `iceberg.mart_spark.customer_totals` (читаются из Trino).
-
-## Полное тестирование стенда
-
-Полный флоу работы стенда проверяется автономным тестом: он поднимает стек,
-прогоняет все этапы в контейнере и в конце полностью гасит сборку.
-
-Запуск (из корня репозитория):
-
-```bash
-./test/test.sh
-```
-
-Скрипт делает:
-1. `docker compose down -v --remove-orphans` — чистит прежние контейнеры и volume-ы (прежние данные не влияют на запуск);
-2. `docker compose up -d --build` — собирает и поднимает весь стек;
-3. `docker compose run --rm test-runner` — в отдельном контейнере прогоняет тест:
-   - проверяет готовность Nessie / sydafa / Trino / Airflow / Spark;
-   - получает метаданные таблиц через API sydafa (`GET /sources/{source}`);
-   - очищает таблицы источников (`truncate`) через единый `POST /sources/{source}/exec`;
-   - наполняет таблицы `customers`, `products`, `orders` через единый `POST /sources/{source}/exec` (`append`);
-   - активирует (unpause) и запускает демо-DAG-и `ods_load_mssql`, `ods_load_oracle`, сверяя выгрузку в `iceberg.ods.*` через Trino;
-   - активирует и запускает витринный DAG `build_marts_demo`, проверяя витрины `iceberg.mart_trino.customer_totals` и `iceberg.mart_spark.customer_totals`;
-   - печатает сводку `PASS=n FAIL=m`;
-4. `docker compose down -v --remove-orphans` — в любом исходе гасит сборку: удаляет контейнеры, сети и volume-ы (`pg_catalog_data`, `airflow_pg_data`, `silo_data`, `sydafa_state`).
-
-Результат: финальная строка `PASS=… FAIL=…`; exit-code 0 — всё прошло, при
-FAIL — смотреть `test/troubleshooting.md`.
-После прогона стенд погашен, данные удалены; образы остаются в локальном кеше.
+Критерий успешности: `FAIL=0`, exit-code `0`. При ошибках — см. [test/troubleshooting.md](test/troubleshooting.md).
 
 Предусловия: Docker + Docker Compose, склонированный репозиторий, `.env`
 (уже закоммичен). Интернет нужен только для первого `build` образов — повторные
@@ -261,13 +287,28 @@ FAIL — смотреть `test/troubleshooting.md`.
 
 ## Учётные данные
 
-Тестовый стенд — везде, где логин/пароль настраиваемы, используется
-`admin` / `admin` (см. `.env`). Исключение по имени — системный
-bootstrap-логин MSSQL `sa`: имя фиксировано образом, а пароль не может быть
-буквально `admin` (MSSQL требует длину ≥8 и минимум 3 из 4 категорий символов),
-поэтому у `sa` остаётся сильный пароль `AdminPassword1!`, а для доступа извне
-`sydafa` автоматически создаёт логин `sydafa`/`sydafa` с ролью sysadmin (а для чтения — `reader`/`reader`).
-SILO (консоль `:9001`) — `admin`/`admin123` (MinIO требует пароль ≥8 символов,
-поэтому буквально `admin` невозможен), pg-catalog, airflow-postgres,
-Airflow UI (`:8089`), Trino (`:8443`) — везде `admin`/`admin`. У Oracle системные SYS/SYSTEM и
-технический суперпользователь `sydafa` — пароль `sydafa`, читатель — `reader` / `reader`.
+Реквизиты доступа к сервисам стенда для пользователей и инструментов разработки:
+
+* **Источники СУБД (MSSQL, Oracle)**:
+  * Пользователь: `sydafa`
+  * Пароль: `sydafa`
+  * Назначение: чтение данных (`SELECT`) для Spark, Airflow, Trino и подключений из DBeaver.
+* **Trino** (`https://localhost:8443`):
+  * Пользователь: `admin`
+  * Пароль: `admin`
+  * Назначение: выполнение SQL-запросов через CLI или DBeaver.
+* **Airflow UI** (`http://localhost:8089`):
+  * Пользователь: `admin`
+  * Пароль: `admin`
+  * Назначение: веб-интерфейс оркестрации пайплайнов.
+* **SILO (S3-хранилище)**:
+  * Веб-консоль (`http://localhost:9001`): `admin` / `admin123`
+  * S3 API (`http://localhost:9000`): `admin` / `admin123`
+* **Базы метаданных (pg-catalog, airflow-postgres)**:
+  * Пользователь: `admin`
+  * Пароль: `admin` (настраиваются в файле `.env`).
+* **Сервисы без авторизации**:
+  * Spark Master UI: `http://localhost:8080`
+  * Spark Worker UI: `http://localhost:8081`
+  * sydafa Swagger UI: `http://localhost:8090/docs`
+
