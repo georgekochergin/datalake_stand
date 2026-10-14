@@ -19,7 +19,7 @@
 | `test/` | демо-DAG-и (`test/dags/`), spark-jobs, trino-sql, `test/sydafa/init.json`, `test.sh`, `run_flow.py`, `README.md`, override |
 | `docker-compose.yaml` | каркас стенда без демо-наполнения |
 
-Пользовательский код кладётся в `airflow/`, `spark/`, `trino/` на хосте — compose монтирует эти каталоги в контейнеры (а каталог `airflow/plugins` монтируется в `/opt/airflow/plugins:ro`). Демо поднимается только через `./test/test.sh` (override).
+Пользовательский код кладётся в `airflow/`, `spark/`, `trino/` на хосте — compose монтирует эти каталоги в контейнеры (а каталог `airflow/plugins` монтируется в `/opt/airflow/plugins:ro`).
 
 ## Архитектура
 
@@ -289,25 +289,26 @@ DAG `build_marts_demo` демонстрирует расчет витрин дв
 
 Реквизиты доступа к сервисам стенда для пользователей и инструментов разработки:
 
-- **Источники СУБД (MSSQL, Oracle)**:
-  - Пользователь: `sydafa`
-  - Пароль: `sydafa`
-  - Назначение: чтение данных (`SELECT`) для Spark, Airflow, Trino и подключений из DBeaver.
-- **Trino** (`https://localhost:8443`):
-  - Пользователь: `admin`
-  - Пароль: `admin`
-  - Назначение: выполнение SQL-запросов через CLI или DBeaver.
-- **Airflow UI** (`http://localhost:8089`):
-  - Пользователь: `admin`
-  - Пароль: `admin`
-  - Назначение: веб-интерфейс оркестрации пайплайнов.
-- **SILO (S3-хранилище)**:
-  - Веб-консоль (`http://localhost:9001`): `admin` / `admin123`
-  - S3 API (`http://localhost:9000`): `admin` / `admin123`
-- **Базы метаданных (pg-catalog, airflow-postgres)**:
-  - Пользователь: `admin`
-  - Пароль: `admin` (настраиваются в файле `.env`).
-- **Сервисы без авторизации**:
-  - Spark Master UI: `http://localhost:8080`
-  - Spark Worker UI: `http://localhost:8081`
-  - sydafa Swagger UI: `http://localhost:8090/docs`
+* **Источники СУБД (MSSQL, Oracle)**:
+  * Пользователь: `sydafa`
+  * Пароль: `sydafa`
+  * Назначение: чтение данных (`SELECT`) для Spark, Airflow, Trino и подключений из DBeaver.
+* **Trino** (`https://localhost:8443`):
+  * Пользователь: `admin`
+  * Пароль: `admin`
+  * Назначение: выполнение SQL-запросов через CLI или DBeaver.
+* **Airflow UI** (`http://localhost:8089`):
+  * Пользователь: `admin`
+  * Пароль: `admin`
+  * Назначение: веб-интерфейс оркестрации пайплайнов.
+* **SILO (S3-хранилище)**:
+  * Веб-консоль (`http://localhost:9001`): `admin` / `admin123`
+  * S3 API (`http://localhost:9000`): `admin` / `admin123`
+* **Базы метаданных (pg-catalog, airflow-postgres)**:
+  * Пользователь: `admin`
+  * Пароль: `admin` (настраиваются в файле `.env`).
+* **Сервисы без авторизации**:
+  * Spark Master UI: `http://localhost:8080`
+  * Spark Worker UI: `http://localhost:8081`
+  * sydafa Swagger UI: `http://localhost:8090/docs`
+
