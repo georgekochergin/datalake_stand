@@ -15,7 +15,7 @@
 | `conf/spark` | Dockerfile, spark-defaults.conf |
 | `conf/trino` | runtime-конфиг Trino (catalog, TLS, password.db) |
 | `conf/silo` | `init-bucket.sh` |
-| `conf/sydafa` | дефолтный источник `mssql.yaml` (внутренний `port:`, без `init.json`) |
+| `conf/sydafa` | декларативный манифест `init.json` источников СУБД |
 | `test/` | демо-DAG-и, spark-jobs, trino-sql, `sydafa/init.json` + sources, `test.sh`, override |
 | `docker-compose.yaml` | каркас стенда без демо-наполнения |
 
@@ -60,9 +60,9 @@ flowchart TB
     TRINO["trino\ntrinodb/trino:479"]
 
     subgraph Orchestration["Airflow 3.3.2-python3.11 (LocalExecutor)"]
-        D1["DAG demo/ods_load_mssql\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (заглушка, метод валидации — TBD)"]
-        D2["DAG demo/ods_load_oracle\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (заглушка, метод валидации — TBD)"]
-        D3["DAG demo/build_marts_demo\nschedule=None (вручную)\nзадача A: PythonOperator+TrinoHook / задача B: SparkSubmitOperator"]
+        D1["DAG ods_load_mssql\ntask: activate_source (SydafaActivateOperator)\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (заглушка)"]
+        D2["DAG ods_load_oracle\ntask: activate_source (SydafaActivateOperator)\ntask: extract_load (SparkSubmitOperator)\ntask: validate_load (заглушка)"]
+        D3["DAG build_marts_demo\nschedule=None (вручную)\nзадача A: PythonOperator+TrinoHook / задача B: SparkSubmitOperator"]
     end
 
     API -- "Docker SDK: запуск и bootstrap" --> MSSQL
@@ -72,7 +72,7 @@ flowchart TB
 
     D1 --> SM
     D2 --> SM
-    MSSQL -- "JDBC read (user: reader)" --> SW
+    MSSQL -- "JDBC read (user: sydafa)" --> SW
     ORA -- "JDBC read (user: reader)" --> SW
     SW -- "write ods.mssql_*, ods.oracle_* AS IS" --> SILO
     SM -. "catalog ops" .-> NESSIE
@@ -155,17 +155,17 @@ docker compose up -d --build
 
 1. `POST http://localhost:8090/sources/{mssql|oracle}/activate?ttl_minutes=15`
 2. Из ответа взять `host_port`.
-3. DBeaver: Host `localhost`, Port = `host_port`, user `reader` / password `reader`.
+3. DBeaver: Host `localhost`, Port = `host_port`, user `sydafa` / password `sydafa`.
    - MSSQL: Database `sydafa`, `encrypt=false;trustServerCertificate=true`
    - Oracle: Service Name `sydafa`
-4. По истечении TTL контейнер останавливается. Админ `sydafa` снаружи недоступен (случайный пароль).
+4. По истечении TTL контейнер останавливается. Внутренний DBA `_sydafa_admin_*` снаружи недоступен (случайный пароль).
 
 ### Добавление источника на живом стенде
 
-1. Положить yaml в `conf/sydafa/` (например `oracle.yaml`). Поле `port:` — внутренний порт СУБД.
-2. При необходимости дописать блок в init (если используете init) — для демо он в `test/sydafa/init.json`.
-3. `docker compose up -d sydafa` — не `test.sh` и не `down -v`.
-4. Первый `/exec` или `/activate` поднимет контейнер; `init.json` применится, только если `live_schema` пуста.
+1. Описать новый источник в `conf/sydafa/init.json` (тип, схемы, таблицы, генераторы).
+2. Задать при необходимости внешний порт в `docker-compose.yaml` (например `SYDAFA_EXT_PORT_CRM=15211`).
+3. Перезапустить контейнер `sydafa`: `docker compose up -d sydafa`.
+4. Первый `/exec` или `/activate` поднимет контейнер; `init.json` применится автоматически при чистом томе состояния.
 
 ## Работа со стендом
 
@@ -230,7 +230,7 @@ REST-интерфейс: `http://localhost:8090`, интерактивная д�
 - `ods_load_mssql` → `test/spark-jobs/load_ods_mssql.py`: читает `demo.*` из sydafa-mssql-mssql-source и перезаписывает (AS IS) `iceberg.ods.mssql_customers`, `mssql_orders`, `mssql_products`;
 - `ods_load_oracle` → `test/spark-jobs/load_ods_oracle.py`: читает `demo.*` из sydafa-oracle-oracle-source и перезаписывает (AS IS) `iceberg.ods.oracle_customers`, `oracle_orders`, `oracle_products`.
 
-Демо-DAG-и изолированы в `test/dags/demo/` и подключаются override-ом теста. Запуск — Airflow UI → DAGs → unpause & ▶, либо CLI:
+Демо-DAG-и изолированы в `test/dags/` и подключаются override-ом теста. Запуск — Airflow UI → DAGs → unpause & ▶, либо CLI:
 
 ```bash
 docker compose exec -T airflow-scheduler airflow dags unpause ods_load_mssql
@@ -296,9 +296,7 @@ FAIL — смотреть `test/troubleshooting.md`.
 `admin` / `admin` (см. `.env`). Исключение по имени — системный
 bootstrap-логин MSSQL `sa`: имя фиксировано образом, а пароль не может быть
 буквально `admin` (MSSQL требует длину ≥8 и минимум 3 из 4 категорий символов),
-поэтому у `sa` остаётся сильный пароль `AdminPassword1!`, а для доступа извне
-`sydafa` автоматически создаёт логин `sydafa`/`sydafa` с ролью sysadmin (а для чтения — `reader`/`reader`).
+поэтому у `sa` остаётся сильный пароль `AdminPassword1!`, после первичного bootstrap системный `sa` отключается (`DISABLE`), а для чтения создаётся публичная учетная запись `sydafa`/`sydafa` (только `SELECT`). Внутренний администратор базы `_sydafa_admin_*` генерирует случайный пароль, сохраняемый только в `/state/secrets.json`.
 SILO (консоль `:9001`) — `admin`/`admin123` (MinIO требует пароль ≥8 символов,
 поэтому буквально `admin` невозможен), pg-catalog, airflow-postgres,
-Airflow UI (`:8089`), Trino (`:8443`) — везде `admin`/`admin`. У Oracle системные SYS/SYSTEM и
-технический суперпользователь `sydafa` — пароль `sydafa`, читатель — `reader` / `reader`.
+Airflow UI (`:8089`), Trino (`:8443`) — везде `admin`/`admin`. У Oracle системные SYS/SYSTEM и pdbadmin блокируются/удаляются, читатель — `sydafa` / `sydafa`.

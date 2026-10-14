@@ -39,18 +39,22 @@ services:
   airflow-init:
     volumes: !override
       - ./test/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins:ro
 
   airflow-scheduler:
     volumes: !override
       - ./test/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins:ro
       - ./test/spark-jobs:/opt/spark-jobs:ro
       - ./test/trino-sql:/opt/airflow/sql:ro
 
   airflow-dag-processor:
     volumes: !override
       - ./test/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins:ro
 
   airflow-webserver:
     volumes: !override
       - ./test/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins:ro
     ports: !override []
