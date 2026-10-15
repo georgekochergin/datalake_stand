@@ -3,15 +3,20 @@
 ## Контекст и архитектура
 - Стенд КХД/DLH: Trino, Spark, Nessie, Airflow, SILO, Postgres. Источники — `sydafa`.
 - Каркас: `airflow/` `spark/` `trino/` (пользовательский код, не в git), `conf/` (как запущен стенд), `test/` (демо + e2e).
-- Конфигурация источников sydafa: через `init.json` (`conf/sydafa/init.json` на живом стенде, `test/sydafa/init.json` в тестах).
+- Конфигурация источников sydafa: через `sources.json` (`conf/sydafa/sources.json` на живом стенде, `test/sydafa/sources.json` в тестах).
 - Читатель источников: `sydafa`/`sydafa` (только SELECT). Админ снаружи недоступен.
-- Внутренние DNS-имена СУБД: `sydafa-mssql-mssql-source:1433`, `sydafa-oracle-oracle-source:1521`.
+- Внутренние DNS-имена СУБД: `sydafa-src-mssql-mssql:1433`, `sydafa-src-oracle-oracle:1521`.
 - Демо-DAG-и: `test/dags/`, подключаются `test/docker-compose.override.yaml`.
-- Инспекция БД: `POST /sources/{source}/activate` → объект `connection` в ответе; внешний порт хоста задается переменной `SYDAFA_EXT_PORT_MSSQL`.
+- Инспекция БД: `POST /sources/{source}/activate` → объект `connection` в ответе; внешний порт хоста задается в манифесте `sources.json` (`external_port`).
 - Плагин sydafa: `airflow/plugins/sydafa_plugin.py` (`SydafaActivateOperator`) для явного пробуждения СУБД перед чтением.
 
-## Git
+## Контроль веток и Pull Request (Git Workflow)
 - Ветки с префиксом `kodik/`. Не коммитить в `main`. Обязателен Pull Request.
+- **Подробное описание PR**: при оформлении Pull Request обязательно формируй структурированное и исчерпывающее описание (Summary/Description):
+  - Контекст и решаемая проблема;
+  - Список конкретных изменений по компонентам;
+  - Изменения в интеграциях / окружении / конфигах;
+  - Свидетельства тестирования (результаты прогона тестов).
 
 ## Testing
 - Обязательное правило: Любой новый или измененный функционал пайплайнов, операторов и интеграций должен сопровождаться тестами (модульными или e2e) с проверкой обработки краевых случаев.
