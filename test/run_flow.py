@@ -115,16 +115,6 @@ def sydafa_exec(source, operations):
     return code, parsed
 
 
-def sydafa_exec_retry(source, operations, tries=8, interval=3):
-    """Выполняет sydafa_exec с повторными попытками при холодном прогреве СУБД (503)."""
-    for _ in range(tries):
-        code, parsed = sydafa_exec(source, operations)
-        if code == 200:
-            return code, parsed
-        time.sleep(interval)
-    return code, parsed
-
-
 # ---------- Trino ----------
 
 def trino_query(sql):
@@ -312,7 +302,7 @@ def main():
             {"op": "truncate", "schema": "demo", "table": "products", "cascade": True},
             {"op": "truncate", "schema": "demo", "table": "customers", "cascade": True},
         ]
-        code, parsed = sydafa_exec_retry(src, trunc_ops)
+        code, parsed = sydafa_exec(src, trunc_ops)
         check("exec truncate all tables for %s" % src, code, 200)
         check("exec %s truncate executed 3 ops" % src, parsed.get("executed") if isinstance(parsed, dict) else None, 3)
 
@@ -327,7 +317,7 @@ def main():
             {"op": "append", "schema": "demo", "table": "products", "rows": counts[src]["products"], "new_key_ratio": 0.0},
             {"op": "append", "schema": "demo", "table": "orders", "rows": counts[src]["orders"], "new_key_ratio": 0.0},
         ]
-        code, parsed = sydafa_exec_retry(src, append_ops)
+        code, parsed = sydafa_exec(src, append_ops)
         check("exec append all tables for %s" % src, code, 200)
         check("exec %s append executed 3 ops" % src, parsed.get("executed") if isinstance(parsed, dict) else None, 3)
 
