@@ -6,7 +6,7 @@ services:
       - SYDAFA_TTL_MINUTES=15
     volumes: !override
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./test/sydafa/init.json:/app/config/init.json:ro
+      - ./test/sydafa/sources.json:/app/config/sources.json:ro
       - sydafa_state:/state
     ports: !override []
 

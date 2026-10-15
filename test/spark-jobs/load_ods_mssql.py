@@ -11,7 +11,7 @@ import urllib.request
 
 from pyspark.sql import SparkSession
 
-MSSQL_HOST = os.environ.get("MSSQL_HOST", "sydafa-mssql-mssql-source")
+MSSQL_HOST = os.environ.get("MSSQL_HOST", "sydafa-src-mssql-mssql")
 MSSQL_PORT = os.environ.get("MSSQL_PORT", "1433")
 SYDAFA_URL = os.environ.get("SYDAFA_URL", "http://sydafa:8000")
 

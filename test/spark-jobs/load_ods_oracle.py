@@ -7,7 +7,7 @@ import urllib.request
 
 from pyspark.sql import SparkSession
 
-ORACLE_HOST = os.environ.get("ORACLE_HOST", "sydafa-oracle-oracle-source")
+ORACLE_HOST = os.environ.get("ORACLE_HOST", "sydafa-src-oracle-oracle")
 ORACLE_PORT = os.environ.get("ORACLE_PORT", "1521")
 SYDAFA_URL = os.environ.get("SYDAFA_URL", "http://sydafa:8000")
 

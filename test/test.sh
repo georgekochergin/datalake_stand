@@ -99,7 +99,7 @@ if [ "$MODE" = "verify" ]; then
 
   # 4. MSSQL (БД sydafa + таблицы под sydafa/sydafa)
   tables=$(docker compose exec -T sydafa python -c \
-    "import pymssql; c=pymssql.connect(server='sydafa-mssql-mssql-source',port=1433,user='sydafa',password='sydafa',database='sydafa'); cur=c.cursor(); cur.execute('SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME'); print(','.join(r[0] for r in cur.fetchall()))" 2>/dev/null)
+    "import pymssql; c=pymssql.connect(server='sydafa-src-mssql-mssql',port=1433,user='sydafa',password='sydafa',database='sydafa'); cur=c.cursor(); cur.execute('SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME'); print(','.join(r[0] for r in cur.fetchall()))" 2>/dev/null)
   case "$tables" in
     *customers*orders*products*) check "MSSQL sydafa tables under reader" "ok" "ok" ;;
     *) check "MSSQL sydafa tables under reader" "$tables" "customers,orders,products" ;;
@@ -108,7 +108,7 @@ if [ "$MODE" = "verify" ]; then
   # 5. Oracle (БД sydafa + таблицы под sydafa/sydafa, если oracle сконфигурирован)
   if [[ "$sources" == *"oracle"* ]]; then
     tables=$(docker compose exec -T sydafa python -c \
-      "import oracledb; c=oracledb.connect(user='sydafa', password='sydafa', dsn=oracledb.makedsn('sydafa-oracle-oracle-source',1521,service_name='sydafa')); cur=c.cursor(); cur.execute(\"SELECT table_name FROM all_tables WHERE owner = 'DEMO' ORDER BY table_name\"); print(','.join(r[0] for r in cur.fetchall()))" 2>/dev/null)
+      "import oracledb; c=oracledb.connect(user='sydafa', password='sydafa', dsn=oracledb.makedsn('sydafa-src-oracle-oracle',1521,service_name='sydafa')); cur=c.cursor(); cur.execute(\"SELECT table_name FROM all_tables WHERE owner = 'DEMO' ORDER BY table_name\"); print(','.join(r[0] for r in cur.fetchall()))" 2>/dev/null)
     check "Oracle sydafa tables under reader" "$tables" "CUSTOMERS,ORDERS,PRODUCTS"
   fi
 
@@ -130,7 +130,7 @@ cleanup() {
     echo "$ids" | xargs docker rm -f >/dev/null 2>&1 || true
   fi
   "${COMPOSE[@]}" down -v --remove-orphans
-  docker rm -f sydafa-test-mssql-mssql-source sydafa-test-oracle-oracle-source sydafa-test-mssql-source sydafa-test-oracle-source >/dev/null 2>&1 || true
+  docker rm -f sydafa-test-src-mssql-mssql sydafa-test-src-oracle-oracle sydafa-test-mssql-mssql-source sydafa-test-oracle-oracle-source sydafa-test-mssql-source sydafa-test-oracle-source >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 

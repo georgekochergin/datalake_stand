@@ -18,10 +18,9 @@ services:
     environment:
       - SYDAFA_MAX_TTL_MINUTES=30
       - SYDAFA_TTL_MINUTES=15
-      - SYDAFA_EXT_PORT_MSSQL=14330
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./conf/sydafa/init.json:/app/config/init.json:ro
+      - ./conf/sydafa/sources.json:/app/config/sources.json:ro
       - sydafa_state:/state
     ports: ["8090:8000"]
     networks: [dlh-poc]

@@ -15,8 +15,8 @@
 | `conf/spark` | Dockerfile, spark-defaults.conf |
 | `conf/trino` | runtime-конфиг Trino (catalog, TLS, password.db) |
 | `conf/silo` | `init-bucket.sh` |
-| `conf/sydafa` | декларативный манифест `init.json` источников СУБД |
-| `test/` | демо-DAG-и (`test/dags/`), spark-jobs, trino-sql, `test/sydafa/init.json`, `test.sh`, `run_flow.py`, `README.md`, override |
+| `conf/sydafa` | декларативный манифест `sources.json` источников СУБД |
+| `test/` | демо-DAG-и (`test/dags/`), spark-jobs, trino-sql, `test/sydafa/sources.json`, `test.sh`, `run_flow.py`, `README.md`, override |
 | `docker-compose.yaml` | каркас стенда без демо-наполнения |
 
 Пользовательский код кладётся в `airflow/`, `spark/`, `trino/` на хосте — compose монтирует эти каталоги в контейнеры (а каталог `airflow/plugins` монтируется в `/opt/airflow/plugins:ro`).
@@ -28,14 +28,14 @@ flowchart TB
     ANALYST["Аналитик\n(Trino CLI / BI-инструмент)"]
 
     subgraph Sources["Источники данных (оркестрируются sydafa)"]
-        MSSQL[("sydafa-mssql-mssql-source:1433\nmcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04\nDB: sydafa\nuser: sydafa (только чтение)")]
-        ORA[("sydafa-oracle-oracle-source:1521\ngvenzl/oracle-free:23-slim-faststart\nPDB: sydafa\nuser: sydafa (только чтение)")]
+        MSSQL[("sydafa-src-mssql-mssql:1433\nmcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04\nDB: sydafa\nuser: sydafa (только чтение)")]
+        ORA[("sydafa-src-oracle-oracle:1521\ngvenzl/oracle-free:23-slim-faststart\nPDB: sydafa\nuser: sydafa (только чтение)")]
     end
 
     subgraph SydafaService["Эмулятор источников (подключаемый модуль sydafa)"]
         direction TB
-        CFG1[("conf/sydafa/init.json")]
-        CFG2[("test/sydafa/init.json (демо)")]
+        CFG1[("conf/sydafa/sources.json")]
+        CFG2[("test/sydafa/sources.json (демо)")]
         API["sydafa:latest (FastAPI, Swagger /docs :8090)\nТранзакционная эволюция схем (API-first)\nСинтетическая генерация данных (POST /exec)\nЧестный TTL и Safe GET (RFC 7231)"]
         STATE[("sydafa_state volume:\nlive-схема и статус")]
         CFG1 -. "bind-mount ro" .-> API
@@ -163,21 +163,26 @@ docker compose up -d --build
 
 ### Добавление источника на живом стенде
 
-Манифест `init.json` является **стартовым семенем (Seed)** и применяется sydafa **строго один раз** при чистом томе состояния (`/state`). На уже запущенном стенде добавление и настройка источников выполняется **динамически через REST API**:
+Манифест `sources.json` является **декларативным источником правды** для топологии баз и стартового сида (Seed).
 
-1. **Регистрация источника** (Orchestration API):
-   ```bash
-   # Регистрация нового инстанса СУБД (например, crm типа oracle)
-   curl -X POST http://localhost:8090/sources \
-     -H 'Content-Type: application/json' \
-     -d '{"name": "crm", "type": "oracle"}'
+1. **Добавление нового источника**:
+   Откройте `conf/sydafa/sources.json` и добавьте описание нового инстанса с внешним портом:
+   ```json
+   "crm": {
+     "type": "oracle",
+     "external_port": 15211,
+     "operations": []
+   }
    ```
-2. **Создание схем, таблиц и наполнение данными** (Data & Schema API):
-   Отправьте транзакционный батч операций через `POST /sources/{name}/exec` (или через Swagger UI: `http://localhost:8090/docs`). База автоматически запустится, создаст таблицы и сгенерирует данные.
-3. **Внешний порт для DBeaver**:
-   Если для нового источника требуется постоянный проброс порта на хост, укажите переменную `SYDAFA_EXT_PORT_<NAME>` в `docker-compose.yaml` (например, `SYDAFA_EXT_PORT_CRM=15211`) и перезапустите контейнер `sydafa`: `docker compose up -d sydafa`.
+2. **Перезапуск контейнера sydafa**:
+   ```bash
+   docker compose restart sydafa
+   ```
+   Sydafa выполнит первичный сид для нового источника (если заданы `operations`), после чего сразу остановит СУБД для экономии памяти (0 MB RAM). Ранее инициализированные базы не затрагиваются.
+3. **Создание схем, таблиц и наполнение данными через API**:
+   Отправьте транзакционный батч операций через `POST /sources/{name}/exec` (или через Swagger UI: `http://localhost:8090/docs`).
 
-> **Сброс к init.json**: если требуется пересоздать базы с нуля строго по файлу `conf/sydafa/init.json`, выполните сброс томов Compose: `docker compose down -v`.
+> **Сброс к sources.json**: если требуется пересоздать базы с нуля строго по файлу `conf/sydafa/sources.json`, выполните сброс томов Compose: `docker compose down -v`.
 
 ## Работа со стендом
 
@@ -186,12 +191,12 @@ docker compose up -d --build
 Сервис **sydafa** (Synthetic Data Factory & DB Orchestrator) вынесен в отдельный независимый репозиторий [georgekochergin/sydafa](https://github.com/georgekochergin/sydafa) и поставляется в виде Docker-образа (`ghcr.io/georgekochergin/sydafa:latest` или локальный `sydafa:latest`).
 
 На данном стенде `sydafa` эмулирует реляционные источники данных:
-- Лениво оркестрирует контейнеры СУБД `sydafa-mssql-mssql-source` / `sydafa-oracle-oracle-source` через Docker API (данные живут в named volume);
+- Лениво оркестрирует контейнеры СУБД `sydafa-src-mssql-mssql` / `sydafa-src-oracle-oracle` через Docker API (данные живут в named volume);
 - Создаёт рабочую базу/PDB `sydafa` и читателя `sydafa` / `sydafa` (только чтение); админский доступ извне заблокирован;
-- Внешний доступ для DBeaver: `SYDAFA_EXT_PORT_MSSQL=14330` в `docker-compose.yaml`;
+- Внешний доступ для DBeaver: порт `14330` задан в манифесте `sources.json`;
 - REST API: транзакционный DDL/DML через `POST /sources/{source}/exec` и lifecycle (`activate` / `deactivate` / `status`).
 
-Конфиг начального семени (Seed) стенда: `conf/sydafa/init.json`. Демо-init: `test/sydafa/init.json`.
+Конфиг начального семени (Seed) стенда: `conf/sydafa/sources.json`. Демо-манифест: `test/sydafa/sources.json`.
 
 REST-интерфейс: `http://localhost:8090`, интерактивная документация: `http://localhost:8090/docs`.
 
@@ -200,9 +205,7 @@ REST-интерфейс: `http://localhost:8090`, интерактивная д�
 | Метод | Путь | Назначение |
 | --- | --- | --- |
 | GET | `/health` | Готовность API sydafa |
-| GET | `/sources` | Список зарегистрированных источников |
-| POST | `/sources` | Динамическая регистрация нового инстанса `{"name": "...", "type": "..."}` |
-| DELETE | `/sources/{source}` | Удаление инстанса СУБД и контейнера |
+| GET | `/sources` | Список зарегистрированных источников из sources.json |
 | GET | `/sources/{source}` | Метаданные источника, статус reader, объект connection и плоский список таблиц (Safe GET, не будит базу) |
 | GET | `/sources/{source}/schema` | Детальная live-схема источника: таблицы, колонки, типы, генераторы, PK/FK (Safe GET) |
 | GET | `/sources/{source}/status` | Состояние контейнера (idle/running), TTL, реквизиты `connection` (Safe GET) |
