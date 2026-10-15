@@ -130,9 +130,13 @@ cleanup() {
     echo "$ids" | xargs docker rm -f >/dev/null 2>&1 || true
   fi
   "${COMPOSE[@]}" down -v --remove-orphans
-  docker rm -f sydafa-test-src-mssql-mssql sydafa-test-src-oracle-oracle sydafa-test-mssql-mssql-source sydafa-test-oracle-oracle-source sydafa-test-mssql-source sydafa-test-oracle-source >/dev/null 2>&1 || true
+  local sydafa_srcs
+  sydafa_srcs=$(docker ps -aq --filter "name=sydafa.*src" 2>/dev/null || true)
+  if [ -n "$sydafa_srcs" ]; then
+    echo "$sydafa_srcs" | xargs docker rm -f >/dev/null 2>&1 || true
+  fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT INT TERM HUP
 
 cleanup
 SYDAFA_IMG="${SYDAFA_IMAGE:-sydafa:latest}"
