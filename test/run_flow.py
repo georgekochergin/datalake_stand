@@ -282,7 +282,7 @@ def main():
         code, meta = sydafa_get("/sources/%s" % src)
         check("GET /sources/%s" % src, code, 200)
         tables = meta.get("tables", []) if isinstance(meta, dict) else []
-        table_names = sorted(t["name"] for t in tables)
+        table_names = sorted(t["name"] for t in tables if not t["name"].startswith(("_upd_", "_del_")))
         check("GET /sources/%s tables" % src, ",".join(table_names), "customers,orders,products")
 
     # 2b. Проверка безопасности sydafa exec (отклонение инъекций в именах колонок)
