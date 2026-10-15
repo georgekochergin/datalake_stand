@@ -46,7 +46,7 @@ def main() -> None:
         table_name = tbl["name"]
         if table_name.startswith(("_upd_", "_del_")):
             continue
-        dbtable = f'"{schema}"."{table_name}"'
+        dbtable = f"{schema.upper()}.{table_name.upper()}"
         df = (
             spark.read.format("jdbc")
             .option("url", jdbc_url)
@@ -56,7 +56,7 @@ def main() -> None:
             .option("driver", "oracle.jdbc.OracleDriver")
             .load()
         )
-        df.writeTo(f"iceberg.ods.oracle_{table_name}").createOrReplace()
+        df.writeTo(f"iceberg.ods.oracle_{table_name.lower()}").createOrReplace()
         print(f"[load_ods_oracle] {schema}.{table_name}: {df.count()} строк (под пользователем {reader})")
 
     spark.stop()
