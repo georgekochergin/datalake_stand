@@ -48,6 +48,8 @@ def main() -> None:
     for tbl in tables:
         schema = tbl["schema"]
         table_name = tbl["name"]
+        if table_name.startswith(("_upd_", "_del_")):
+            continue
         dbtable = f"[{schema}].[{table_name}]"
         df = (
             spark.read.format("jdbc")
