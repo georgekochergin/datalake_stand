@@ -13,7 +13,7 @@ def main() -> None:
     spark = SparkSession.builder.appName("build_mart_spark_demo").getOrCreate()
     spark.sql("CREATE NAMESPACE IF NOT EXISTS iceberg.mart_spark")
 
-    orders = spark.table("iceberg.ods.mssql_orders")
+    orders = spark.table("iceberg.ods.db2_orders")
     demo_mart = orders.groupBy("customer_id").agg(
         F.count("*").alias("orders_count"),
         F.sum("amount").alias("total_amount"),

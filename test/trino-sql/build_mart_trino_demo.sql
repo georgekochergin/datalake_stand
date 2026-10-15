@@ -11,5 +11,5 @@ SELECT
     customer_id,
     COUNT(*)      AS orders_count,
     SUM(amount)   AS total_amount
-FROM iceberg.ods.mssql_orders
+FROM iceberg.ods.db2_orders
 GROUP BY customer_id;
