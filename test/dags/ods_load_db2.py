@@ -1,5 +1,5 @@
-"""ods_load_mssql: AS IS загрузка sydafa-mssql-source -> Iceberg ods.mssql_*.
-Демонстрационный DAG уровня источника MSSQL.
+"""ods_load_db2: AS IS загрузка sydafa-src-mssql-db2 -> Iceberg ods.db2_*.
+Демонстрационный DAG уровня источника MSSQL (db2).
 По умолчанию выключен (is_paused_upon_creation=True).
 """
 from airflow import DAG
@@ -17,21 +17,21 @@ def _validate_load_placeholder(**_) -> None:
 
 
 with DAG(
-    dag_id="ods_load_mssql",
+    dag_id="ods_load_db2",
     schedule=None,
     catchup=False,
     is_paused_upon_creation=True,
-    tags=["ods", "mssql", "demo"],
+    tags=["ods", "mssql", "db2", "demo"],
 ) as dag:
     activate_source = SydafaActivateOperator(
         task_id="activate_source",
-        source="mssql",
+        source="db2",
         ttl_minutes=15,
     )
 
     extract_load = SparkSubmitOperator(
         task_id="extract_load",
-        application="/opt/spark-jobs/load_ods_mssql.py",
+        application="/opt/spark-jobs/load_ods_db2.py",
         conn_id="spark_default",
         deploy_mode="client",
     )

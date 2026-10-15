@@ -268,9 +268,9 @@ def main():
     check("sydafa /sources", code, 200)
     try:
         sources_list = json.loads(raw).get("sources", [])
-        check("sydafa /sources value", ",".join(sources_list), "mssql,oracle")
+        check("sydafa /sources value", ",".join(sorted(sources_list)), "db1,db2")
     except Exception:  # noqa: BLE001
-        check("sydafa /sources value", "parse-error", "mssql,oracle")
+        check("sydafa /sources value", "parse-error", "db1,db2")
 
     _, alive = wait_until(spark_alive, 1, 180, 5)
     check("Spark alive workers", alive, 1)
@@ -285,7 +285,7 @@ def main():
         print("PASS=%d FAIL=%d" % (PASS, FAIL))
         return
 
-    sources = ["mssql", "oracle"]
+    sources = ["db1", "db2"]
 
     # 2. Интроспекция через API GET /sources/{source}
     for src in sources:
@@ -296,7 +296,7 @@ def main():
         check("GET /sources/%s tables" % src, ",".join(table_names), "customers,orders,products")
 
     # 2b. Проверка безопасности sydafa exec (отклонение инъекций в именах колонок)
-    inj_code, _ = sydafa_exec("mssql", [{
+    inj_code, _ = sydafa_exec("db2", [{
         "op": "update",
         "schema": "demo",
         "table": "customers",
@@ -318,8 +318,8 @@ def main():
 
     # 4. Наполнение тестовыми данными через единый POST /sources/{source}/exec (append)
     counts = {
-        "mssql": {"customers": 3, "products": 3, "orders": 5},
-        "oracle": {"customers": 3, "products": 3, "orders": 4},
+        "db1": {"customers": 3, "products": 3, "orders": 4},
+        "db2": {"customers": 3, "products": 3, "orders": 5},
     }
     for src in sources:
         append_ops = [

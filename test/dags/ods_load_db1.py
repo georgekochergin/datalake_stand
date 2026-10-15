@@ -1,5 +1,5 @@
-"""ods_load_oracle: AS IS загрузка sydafa-oracle-source -> Iceberg ods.oracle_*.
-Демонстрационный DAG уровня источника Oracle.
+"""ods_load_db1: AS IS загрузка sydafa-src-oracle-db1 -> Iceberg ods.db1_*.
+Демонстрационный DAG уровня источника Oracle (db1).
 По умолчанию выключен (is_paused_upon_creation=True).
 """
 from airflow import DAG
@@ -17,21 +17,21 @@ def _validate_load_placeholder(**_) -> None:
 
 
 with DAG(
-    dag_id="ods_load_oracle",
+    dag_id="ods_load_db1",
     schedule=None,
     catchup=False,
     is_paused_upon_creation=True,
-    tags=["ods", "oracle", "demo"],
+    tags=["ods", "oracle", "db1", "demo"],
 ) as dag:
     activate_source = SydafaActivateOperator(
         task_id="activate_source",
-        source="oracle",
+        source="db1",
         ttl_minutes=15,
     )
 
     extract_load = SparkSubmitOperator(
         task_id="extract_load",
-        application="/opt/spark-jobs/load_ods_oracle.py",
+        application="/opt/spark-jobs/load_ods_db1.py",
         conn_id="spark_default",
         deploy_mode="client",
     )

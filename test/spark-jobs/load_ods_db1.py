@@ -1,5 +1,5 @@
-"""AS IS загрузка demo.* (схема=пользователь demo) из sydafa-oracle-source
-в Iceberg ods.oracle_*. См. замечание о стратегии загрузки в load_ods_mssql.py.
+"""AS IS загрузка demo.* (схема=пользователь demo) из sydafa-src-oracle-db1
+в Iceberg ods.db1_*.
 """
 import json
 import os
@@ -7,18 +7,18 @@ import urllib.request
 
 from pyspark.sql import SparkSession
 
-ORACLE_HOST = os.environ.get("ORACLE_HOST", "sydafa-src-oracle-oracle")
+ORACLE_HOST = os.environ.get("ORACLE_HOST", "sydafa-src-oracle-db1")
 ORACLE_PORT = os.environ.get("ORACLE_PORT", "1521")
 SYDAFA_URL = os.environ.get("SYDAFA_URL", "http://sydafa:8000")
 
 
 def _get_source_metadata() -> dict:
-    url = f"{SYDAFA_URL}/sources/oracle"
+    url = f"{SYDAFA_URL}/sources/db1"
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception as e:
-        print(f"[load_ods_oracle] Внимание: не удалось получить метаданные от {url} ({e}). Используются дефолтные параметры.")
+        print(f"[load_ods_db1] Внимание: не удалось получить метаданные от {url} ({e}). Используются дефолтные параметры.")
         return {
             "database": "sydafa",
             "reader": "sydafa",
@@ -38,7 +38,7 @@ def main() -> None:
 
     jdbc_url = f"jdbc:oracle:thin:@//{ORACLE_HOST}:{ORACLE_PORT}/{database}"
 
-    spark = SparkSession.builder.appName("load_ods_oracle").getOrCreate()
+    spark = SparkSession.builder.appName("load_ods_db1").getOrCreate()
     spark.sql("CREATE NAMESPACE IF NOT EXISTS iceberg.ods")
 
     for tbl in tables:
@@ -56,11 +56,10 @@ def main() -> None:
             .option("driver", "oracle.jdbc.OracleDriver")
             .load()
         )
-        df.writeTo(f"iceberg.ods.oracle_{table_name.lower()}").createOrReplace()
-        print(f"[load_ods_oracle] {schema}.{table_name}: {df.count()} строк (под пользователем {reader})")
+        df.writeTo(f"iceberg.ods.db1_{table_name.lower()}").createOrReplace()
+        print(f"[load_ods_db1] {schema}.{table_name}: {df.count()} строк (под пользователем {reader})")
 
     spark.stop()
-
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 {
   "sources": {
-    "mssql": {
+    "db2": {
       "type": "mssql",
       "external_port": 14330,
       "operations": [
@@ -148,7 +148,7 @@
         }
       ]
     },
-    "oracle": {
+    "db1": {
       "type": "oracle",
       "external_port": 15211,
       "operations": [
