@@ -43,8 +43,7 @@
                 "columns": [
                   "customer_id"
                 ],
-                "ref_schema": "demo",
-                "ref_table": "customers",
+                "ref_entity_fqn": "demo.customers",
                 "ref_columns": [
                   "customer_id"
                 ]
@@ -53,8 +52,7 @@
                 "columns": [
                   "product_id"
                 ],
-                "ref_schema": "demo",
-                "ref_table": "products",
+                "ref_entity_fqn": "demo.products",
                 "ref_columns": [
                   "product_id"
                 ]
@@ -159,8 +157,7 @@
                 "columns": [
                   "customer_id"
                 ],
-                "ref_schema": "demo",
-                "ref_table": "customers",
+                "ref_entity_fqn": "demo.customers",
                 "ref_columns": [
                   "customer_id"
                 ]
@@ -169,8 +166,7 @@
                 "columns": [
                   "product_id"
                 ],
-                "ref_schema": "demo",
-                "ref_table": "products",
+                "ref_entity_fqn": "demo.products",
                 "ref_columns": [
                   "product_id"
                 ]
