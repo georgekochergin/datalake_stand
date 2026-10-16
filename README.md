@@ -36,7 +36,7 @@ flowchart TB
         direction TB
         CFG1[("conf/sydafa/sources.json")]
         CFG2[("test/sydafa/sources.json (демо)")]
-        API["sydafa:latest (FastAPI, Swagger /docs :8090)\nТранзакционная эволюция схем (API-first)\nСинтетическая генерация данных (POST /exec)\nЧестный TTL и Safe GET (RFC 7231)"]
+        API["sydafa:latest (FastAPI, Swagger /docs :8090)\nТранзакционная эволюция схем (API-first)\nСинтетическая генерация данных (POST /migrate)\nЧестный TTL и Safe GET (RFC 7231)"]
         STATE[("sydafa_state volume:\nlive-схема и статус")]
         CFG1 -. "bind-mount ro" .-> API
         CFG2 -. "bind-mount ro" .-> API
@@ -180,7 +180,7 @@ docker compose up -d --build
    ```
    Sydafa выполнит первичный сид для нового источника (если заданы `operations`), после чего сразу остановит СУБД для экономии памяти (0 MB RAM). Ранее инициализированные базы не затрагиваются.
 3. **Создание схем, таблиц и наполнение данными через API**:
-   Отправьте транзакционный батч операций через `POST /sources/{name}/exec` (или через Swagger UI: `http://localhost:8090/docs`).
+   Отправьте транзакционный батч операций через `POST /sources/{name}/migrate` (или через Swagger UI: `http://localhost:8090/docs`).
 
 > **Сброс к sources.json**: если требуется пересоздать базы с нуля строго по файлу `conf/sydafa/sources.json`, выполните сброс томов Compose: `docker compose down -v`.
 
@@ -194,7 +194,7 @@ docker compose up -d --build
 - Лениво оркестрирует контейнеры СУБД `sydafa-src-mssql-mssql` / `sydafa-src-oracle-oracle` через Docker API (данные живут в named volume);
 - Создаёт рабочую базу/PDB `sydafa` и читателя `sydafa` / `sydafa` (только чтение); админский доступ извне заблокирован;
 - Внешний доступ для DBeaver: порт `14330` задан в манифесте `sources.json`;
-- REST API: транзакционный DDL/DML через `POST /sources/{source}/exec` и lifecycle (`activate` / `deactivate` / `status`).
+- REST API: транзакционный DDL/DML через `POST /sources/{source}/migrate` и lifecycle (`activate` / `deactivate` / `status`).
 
 Конфиг начального семени (Seed) стенда: `conf/sydafa/sources.json`. Демо-манифест: `test/sydafa/sources.json`.
 
@@ -211,13 +211,13 @@ REST-интерфейс: `http://localhost:8090`, интерактивная д�
 | GET | `/sources/{source}/status` | Состояние контейнера (idle/running), TTL, реквизиты `connection` (Safe GET) |
 | POST | `/sources/{source}/activate` | Физический запуск СУБД в Docker и установка TTL (`?ttl_minutes=15`) |
 | POST | `/sources/{source}/deactivate` | Принудительная остановка контейнера для освобождения RAM |
-| POST | `/sources/{source}/exec` | Единый транзакционный метод DDL + DML (All-or-Nothing). Будит базу при необходимости |
+| POST | `/sources/{source}/migrate` | Единый транзакционный метод DDL + DML (All-or-Nothing). Будит базу при необходимости |
 
 #### Документация и спецификация API sydafa
 
 Вся детальная документация, правила интеграции и спецификации вынесены в репозиторий проекта:
 - 📖 [Руководство по sydafa](https://github.com/georgekochergin/sydafa);
-- 🔄 Спецификация транзакционного метода `POST /sources/{source}/exec` (DDL + DML);
+- 🔄 Спецификация транзакционного метода `POST /sources/{source}/migrate` (DDL + DML);
 - 🧬 Семантика генераторов синтетических данных (`sequence`, `faker`, `choice`, `random_decimal`, `random_date`).
 
 ---

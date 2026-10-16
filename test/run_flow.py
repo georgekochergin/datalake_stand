@@ -115,9 +115,6 @@ def sydafa_migrate(source, operations):
     return code, parsed
 
 
-sydafa_exec = sydafa_migrate
-
-
 # ---------- Trino ----------
 
 def trino_query(sql):

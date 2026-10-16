@@ -54,7 +54,7 @@
    - Проверка, что сервис отклоняет запрос с ошибкой **HTTP 422**.
 4. **Транзакционная подготовка данных в источниках**:
    - Каскадная очистка (`truncate` с `cascade: true`) таблиц `orders`, `products`, `customers`;
-   - Вставка фиксированного числа строк (`append`) через единый транзакционный метод `POST /sources/{source}/exec`.
+   - Вставка фиксированного числа строк (`append`) через единый транзакционный метод `POST /sources/{source}/migrate`.
 5. **Исполнение пайплайнов Airflow (ODS слой)**:
    - Разблокировка (`unpause`) и триггер DAG-ов `ods_load_mssql` и `ods_load_oracle`;
    - Шаг 1 DAG: оператор `SydafaActivateOperator` отправляет `POST /sources/{source}/activate`, гарантируя запуск контейнера СУБД;
