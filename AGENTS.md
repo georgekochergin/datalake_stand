@@ -8,7 +8,7 @@
 - Внутренние DNS-имена СУБД: `sydafa-src-mssql-mssql:1433`, `sydafa-src-oracle-oracle:1521`.
 - Демо-DAG-и: `test/dags/`, подключаются `test/docker-compose.override.yaml`.
 - Инспекция БД: `POST /sources/{source}/activate` → объект `connection` в ответе; внешний порт хоста задается в манифесте `sources.json` (`external_port`).
-- Плагин sydafa: `airflow/plugins/sydafa_plugin.py` (`SydafaActivateOperator`) для явного пробуждения СУБД перед чтением.
+- Интеграция с sydafa: пакет `sydafa-airflow` (`SydafaActivateOperator`) для явного пробуждения СУБД перед чтением.
 
 ## Контроль веток и Pull Request (Git Workflow)
 - Ветки с префиксом `kodik/`. Не коммитить в `main`. Обязателен Pull Request.

@@ -6,10 +6,7 @@ from airflow import DAG
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 from airflow.providers.standard.operators.python import PythonOperator
 
-try:
-    from plugins.sydafa_plugin import SydafaActivateOperator
-except ImportError:
-    from sydafa_plugin import SydafaActivateOperator
+from sydafa_airflow.operators import SydafaActivateOperator
 
 
 def _validate_load_placeholder(**_) -> None:
@@ -25,6 +22,7 @@ with DAG(
 ) as dag:
     activate_source = SydafaActivateOperator(
         task_id="activate_source",
+        conn_id="sydafa_default",
         source="db1",
         ttl_minutes=15,
     )

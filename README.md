@@ -8,7 +8,7 @@
 
 | Путь | Назначение |
 |---|---|
-| `airflow/` | Пользовательские DAG-и (каркас удерживается `.gitkeep`). Содержит плагин `airflow/plugins/sydafa_plugin.py` (`SydafaActivateOperator`). |
+| `airflow/` | Пользовательские DAG-и (каркас удерживается `.gitkeep`). Интеграция с sydafa через пакет `sydafa-airflow` (`SydafaActivateOperator`). |
 | `spark/`              | Пользовательские Spark-job-ы (каркас удерживается `.gitkeep`).                                                                          |
 | `trino/`              | Пользовательский SQL (каркас удерживается `.gitkeep`).                                                                                  |
 | `conf/airflow` | Dockerfile, requirements, пароли UI |
@@ -247,7 +247,7 @@ REST-интерфейс: `http://localhost:8090`, интерактивная д�
 #### 1. Демо-загрузка ODS-слоя Iceberg
 Тестовые DAG-и в Airflow (`schedule=None` — ручной запуск или через `run_flow.py`):
 - `ods_load_mssql`:
-  1. Таск `activate_source` (`SydafaActivateOperator` из `airflow/plugins/sydafa_plugin.py`) отправляет `POST /sources/mssql/activate?ttl_minutes=15`, гарантируя запуск СУБД;
+   1. Таск `activate_source` (`SydafaActivateOperator` из пакета `sydafa-airflow`) отправляет `POST /sources/mssql/activate?ttl_minutes=15`, гарантируя запуск СУБД;
   2. Таск `extract_load` (`SparkSubmitOperator`) запускает `test/spark-jobs/load_ods_mssql.py`: выгружает `demo.*` по JDBC под учеткой `sydafa`/`sydafa` через внутреннюю Docker-сеть в таблицы Iceberg `iceberg.ods.mssql_customers`, `mssql_orders`, `mssql_products`;
   3. Таск `validate_load` (`PythonOperator`): валидация выгрузки.
 - `ods_load_oracle`:
