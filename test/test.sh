@@ -68,22 +68,22 @@ if [ "$MODE" = "verify" ]; then
   # 1b. sydafa migrate update/delete — формализованный predicate, без SQL-инъекций
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/mssql/migrate \
     -H 'Content-Type: application/json' \
-    -d '{"operations":[{"op":"update","schema":"demo","table":"customers","predicate":[{"column":"customer_id","operator":"=","value":-999999}],"set":{"segment":"VIP"}}]}')
+    -d '{"operations":[{"op":"update","table_fqn":"demo.customers","predicate":[{"column":"customer_id","operator":"=","value":-999999}],"set":{"segment":"VIP"}}]}')
   check "sydafa migrate update formalized predicate" "$code" "200"
 
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/mssql/migrate \
     -H 'Content-Type: application/json' \
-    -d '{"operations":[{"op":"delete","schema":"demo","table":"customers","predicate":[{"column":"customer_id","operator":"=","value":-999999}],"cascade":false}]}')
+    -d '{"operations":[{"op":"delete","table_fqn":"demo.customers","predicate":[{"column":"customer_id","operator":"=","value":-999999}],"cascade":false}]}')
   check "sydafa migrate delete formalized predicate" "$code" "200"
 
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/oracle/migrate \
     -H 'Content-Type: application/json' \
-    -d '{"operations":[{"op":"update","schema":"demo","table":"customers","predicate":[{"column":"customer_id","operator":"=","value":-999999}],"set":{"segment":"VIP"}}]}')
+    -d '{"operations":[{"op":"update","table_fqn":"demo.customers","predicate":[{"column":"customer_id","operator":"=","value":-999999}],"set":{"segment":"VIP"}}]}')
   check "sydafa migrate update oracle bind params" "$code" "200"
 
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/mssql/migrate \
     -H 'Content-Type: application/json' \
-    -d '{"operations":[{"op":"update","schema":"demo","table":"customers","predicate":[{"column":"customer_id; DROP TABLE demo.customers --","operator":"=","value":1}],"set":{"segment":"VIP"}}]}')
+    -d '{"operations":[{"op":"update","table_fqn":"demo.customers","predicate":[{"column":"customer_id; DROP TABLE demo.customers --","operator":"=","value":1}],"set":{"segment":"VIP"}}]}')
   check "sydafa migrate rejects injected column" "$code" "422"
 
   # 2. Airflow
