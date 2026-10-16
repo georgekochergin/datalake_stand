@@ -110,9 +110,12 @@ def sydafa_get(path):
     return code, parsed
 
 
-def sydafa_exec(source, operations):
-    code, parsed = sydafa_post("/sources/%s/exec" % source, {"operations": operations})
+def sydafa_migrate(source, operations):
+    code, parsed = sydafa_post("/sources/%s/migrate" % source, {"operations": operations})
     return code, parsed
+
+
+sydafa_exec = sydafa_migrate
 
 
 # ---------- Trino ----------
@@ -285,28 +288,28 @@ def main():
         table_names = sorted(t["name"] for t in tables if not t["name"].startswith(("_upd_", "_del_")))
         check("GET /sources/%s tables" % src, ",".join(table_names), "customers,orders,products")
 
-    # 2b. Проверка безопасности sydafa exec (отклонение инъекций в именах колонок)
-    inj_code, _ = sydafa_exec("db2", [{
+    # 2b. Проверка безопасности sydafa migrate (отклонение инъекций в именах колонок)
+    inj_code, _ = sydafa_migrate("db2", [{
         "op": "update",
         "schema": "demo",
         "table": "customers",
         "predicate": [{"column": "customer_id; DROP TABLE demo.customers --", "operator": "=", "value": 1}],
         "set": {"segment": "VIP"},
     }])
-    check("sydafa exec rejects injected column", inj_code, 422)
+    check("sydafa migrate rejects injected column", inj_code, 422)
 
-    # 3. Очистка таблиц через единый POST /sources/{source}/exec (truncate в топологическом порядке)
+    # 3. Очистка таблиц через единый POST /sources/{source}/migrate (truncate в топологическом порядке)
     for src in sources:
         trunc_ops = [
             {"op": "truncate", "schema": "demo", "table": "orders", "cascade": True},
             {"op": "truncate", "schema": "demo", "table": "products", "cascade": True},
             {"op": "truncate", "schema": "demo", "table": "customers", "cascade": True},
         ]
-        code, parsed = sydafa_exec(src, trunc_ops)
-        check("exec truncate all tables for %s" % src, code, 200)
-        check("exec %s truncate executed 3 ops" % src, parsed.get("executed") if isinstance(parsed, dict) else None, 3)
+        code, parsed = sydafa_migrate(src, trunc_ops)
+        check("migrate truncate all tables for %s" % src, code, 200)
+        check("migrate %s truncate executed 3 ops" % src, parsed.get("executed") if isinstance(parsed, dict) else None, 3)
 
-    # 4. Наполнение тестовыми данными через единый POST /sources/{source}/exec (append)
+    # 4. Наполнение тестовыми данными через единый POST /sources/{source}/migrate (append)
     counts = {
         "db1": {"customers": 3, "products": 3, "orders": 4},
         "db2": {"customers": 3, "products": 3, "orders": 5},
@@ -317,9 +320,9 @@ def main():
             {"op": "append", "schema": "demo", "table": "products", "rows": counts[src]["products"], "new_key_ratio": 0.0},
             {"op": "append", "schema": "demo", "table": "orders", "rows": counts[src]["orders"], "new_key_ratio": 0.0},
         ]
-        code, parsed = sydafa_exec(src, append_ops)
-        check("exec append all tables for %s" % src, code, 200)
-        check("exec %s append executed 3 ops" % src, parsed.get("executed") if isinstance(parsed, dict) else None, 3)
+        code, parsed = sydafa_migrate(src, append_ops)
+        check("migrate append all tables for %s" % src, code, 200)
+        check("migrate %s append executed 3 ops" % src, parsed.get("executed") if isinstance(parsed, dict) else None, 3)
 
     # 5. ODS DAGs: unpause -> trigger -> wait -> Iceberg asserts
     for src in sources:
