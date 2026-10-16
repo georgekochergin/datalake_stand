@@ -291,8 +291,7 @@ def main():
     # 2b. Проверка безопасности sydafa migrate (отклонение инъекций в именах колонок)
     inj_code, _ = sydafa_migrate("db2", [{
         "op": "update",
-        "schema": "demo",
-        "table": "customers",
+        "table_fqn": "demo.customers",
         "predicate": [{"column": "customer_id; DROP TABLE demo.customers --", "operator": "=", "value": 1}],
         "set": {"segment": "VIP"},
     }])
@@ -301,9 +300,9 @@ def main():
     # 3. Очистка таблиц через единый POST /sources/{source}/migrate (truncate в топологическом порядке)
     for src in sources:
         trunc_ops = [
-            {"op": "truncate", "schema": "demo", "table": "orders", "cascade": True},
-            {"op": "truncate", "schema": "demo", "table": "products", "cascade": True},
-            {"op": "truncate", "schema": "demo", "table": "customers", "cascade": True},
+            {"op": "truncate", "table_fqn": "demo.orders", "cascade": True},
+            {"op": "truncate", "table_fqn": "demo.products", "cascade": True},
+            {"op": "truncate", "table_fqn": "demo.customers", "cascade": True},
         ]
         code, parsed = sydafa_migrate(src, trunc_ops)
         check("migrate truncate all tables for %s" % src, code, 200)
@@ -316,9 +315,9 @@ def main():
     }
     for src in sources:
         append_ops = [
-            {"op": "append", "schema": "demo", "table": "customers", "rows": counts[src]["customers"], "new_key_ratio": 0.0},
-            {"op": "append", "schema": "demo", "table": "products", "rows": counts[src]["products"], "new_key_ratio": 0.0},
-            {"op": "append", "schema": "demo", "table": "orders", "rows": counts[src]["orders"], "new_key_ratio": 0.0},
+            {"op": "append", "table_fqn": "demo.customers", "rows": counts[src]["customers"], "new_key_ratio": 0.0},
+            {"op": "append", "table_fqn": "demo.products", "rows": counts[src]["products"], "new_key_ratio": 0.0},
+            {"op": "append", "table_fqn": "demo.orders", "rows": counts[src]["orders"], "new_key_ratio": 0.0},
         ]
         code, parsed = sydafa_migrate(src, append_ops)
         check("migrate append all tables for %s" % src, code, 200)
