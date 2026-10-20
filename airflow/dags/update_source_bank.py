@@ -6,30 +6,14 @@
 """
 from __future__ import annotations
 
-import json
 from datetime import datetime
-from pathlib import Path
-from typing import Any
 
 from airflow import DAG
+from migrations import load_migration_operations
 from sydafa_airflow.operators import SydafaMigrateOperator
 
 
-def _load_migration_operations(filename: str) -> list[dict[str, Any]]:
-    candidates = [
-        Path(__file__).resolve().parent.parent / "migrations" / filename,
-        Path(__file__).resolve().parent / "migrations" / filename,
-        Path("/opt/airflow/migrations") / filename,
-        Path("/opt/airflow/dags/migrations") / filename,
-    ]
-    for candidate in candidates:
-        if candidate.is_file():
-            with open(candidate, "r", encoding="utf-8") as f:
-                return json.load(f)["operations"]
-    raise FileNotFoundError(f"Файл миграции '{filename}' не найден по путям: {candidates}")
-
-
-bank_operations = _load_migration_operations("bank_update.json")
+bank_operations = load_migration_operations("bank")
 
 with DAG(
     dag_id="update_source_bank",
@@ -37,7 +21,6 @@ with DAG(
     start_date=datetime(2026, 1, 1),
     schedule=None,
     catchup=False,
-    is_paused_upon_creation=False,
     tags=["sydafa", "bank", "mssql", "migrate"],
 ) as dag:
     migrate_bank = SydafaMigrateOperator(
@@ -45,5 +28,4 @@ with DAG(
         conn_id="sydafa_default",
         source="bank",
         operations=bank_operations,
-        timeout_seconds=300,
     )

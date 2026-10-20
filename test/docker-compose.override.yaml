@@ -44,13 +44,11 @@ services:
   airflow-init:
     volumes: !override
       - ./test/.workspace/airflow/dags:/opt/airflow/dags
-      - ./test/.workspace/airflow/migrations:/opt/airflow/migrations:ro
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
 
   airflow-scheduler:
     volumes: !override
       - ./test/.workspace/airflow/dags:/opt/airflow/dags
-      - ./test/.workspace/airflow/migrations:/opt/airflow/migrations:ro
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
       - ./test/.workspace/spark:/opt/spark-jobs:ro
       - ./test/.workspace/trino:/opt/airflow/sql:ro
@@ -58,13 +56,11 @@ services:
   airflow-dag-processor:
     volumes: !override
       - ./test/.workspace/airflow/dags:/opt/airflow/dags
-      - ./test/.workspace/airflow/migrations:/opt/airflow/migrations:ro
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
 
   airflow-webserver:
     volumes: !override
       - ./test/.workspace/airflow/dags:/opt/airflow/dags
-      - ./test/.workspace/airflow/migrations:/opt/airflow/migrations:ro
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
     ports: !override []
 
