@@ -7,8 +7,20 @@ __pycache__/
 # Пользовательский код стенда (каркас каталогов удерживается через .gitkeep)
 /airflow/*
 !/airflow/.gitkeep
+!/airflow/dags/
+!/airflow/dags/**
+!/airflow/migrations/
+!/airflow/migrations/**
 !/airflow/plugins/
 !/airflow/plugins/**
+
+# Исключаем временные файлы Python везде
+**/__pycache__/**
+**/*.pyc
+
+# Временное дерево проекта для e2e-тестов
+test/.workspace/
+test/.workspace/**
 
 /spark/*
 !/spark/.gitkeep

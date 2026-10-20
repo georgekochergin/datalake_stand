@@ -1,12 +1,502 @@
 {
   "sources": {
-    "mssql": {
+    "bank": {
       "type": "mssql",
       "external_port": 14330,
       "schema": {
-        "tables": {}
+        "tables": {
+          "retail_bank.clients": {
+            "primary_key": [
+              "client_id"
+            ],
+            "columns": {
+              "client_id": "bigint",
+              "full_name": "string",
+              "client_type": "string",
+              "status": "string"
+            },
+            "foreign_keys": []
+          },
+          "retail_bank.accounts": {
+            "primary_key": [
+              "account_id"
+            ],
+            "columns": {
+              "account_id": "bigint",
+              "account_number": "string",
+              "account_type": "string",
+              "status": "string"
+            },
+            "foreign_keys": []
+          },
+          "retail_bank.deals": {
+            "primary_key": [
+              "deal_id"
+            ],
+            "columns": {
+              "deal_id": "bigint",
+              "deal_number": "string",
+              "deal_type": "string",
+              "start_date": "date",
+              "end_date": "date",
+              "status": "string"
+            },
+            "foreign_keys": []
+          },
+          "retail_bank.transactions": {
+            "primary_key": [
+              "transaction_id"
+            ],
+            "columns": {
+              "transaction_id": "bigint",
+              "account_id": "bigint",
+              "client_id": "bigint",
+              "deal_id": "bigint",
+              "currency": "string",
+              "amount": "decimal(18,2)",
+              "posting_date": "date",
+              "description": "string"
+            },
+            "foreign_keys": [
+              {
+                "columns": [
+                  "account_id"
+                ],
+                "ref_entity_fqn": "retail_bank.accounts",
+                "ref_columns": [
+                  "account_id"
+                ]
+              },
+              {
+                "columns": [
+                  "client_id"
+                ],
+                "ref_entity_fqn": "retail_bank.clients",
+                "ref_columns": [
+                  "client_id"
+                ]
+              },
+              {
+                "columns": [
+                  "deal_id"
+                ],
+                "ref_entity_fqn": "retail_bank.deals",
+                "ref_columns": [
+                  "deal_id"
+                ]
+              }
+            ]
+          }
+        }
       },
-      "rules": {}
+      "rules": {
+        "retail_bank.clients": {
+          "columns": {
+            "client_id": {
+              "kind": "sequence"
+            },
+            "full_name": {
+              "kind": "faker",
+              "provider": "name",
+              "locale": "ru_RU",
+              "null_ratio": 0.05
+            },
+            "client_type": {
+              "kind": "choice",
+              "values": [
+                "Individual",
+                "Corporate",
+                "SME"
+              ],
+              "null_ratio": 0.05
+            },
+            "status": {
+              "kind": "choice",
+              "values": [
+                "Active",
+                "Blocked",
+                "VIP",
+                "Archived"
+              ],
+              "null_ratio": 0.05
+            }
+          }
+        },
+        "retail_bank.accounts": {
+          "columns": {
+            "account_id": {
+              "kind": "sequence"
+            },
+            "account_number": {
+              "kind": "faker",
+              "provider": "word",
+              "null_ratio": 0.05
+            },
+            "account_type": {
+              "kind": "choice",
+              "values": [
+                "Checking",
+                "Savings",
+                "Deposit",
+                "Credit"
+              ],
+              "null_ratio": 0.05
+            },
+            "status": {
+              "kind": "choice",
+              "values": [
+                "Open",
+                "Closed",
+                "Frozen"
+              ],
+              "null_ratio": 0.05
+            }
+          }
+        },
+        "retail_bank.deals": {
+          "columns": {
+            "deal_id": {
+              "kind": "sequence"
+            },
+            "deal_number": {
+              "kind": "faker",
+              "provider": "word",
+              "null_ratio": 0.05
+            },
+            "deal_type": {
+              "kind": "choice",
+              "values": [
+                "Credit",
+                "Deposit",
+                "Overdraft",
+                "Guarantee"
+              ],
+              "null_ratio": 0.05
+            },
+            "start_date": {
+              "kind": "random_date",
+              "anchor": "start_of_year",
+              "dim": "d",
+              "min_offset": 0,
+              "max_offset": 180,
+              "null_ratio": 0.05
+            },
+            "end_date": {
+              "kind": "date_offset",
+              "ref_column": "start_date",
+              "dim": "d",
+              "min_offset": 1,
+              "max_offset": 365,
+              "null_ratio": 0.05
+            },
+            "status": {
+              "kind": "choice",
+              "values": [
+                "Active",
+                "Closed",
+                "Pending"
+              ],
+              "null_ratio": 0.05
+            }
+          }
+        },
+        "retail_bank.transactions": {
+          "columns": {
+            "transaction_id": {
+              "kind": "sequence"
+            },
+            "currency": {
+              "kind": "choice",
+              "values": [
+                "RUB"
+              ],
+              "null_ratio": 0.0
+            },
+            "amount": {
+              "kind": "random_decimal",
+              "min": 10.0,
+              "max": 50000.0,
+              "null_ratio": 0.0
+            },
+            "posting_date": {
+              "kind": "random_date",
+              "null_ratio": 0.0
+            },
+            "description": {
+              "kind": "faker",
+              "provider": "word",
+              "null_ratio": 0.05
+            }
+          },
+          "invariants": [
+            {
+              "kind": "cumulative_balance",
+              "amount_column": "amount",
+              "partition_by": [
+                "account_id"
+              ],
+              "min_balance": 0.0,
+              "validate_existing": false
+            }
+          ]
+        }
+      }
+    },
+    "broker": {
+      "type": "oracle",
+      "external_port": 15211,
+      "schema": {
+        "tables": {
+          "trading_core.clients": {
+            "primary_key": [
+              "client_id"
+            ],
+            "columns": {
+              "client_id": "bigint",
+              "full_name": "string",
+              "risk_profile": "string",
+              "is_qualified": "string",
+              "status": "string"
+            },
+            "foreign_keys": []
+          },
+          "trading_core.accounts": {
+            "primary_key": [
+              "account_id"
+            ],
+            "columns": {
+              "account_id": "bigint",
+              "account_number": "string",
+              "account_type": "string",
+              "status": "string"
+            },
+            "foreign_keys": []
+          },
+          "trading_core.deals": {
+            "primary_key": [
+              "deal_id"
+            ],
+            "columns": {
+              "deal_id": "bigint",
+              "deal_number": "string",
+              "order_type": "string",
+              "start_date": "date",
+              "end_date": "date",
+              "market": "string"
+            },
+            "foreign_keys": []
+          },
+          "trading_core.transactions": {
+            "primary_key": [
+              "transaction_id"
+            ],
+            "columns": {
+              "transaction_id": "bigint",
+              "account_id": "bigint",
+              "client_id": "bigint",
+              "deal_id": "bigint",
+              "security_type": "string",
+              "quantity": "decimal(18,2)",
+              "posting_date": "date",
+              "ticker": "string"
+            },
+            "foreign_keys": [
+              {
+                "columns": [
+                  "account_id"
+                ],
+                "ref_entity_fqn": "trading_core.accounts",
+                "ref_columns": [
+                  "account_id"
+                ]
+              },
+              {
+                "columns": [
+                  "client_id"
+                ],
+                "ref_entity_fqn": "trading_core.clients",
+                "ref_columns": [
+                  "client_id"
+                ]
+              },
+              {
+                "columns": [
+                  "deal_id"
+                ],
+                "ref_entity_fqn": "trading_core.deals",
+                "ref_columns": [
+                  "deal_id"
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "rules": {
+        "trading_core.clients": {
+          "columns": {
+            "client_id": {
+              "kind": "sequence"
+            },
+            "full_name": {
+              "kind": "faker",
+              "provider": "name",
+              "locale": "ru_RU",
+              "null_ratio": 0.05
+            },
+            "risk_profile": {
+              "kind": "choice",
+              "values": [
+                "Conservative",
+                "Moderate",
+                "Aggressive"
+              ],
+              "null_ratio": 0.05
+            },
+            "is_qualified": {
+              "kind": "choice",
+              "values": [
+                "true",
+                "false"
+              ],
+              "null_ratio": 0.05
+            },
+            "status": {
+              "kind": "choice",
+              "values": [
+                "Active",
+                "Blocked"
+              ],
+              "null_ratio": 0.05
+            }
+          }
+        },
+        "trading_core.accounts": {
+          "columns": {
+            "account_id": {
+              "kind": "sequence"
+            },
+            "account_number": {
+              "kind": "faker",
+              "provider": "word",
+              "null_ratio": 0.05
+            },
+            "account_type": {
+              "kind": "choice",
+              "values": [
+                "Brokerage",
+                "IIS_TypeA",
+                "IIS_TypeB",
+                "Margin"
+              ],
+              "null_ratio": 0.05
+            },
+            "status": {
+              "kind": "choice",
+              "values": [
+                "Open",
+                "Closed"
+              ],
+              "null_ratio": 0.05
+            }
+          }
+        },
+        "trading_core.deals": {
+          "columns": {
+            "deal_id": {
+              "kind": "sequence"
+            },
+            "deal_number": {
+              "kind": "faker",
+              "provider": "word",
+              "null_ratio": 0.05
+            },
+            "order_type": {
+              "kind": "choice",
+              "values": [
+                "Limit",
+                "Market",
+                "StopLoss"
+              ],
+              "null_ratio": 0.05
+            },
+            "start_date": {
+              "kind": "random_date",
+              "anchor": "start_of_year",
+              "dim": "d",
+              "min_offset": 0,
+              "max_offset": 180,
+              "null_ratio": 0.05
+            },
+            "end_date": {
+              "kind": "date_offset",
+              "ref_column": "start_date",
+              "dim": "d",
+              "min_offset": 1,
+              "max_offset": 365,
+              "null_ratio": 0.05
+            },
+            "market": {
+              "kind": "choice",
+              "values": [
+                "MOEX",
+                "SPBX",
+                "OTC"
+              ],
+              "null_ratio": 0.05
+            }
+          }
+        },
+        "trading_core.transactions": {
+          "columns": {
+            "transaction_id": {
+              "kind": "sequence"
+            },
+            "security_type": {
+              "kind": "choice",
+              "values": [
+                "Stock",
+                "Bond",
+                "ETF",
+                "Future"
+              ],
+              "null_ratio": 0.0
+            },
+            "quantity": {
+              "kind": "random_decimal",
+              "min": 1.0,
+              "max": 1000.0,
+              "null_ratio": 0.0
+            },
+            "posting_date": {
+              "kind": "random_date",
+              "null_ratio": 0.0
+            },
+            "ticker": {
+              "kind": "choice",
+              "values": [
+                "SBER",
+                "GAZP",
+                "LKOH",
+                "OFZ26238",
+                "YNDX"
+              ],
+              "null_ratio": 0.05
+            }
+          },
+          "invariants": [
+            {
+              "kind": "cumulative_balance",
+              "amount_column": "quantity",
+              "partition_by": [
+                "account_id"
+              ],
+              "min_balance": 0.0,
+              "validate_existing": false
+            }
+          ]
+        }
+      }
     }
   }
 }

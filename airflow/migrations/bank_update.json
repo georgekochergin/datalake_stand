@@ -1,0 +1,37 @@
+{
+  "operations": [
+    {
+      "op": "append",
+      "entity_fqn": "retail_bank.transactions",
+      "rows": 25000,
+      "new_key_ratio": 0.01
+    },
+    {
+      "op": "update",
+      "entity_fqn": "retail_bank.clients",
+      "predicate": [],
+      "set": {
+        "status": "VIP"
+      },
+      "limit": 20
+    },
+    {
+      "op": "update",
+      "entity_fqn": "retail_bank.accounts",
+      "predicate": [],
+      "set": {
+        "status": "Frozen"
+      },
+      "limit": 20
+    },
+    {
+      "op": "update",
+      "entity_fqn": "retail_bank.deals",
+      "predicate": [],
+      "set": {
+        "status": "Closed"
+      },
+      "limit": 20
+    }
+  ]
+}

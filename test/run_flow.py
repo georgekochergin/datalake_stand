@@ -1,22 +1,32 @@
-import base64
+#!/usr/bin/env python3
+"""run_flow.py: Сквозной (e2e) тест стенда datalake_stand.
+
+Проверяет актуальное состояние репозитория:
+1. Readiness sydafa API и регистрацию источников (bank, broker).
+2. Защиту API sydafa от SQL-инъекций (HTTP 422).
+3. Авторизацию и доступность DAG-ов в Airflow 3.x.
+4. Исполнение и успешное завершение (state=success) DAG-ов обновления источников:
+   - update_source_bank (All-or-Nothing миграция MSSQL)
+   - update_source_broker (All-or-Nothing миграция Oracle)
+"""
+from __future__ import annotations
+
+import ast
 import json
 import os
+from pathlib import Path
 import ssl
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import Any
 
 SYDAFA = os.environ.get("SYDAFA_URL", "http://sydafa:8000")
-TRINO = "https://trino:8443"
-AIRFLOW = "http://airflow-webserver:8080"
-NESSIE = "http://nessie:19120"
-SPARK = "http://spark-master:8080"
-
-TRINO_AUTH = "Basic " + base64.b64encode(b"admin:admin").decode()
-AIRFLOW_USER = os.environ.get("AIRFLOW_UI_USER", "admin")
-AIRFLOW_PASSWORD = os.environ.get("AIRFLOW_UI_PASSWORD", "admin")
+AIRFLOW = os.environ.get("AIRFLOW_URL", "http://airflow-webserver:8080")
+AIRFLOW_USER = os.environ.get("AIRFLOW_USER", "admin")
+AIRFLOW_PASSWORD = os.environ.get("AIRFLOW_PASSWORD", "admin")
 
 _CTX = ssl.create_default_context()
 _CTX.check_hostname = False
@@ -26,73 +36,50 @@ PASS = 0
 FAIL = 0
 
 
-def check(name, actual, expected):
+def check(name: str, got: Any, want: Any) -> bool:
     global PASS, FAIL
-    ok = str(actual) == str(expected)
-    if ok:
-        print("PASS  " + name)
+    if got == want:
+        print("PASS  %s" % name)
         PASS += 1
-    else:
-        print("FAIL  %s  (got=%r want=%r)" % (name, actual, expected))
-        FAIL += 1
+        return True
+    print("FAIL  %s: got %r, want %r" % (name, got, want))
+    FAIL += 1
+    return False
 
 
-def http(method, url, body=None, headers=None, timeout=120):
+def http(method: str, url: str, body: Any = None, headers: dict[str, str] | None = None, timeout: int = 30) -> tuple[int, str]:
+    h = dict(headers or {})
     data = None
     if body is not None:
-        if isinstance(body, bytes):
-            data = body
+        if isinstance(body, (dict, list)):
+            data = json.dumps(body).encode("utf-8")
+            h.setdefault("Content-Type", "application/json")
         elif isinstance(body, str):
-            data = body.encode()
-        else:
-            data = json.dumps(body).encode()
-    h = dict(headers or {})
+            data = body.encode("utf-8")
+        elif isinstance(body, bytes):
+            data = body
     req = urllib.request.Request(url, data=data, method=method, headers=h)
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=_CTX) as r:
-            return r.status, r.read().decode()
+            return r.status, r.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()
+        return e.code, e.read().decode("utf-8", errors="replace")
     except Exception as e:  # noqa: BLE001
         return 0, str(e)
 
 
-def wait_http(name, url, want, tries, interval, body=None, headers=None):
+def wait_http(url: str, want: int, tries: int = 40, interval: int = 3, body: Any = None, headers: dict[str, str] | None = None) -> tuple[int, str]:
     for _ in range(tries):
-        code, raw = http("GET", url, body, headers, timeout=30)
+        code, raw = http("GET", url, body, headers, timeout=20)
         if code == want:
             return code, raw
         time.sleep(interval)
     return code, raw
 
 
-def wait_until(fn, want, timeout, interval):
-    deadline = time.time() + timeout
-    last = None
-    while time.time() < deadline:
-        try:
-            last = fn()
-        except Exception:  # noqa: BLE001
-            last = None
-        if str(last) == str(want):
-            return True, last
-        time.sleep(interval)
-    return False, last
-
-
-def spark_alive():
-    code, raw = http("GET", SPARK + "/json/", None, None, timeout=10)
-    if code != 200:
-        return None
-    try:
-        return int(json.loads(raw).get("aliveworkers"))
-    except Exception:  # noqa: BLE001
-        return None
-
-
 # ---------- sydafa API ----------
 
-def sydafa_post(path, body):
+def sydafa_post(path: str, body: Any) -> tuple[int, Any]:
     code, raw = http("POST", SYDAFA + path, body, {"Content-Type": "application/json"})
     try:
         parsed = json.loads(raw) if raw else None
@@ -101,7 +88,7 @@ def sydafa_post(path, body):
     return code, parsed
 
 
-def sydafa_get(path):
+def sydafa_get(path: str) -> tuple[int, Any]:
     code, raw = http("GET", SYDAFA + path, None, {"Content-Type": "application/json"})
     try:
         parsed = json.loads(raw) if raw else None
@@ -110,65 +97,13 @@ def sydafa_get(path):
     return code, parsed
 
 
-def sydafa_migrate(source, operations):
-    code, parsed = sydafa_post("/sources/%s/migrate" % source, {"operations": operations})
-    return code, parsed
+def sydafa_migrate(source: str, operations: list[dict[str, Any]]) -> tuple[int, Any]:
+    return sydafa_post("/sources/%s/migrate" % source, {"operations": operations})
 
 
-# ---------- Trino ----------
+# ---------- Airflow API ----------
 
-def trino_query(sql):
-    headers = {
-        "Authorization": TRINO_AUTH,
-        "X-Trino-Catalog": "iceberg",
-        "X-Trino-Schema": "information_schema",
-        "Content-Type": "text/plain",
-    }
-    code, raw = http("POST", TRINO + "/v1/statement", sql, headers)
-    if code != 200:
-        raise RuntimeError("Trino POST %s: %s" % (code, raw[:200]))
-    state = json.loads(raw)
-    rows = []
-    while True:
-        if state.get("error") or state.get("stats", {}).get("state") == "FAILED":
-            raise RuntimeError("Trino error: %s" % (json.dumps(state)[:300]))
-        if "data" in state:
-            rows.extend(state["data"])
-        if not state.get("nextUri"):
-            break
-        _, raw2 = http("GET", state["nextUri"], None, {"Authorization": TRINO_AUTH})
-        state = json.loads(raw2)
-    return rows
-
-
-def trino_count(sql):
-    rows = trino_query(sql)
-    if rows and rows[0]:
-        return int(rows[0][0])
-    return None
-
-
-def trino_count_retry(sql, timeout=240):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            c = trino_count(sql)
-            if c is not None:
-                return c
-        except Exception:  # noqa: BLE001
-            pass
-        time.sleep(5)
-    return None
-
-
-def trino_count_positive(sql, timeout=240):
-    c = trino_count_retry(sql, timeout)
-    return c is not None and c > 0
-
-
-# ---------- Airflow ----------
-
-def airflow_token():
+def airflow_token() -> str:
     data = urllib.parse.urlencode({"username": AIRFLOW_USER, "password": AIRFLOW_PASSWORD})
     code, raw = http(
         "POST",
@@ -181,7 +116,7 @@ def airflow_token():
     return json.loads(raw)["access_token"]
 
 
-def airflow_token_retry(timeout=240):
+def airflow_token_retry(timeout: int = 180) -> str | None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -191,7 +126,18 @@ def airflow_token_retry(timeout=240):
     return None
 
 
-def airflow_unpause(token, dag_id):
+def airflow_wait_dag_registered(token: str, dag_id: str, timeout: int = 180) -> bool:
+    url = "%s/api/v2/dags/%s" % (AIRFLOW, dag_id)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        code, raw = http("GET", url, None, {"Authorization": "Bearer " + token})
+        if code == 200:
+            return True
+        time.sleep(3)
+    return False
+
+
+def airflow_unpause(token: str, dag_id: str) -> tuple[int, str]:
     url = "%s/api/v2/dags/%s" % (AIRFLOW, dag_id)
     return http(
         "PATCH",
@@ -201,7 +147,7 @@ def airflow_unpause(token, dag_id):
     )
 
 
-def airflow_trigger(token, dag_id, run_id):
+def airflow_trigger(token: str, dag_id: str, run_id: str) -> tuple[int, str]:
     url = "%s/api/v2/dags/%s/dagRuns" % (AIRFLOW, dag_id)
     return http(
         "POST",
@@ -211,10 +157,9 @@ def airflow_trigger(token, dag_id, run_id):
     )
 
 
-def airflow_trigger_retry(token, dag_id, run_id, timeout=180):
+def airflow_trigger_retry(token: str, dag_id: str, run_id: str, timeout: int = 180) -> tuple[int, str]:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        # Убеждаемся, что DAG активен перед триггером
         airflow_unpause(token, dag_id)
         code, raw = airflow_trigger(token, dag_id, run_id)
         if code == 200:
@@ -223,7 +168,7 @@ def airflow_trigger_retry(token, dag_id, run_id, timeout=180):
     return code, raw
 
 
-def airflow_wait_run(token, dag_id, run_id, timeout=600, name=None):
+def airflow_wait_run(token: str, dag_id: str, run_id: str, timeout: int = 300, name: str | None = None) -> bool:
     url = "%s/api/v2/dags/%s/dagRuns/%s" % (AIRFLOW, dag_id, run_id)
     deadline = time.time() + timeout
     last = "unknown"
@@ -237,123 +182,253 @@ def airflow_wait_run(token, dag_id, run_id, timeout=600, name=None):
                 return True
             if last == "failed":
                 check((name or dag_id) + " -> success", "failed", "success")
+                try:
+                    ti_url = "%s/api/v2/dags/%s/dagRuns/%s/taskInstances" % (AIRFLOW, dag_id, run_id)
+                    _, ti_raw = http("GET", ti_url, None, {"Authorization": "Bearer " + token})
+                    tis = json.loads(ti_raw).get("task_instances", [])
+                    for ti in tis:
+                        t_id = ti.get("task_id")
+                        print("Task %s state: %s" % (t_id, ti.get("state")))
+                        log_url = "%s/api/v2/dags/%s/dagRuns/%s/taskInstances/%s/logs/1" % (AIRFLOW, dag_id, run_id, t_id)
+                        _, log_raw = http("GET", log_url, None, {"Authorization": "Bearer " + token})
+                        print("=== LOG %s ===\n%s\n===============" % (t_id, log_raw[-2000:] if len(log_raw) > 2000 else log_raw))
+                except Exception as ex:
+                    print("Could not fetch task logs:", ex)
                 return False
         time.sleep(5)
     check((name or dag_id) + " -> success", "timeout:" + str(last), "success")
     return False
 
 
-def main():
-    # 1. Readiness инфраструктурных компонентов
-    code, _ = wait_http("Nessie /iceberg/v1/config", NESSIE + "/iceberg/v1/config", 200, 40, 3)
-    check("Nessie /iceberg/v1/config", code, 200)
+# ---------- Проверка манифестов и DAG-ов ----------
 
-    code, _ = wait_http("sydafa /health", SYDAFA + "/health", 200, 60, 3)
+def validate_manifests_and_dags() -> None:
+    print("==> Шаг 0: Проверка структуры манифестов источников, миграций и DAG-ов...")
+    # Ищем корень проекта: /workspace внутри test-runner или корень репозитория
+    candidates = [
+        Path(os.environ.get("WORKSPACE_DIR", "/workspace")),
+        Path(__file__).resolve().parent.parent,
+    ]
+    ws = next((p for p in candidates if (p / "conf" / "sydafa" / "sources.json").exists()), None)
+    if not ws:
+        print("WARN: Рабочий каталог с conf/sydafa/sources.json не найден, пропуск статических проверок")
+        return
+
+    # 1. Валидация sources.json
+    conf_file = ws / "conf" / "sydafa" / "sources.json"
+    with open(conf_file, "r", encoding="utf-8") as f:
+        conf = json.load(f)
+    sources = conf.get("sources", {})
+
+    check("sources.json has bank source", "bank" in sources, True)
+    check("sources.json has broker source", "broker" in sources, True)
+
+    bank = sources.get("bank", {})
+    check("bank type is mssql", bank.get("type"), "mssql")
+    check("bank external_port is 14330", bank.get("external_port"), 14330)
+
+    bank_tables = bank.get("schema", {}).get("tables", {})
+    bank_tbl_names = sorted(bank_tables.keys())
+    check("bank star schema tables", ",".join(bank_tbl_names), "retail_bank.accounts,retail_bank.clients,retail_bank.deals,retail_bank.transactions")
+
+    tx_fks = bank_tables.get("retail_bank.transactions", {}).get("foreign_keys", [])
+    ref_entities = sorted(fk["ref_entity_fqn"] for fk in tx_fks)
+    check("bank transactions foreign keys", ",".join(ref_entities), "retail_bank.accounts,retail_bank.clients,retail_bank.deals")
+
+    bank_rules = bank.get("rules", {})
+    tx_rules = bank_rules.get("retail_bank.transactions", {}).get("columns", {})
+    check("bank currency choice RUB", tx_rules.get("currency", {}).get("values"), ["RUB"])
+    check("bank currency null_ratio 0.0", tx_rules.get("currency", {}).get("null_ratio"), 0.0)
+    check("bank amount null_ratio 0.0", tx_rules.get("amount", {}).get("null_ratio"), 0.0)
+    check("bank posting_date null_ratio 0.0", tx_rules.get("posting_date", {}).get("null_ratio"), 0.0)
+    check("bank description null_ratio 0.05", tx_rules.get("description", {}).get("null_ratio"), 0.05)
+
+    deals_rules = bank_rules.get("retail_bank.deals", {}).get("columns", {})
+    check("bank deals end_date date_offset", deals_rules.get("end_date", {}).get("kind"), "date_offset")
+    check("bank deals end_date ref start_date", deals_rules.get("end_date", {}).get("ref_column"), "start_date")
+
+    bank_invs = bank_rules.get("retail_bank.transactions", {}).get("invariants", [])
+    has_bank_bal = any(
+        inv.get("kind") == "cumulative_balance"
+        and inv.get("amount_column") == "amount"
+        and inv.get("partition_by") == ["account_id"]
+        and inv.get("min_balance") == 0.0
+        and inv.get("validate_existing") is False
+        for inv in bank_invs
+    )
+    check("bank cumulative_balance invariant (validate_existing=False)", has_bank_bal, True)
+
+    broker = sources.get("broker", {})
+    check("broker type is oracle", broker.get("type"), "oracle")
+    check("broker external_port is 15211", broker.get("external_port"), 15211)
+
+    broker_tables = broker.get("schema", {}).get("tables", {})
+    broker_tbl_names = sorted(broker_tables.keys())
+    check("broker star schema tables", ",".join(broker_tbl_names), "trading_core.accounts,trading_core.clients,trading_core.deals,trading_core.transactions")
+
+    broker_rules = broker.get("rules", {})
+    b_tx_rules = broker_rules.get("trading_core.transactions", {}).get("columns", {})
+    check("broker security_type choice", b_tx_rules.get("security_type", {}).get("kind"), "choice")
+    check("broker security_type null_ratio 0.0", b_tx_rules.get("security_type", {}).get("null_ratio"), 0.0)
+    check("broker quantity null_ratio 0.0", b_tx_rules.get("quantity", {}).get("null_ratio"), 0.0)
+    check("broker posting_date null_ratio 0.0", b_tx_rules.get("posting_date", {}).get("null_ratio"), 0.0)
+    check("broker ticker null_ratio 0.05", b_tx_rules.get("ticker", {}).get("null_ratio"), 0.05)
+
+    broker_invs = broker_rules.get("trading_core.transactions", {}).get("invariants", [])
+    has_broker_bal = any(
+        inv.get("kind") == "cumulative_balance"
+        and inv.get("amount_column") == "quantity"
+        and inv.get("partition_by") == ["account_id"]
+        and inv.get("min_balance") == 0.0
+        and inv.get("validate_existing") is False
+        for inv in broker_invs
+    )
+    check("broker cumulative_balance invariant (validate_existing=False)", has_broker_bal, True)
+
+    # 2. Валидация миграций
+    bank_mig = ws / "airflow" / "migrations" / "bank_update.json"
+    broker_mig = ws / "airflow" / "migrations" / "broker_update.json"
+    check("bank_update.json exists", bank_mig.exists(), True)
+    check("broker_update.json exists", broker_mig.exists(), True)
+
+    with open(bank_mig, "r", encoding="utf-8") as f:
+        bank_ops = json.load(f).get("operations", [])
+    bank_appends = [op for op in bank_ops if op.get("op") == "append"]
+    bank_updates = [op for op in bank_ops if op.get("op") == "update"]
+    bank_deletes = [op for op in bank_ops if op.get("op") == "delete"]
+    check("bank migration has 1 append (25k, new_key_ratio=0.01)", (
+        len(bank_appends) == 1
+        and bank_appends[0].get("rows") == 25000
+        and bank_appends[0].get("new_key_ratio") == 0.01
+        and bank_appends[0].get("entity_fqn") == "retail_bank.transactions"
+    ), True)
+    check("bank migration has 3 updates of 20 rows", len(bank_updates) == 3 and all(u.get("limit") == 20 for u in bank_updates), True)
+    check("bank migration is append-only (0 deletes)", len(bank_deletes), 0)
+
+    with open(broker_mig, "r", encoding="utf-8") as f:
+        broker_ops = json.load(f).get("operations", [])
+    b_appends = [op for op in broker_ops if op.get("op") == "append"]
+    b_updates = [op for op in broker_ops if op.get("op") == "update"]
+    b_deletes = [op for op in broker_ops if op.get("op") == "delete"]
+    check("broker migration has 1 append (25k, new_key_ratio=0.01)", (
+        len(b_appends) == 1
+        and b_appends[0].get("rows") == 25000
+        and b_appends[0].get("new_key_ratio") == 0.01
+        and b_appends[0].get("entity_fqn") == "trading_core.transactions"
+    ), True)
+    check("broker migration has 3 updates of 20 rows", len(b_updates) == 3 and all(u.get("limit") == 20 for u in b_updates), True)
+    check("broker migration has 1 delete of 1000 rows (no cascade)", (
+        len(b_deletes) == 1
+        and b_deletes[0].get("limit") == 1000
+        and b_deletes[0].get("cascade") is False
+        and b_deletes[0].get("entity_fqn") == "trading_core.transactions"
+    ), True)
+
+    # 3. Валидация синтаксиса и операторов DAG
+    dag_bank_path = ws / "airflow" / "dags" / "update_source_bank.py"
+    dag_broker_path = ws / "airflow" / "dags" / "update_source_broker.py"
+    check("update_source_bank.py exists", dag_bank_path.exists(), True)
+    check("update_source_broker.py exists", dag_broker_path.exists(), True)
+
+    try:
+        import ast
+        ast.parse(dag_bank_path.read_text(encoding="utf-8"))
+        ast.parse(dag_broker_path.read_text(encoding="utf-8"))
+        check("DAG files python syntax valid", True, True)
+    except Exception as e:
+        check("DAG files python syntax valid", str(e), True)
+
+    c_bank = dag_bank_path.read_text(encoding="utf-8")
+    check("bank DAG uses SydafaMigrateOperator and conn_id", (
+        "SydafaMigrateOperator" in c_bank and 'conn_id="sydafa_default"' in c_bank and 'source="bank"' in c_bank
+    ), True)
+    c_broker = dag_broker_path.read_text(encoding="utf-8")
+    check("broker DAG uses SydafaMigrateOperator and conn_id", (
+        "SydafaMigrateOperator" in c_broker and 'conn_id="sydafa_default"' in c_broker and 'source="broker"' in c_broker
+    ), True)
+
+
+def main() -> None:
+    validate_manifests_and_dags()
+    print("==> Шаг 1: Проверка готовности sydafa API...")
+    code, _ = wait_http(SYDAFA + "/health", 200, tries=50, interval=3)
     check("sydafa /health", code, 200)
 
     code, _ = http("GET", SYDAFA + "/docs", None, None, timeout=10)
     check("sydafa /docs", code, 200)
 
-    code, raw = wait_http("sydafa /sources", SYDAFA + "/sources", 200, 40, 3)
+    code, raw = wait_http(SYDAFA + "/sources", 200, tries=30, interval=3)
     check("sydafa /sources", code, 200)
     try:
         sources_list = json.loads(raw).get("sources", [])
-        check("sydafa /sources value", ",".join(sorted(sources_list)), "db1,db2")
-    except Exception:  # noqa: BLE001
-        check("sydafa /sources value", "parse-error", "db1,db2")
+        sources_sorted = sorted(sources_list)
+        check("sydafa /sources contains bank", "bank" in sources_sorted, True)
+        check("sydafa /sources contains broker", "broker" in sources_sorted, True)
+    except Exception as e:  # noqa: BLE001
+        check("sydafa /sources parse", str(e), "ok")
 
-    _, alive = wait_until(spark_alive, 1, 180, 5)
-    check("Spark alive workers", alive, 1)
-
-    _, trino_one = wait_until(lambda: trino_count("SELECT 1"), 1, 180, 5)
-    check("Trino SELECT 1", trino_one, 1)
-
-    token = airflow_token_retry()
-    check("Airflow login admin/admin", "ok" if token else None, "ok")
-    if token is None:
-        print("---")
-        print("PASS=%d FAIL=%d" % (PASS, FAIL))
-        return
-
-    sources = ["db1", "db2"]
-
-    # 2. Интроспекция через API GET /sources/{source}
-    for src in sources:
+    # Интроспекция схем источников bank и broker
+    for src in ["bank", "broker"]:
         code, meta = sydafa_get("/sources/%s" % src)
         check("GET /sources/%s" % src, code, 200)
         tables = meta.get("tables", []) if isinstance(meta, dict) else []
         table_names = sorted(t["name"] for t in tables if not t["name"].startswith(("_upd_", "_del_")))
-        check("GET /sources/%s tables" % src, ",".join(table_names), "customers,orders,products")
+        check("GET /sources/%s tables" % src, ",".join(table_names), "accounts,clients,deals,transactions")
 
-    # 2b. Проверка безопасности sydafa migrate (отклонение инъекций в именах колонок)
-    inj_code, _ = sydafa_migrate("db2", [{
+    print("\n==> Шаг 2: Проверка безопасности sydafa (отклонение SQL-инъекций)...")
+    inj_code, _ = sydafa_migrate("bank", [{
         "op": "update",
-        "entity_fqn": "demo.customers",
-        "predicate": [{"column": "customer_id; DROP TABLE demo.customers --", "operator": "=", "value": 1}],
-        "set": {"segment": "VIP"},
+        "entity_fqn": "retail_bank.clients",
+        "predicate": [{"column": "client_id; DROP TABLE retail_bank.clients --", "operator": "=", "value": 1}],
+        "set": {"status": "VIP"},
     }])
-    check("sydafa migrate rejects injected column", inj_code, 422)
+    check("sydafa rejects injected column with 422", inj_code, 422)
 
-    # 3. Очистка таблиц через единый POST /sources/{source}/migrate (truncate в топологическом порядке)
-    for src in sources:
-        trunc_ops = [
-            {"op": "truncate", "entity_fqn": "demo.orders", "cascade": True},
-            {"op": "truncate", "entity_fqn": "demo.products", "cascade": True},
-            {"op": "truncate", "entity_fqn": "demo.customers", "cascade": True},
-        ]
-        code, parsed = sydafa_migrate(src, trunc_ops)
-        check("migrate truncate all tables for %s" % src, code, 200)
-        check("migrate %s truncate executed 3 ops" % src, parsed.get("executed") if isinstance(parsed, dict) else None, 3)
+    print("\n==> Шаг 3: Проверка готовности Airflow...")
+    token = airflow_token_retry(timeout=180)
+    check("Airflow login admin/admin", "ok" if token else None, "ok")
+    if not token:
+        print("FATAL: Не удалось авторизоваться в Airflow")
+        return
 
-    # 4. Наполнение тестовыми данными через единый POST /sources/{source}/migrate (append)
-    counts = {
-        "db1": {"customers": 3, "products": 3, "orders": 4},
-        "db2": {"customers": 3, "products": 3, "orders": 5},
-    }
-    for src in sources:
-        append_ops = [
-            {"op": "append", "entity_fqn": "demo.customers", "rows": counts[src]["customers"], "new_key_ratio": 0.0},
-            {"op": "append", "entity_fqn": "demo.products", "rows": counts[src]["products"], "new_key_ratio": 0.0},
-            {"op": "append", "entity_fqn": "demo.orders", "rows": counts[src]["orders"], "new_key_ratio": 0.0},
-        ]
-        code, parsed = sydafa_migrate(src, append_ops)
-        check("migrate append all tables for %s" % src, code, 200)
-        check("migrate %s append executed 3 ops" % src, parsed.get("executed") if isinstance(parsed, dict) else None, 3)
+    # Ожидание обнаружения DAG-ов планировщиком Airflow
+    print("Ожидание регистрации DAG update_source_bank и update_source_broker в Airflow...")
+    bank_dag_ok = airflow_wait_dag_registered(token, "update_source_bank", timeout=180)
+    check("DAG update_source_bank registered in Airflow", bank_dag_ok, True)
 
-    # 5. ODS DAGs: unpause -> trigger -> wait -> Iceberg asserts
-    for src in sources:
-        dag_id = "ods_load_%s" % src
-        run_id = "full-flow-ods-" + src
-        code, _ = airflow_trigger_retry(token, dag_id, run_id)
-        check("trigger %s" % dag_id, code, 200)
-        if not airflow_wait_run(token, dag_id, run_id, name=dag_id):
-            return
+    broker_dag_ok = airflow_wait_dag_registered(token, "update_source_broker", timeout=180)
+    check("DAG update_source_broker registered in Airflow", broker_dag_ok, True)
 
-    for src in sources:
-        for table, exp in counts[src].items():
-            name = "iceberg.ods.%s_%s count=%d" % (src, table, exp)
-            got = trino_count_retry("SELECT count(*) FROM iceberg.ods.%s_%s" % (src, table))
-            check(name, got, exp)
+    if not (bank_dag_ok and broker_dag_ok):
+        print("FATAL: DAG-и не зарегистрированы в Airflow")
+        return
 
-    # 6. Mart DAG: unpause -> trigger -> wait -> asserts
-    mart_dag_id = "build_marts_demo"
-    code, _ = airflow_trigger_retry(token, mart_dag_id, "full-flow-marts")
-    check("trigger %s" % mart_dag_id, code, 200)
-    airflow_wait_run(token, mart_dag_id, "full-flow-marts", name=mart_dag_id)
+    print("\n==> Шаг 4: Запуск и проверка Airflow DAG update_source_bank...")
+    run_id_bank = "e2e-run-bank-" + str(int(time.time()))
+    code, _ = airflow_trigger_retry(token, "update_source_bank", run_id_bank)
+    check("trigger update_source_bank", code, 200)
+    bank_success = airflow_wait_run(token, "update_source_bank", run_id_bank, timeout=360, name="update_source_bank")
+    check("update_source_bank completed successfully", bank_success, True)
 
-    check(
-        "mart_trino.customer_totals non-empty",
-        trino_count_positive("SELECT count(*) FROM iceberg.mart_trino.customer_totals"),
-        True,
-    )
-    check(
-        "mart_spark.customer_totals non-empty",
-        trino_count_positive("SELECT count(*) FROM iceberg.mart_spark.customer_totals"),
-        True,
-    )
+    print("\n==> Шаг 5: Запуск и проверка Airflow DAG update_source_broker...")
+    run_id_broker = "e2e-run-broker-" + str(int(time.time()))
+    code, _ = airflow_trigger_retry(token, "update_source_broker", run_id_broker)
+    check("trigger update_source_broker", code, 200)
+    broker_success = airflow_wait_run(token, "update_source_broker", run_id_broker, timeout=360, name="update_source_broker")
+    check("update_source_broker completed successfully", broker_success, True)
 
 
 if __name__ == "__main__":
+    if "--validate-manifests-only" in sys.argv:
+        try:
+            validate_manifests_and_dags()
+        except Exception as e:  # noqa: BLE001
+            print("FATAL: %s: %s" % (type(e).__name__, e))
+            FAIL += 1
+        print("---")
+        print("PASS=%d FAIL=%d" % (PASS, FAIL))
+        sys.exit(0 if FAIL == 0 else 1)
+
     try:
         main()
     except Exception as e:  # noqa: BLE001

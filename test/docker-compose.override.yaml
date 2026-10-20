@@ -1,14 +1,19 @@
 services:
   sydafa:
     environment:
-      - SYDAFA_CONTAINER_PREFIX=sydafa-test-
       - SYDAFA_MAX_TTL_MINUTES=30
       - SYDAFA_TTL_MINUTES=15
     volumes: !override
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./test/sydafa/sources.json:/app/config/sources.json:ro
+      - ./test/.workspace/conf/sydafa/sources.json:/app/config/sources.json:ro
       - sydafa_state:/state
     ports: !override []
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').getcode() == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
 
   nessie:
     ports: !override []
@@ -18,12 +23,12 @@ services:
 
   spark-master:
     volumes: !override
-      - ./test/spark-jobs:/opt/spark-jobs:ro
+      - ./test/.workspace/spark:/opt/spark-jobs:ro
     ports: !override []
 
   spark-worker:
     volumes: !override
-      - ./test/spark-jobs:/opt/spark-jobs:ro
+      - ./test/.workspace/spark:/opt/spark-jobs:ro
     ports: !override []
 
   trino:
@@ -33,28 +38,41 @@ services:
       - ./conf/trino/password-authenticator.properties:/etc/trino/password-authenticator.properties:ro
       - ./conf/trino/password.db:/etc/trino/password.db:ro
       - ./conf/trino/keystore.p12:/etc/trino/keystore.p12:ro
-      - ./test/trino-sql:/opt/trino-sql:ro
+      - ./test/.workspace/trino:/opt/trino-sql:ro
     ports: !override []
 
   airflow-init:
     volumes: !override
-      - ./test/dags:/opt/airflow/dags
-      - ./airflow/plugins:/opt/airflow/plugins:ro
+      - ./test/.workspace/airflow/dags:/opt/airflow/dags
+      - ./test/.workspace/airflow/migrations:/opt/airflow/migrations:ro
+      - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
 
   airflow-scheduler:
     volumes: !override
-      - ./test/dags:/opt/airflow/dags
-      - ./airflow/plugins:/opt/airflow/plugins:ro
-      - ./test/spark-jobs:/opt/spark-jobs:ro
-      - ./test/trino-sql:/opt/airflow/sql:ro
+      - ./test/.workspace/airflow/dags:/opt/airflow/dags
+      - ./test/.workspace/airflow/migrations:/opt/airflow/migrations:ro
+      - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
+      - ./test/.workspace/spark:/opt/spark-jobs:ro
+      - ./test/.workspace/trino:/opt/airflow/sql:ro
 
   airflow-dag-processor:
     volumes: !override
-      - ./test/dags:/opt/airflow/dags
-      - ./airflow/plugins:/opt/airflow/plugins:ro
+      - ./test/.workspace/airflow/dags:/opt/airflow/dags
+      - ./test/.workspace/airflow/migrations:/opt/airflow/migrations:ro
+      - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
 
   airflow-webserver:
     volumes: !override
-      - ./test/dags:/opt/airflow/dags
-      - ./airflow/plugins:/opt/airflow/plugins:ro
+      - ./test/.workspace/airflow/dags:/opt/airflow/dags
+      - ./test/.workspace/airflow/migrations:/opt/airflow/migrations:ro
+      - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
     ports: !override []
+
+  test-runner:
+    volumes: !override
+      - ./test/.workspace:/workspace:ro
+    depends_on: !override
+      sydafa:
+        condition: service_healthy
+      airflow-webserver:
+        condition: service_started

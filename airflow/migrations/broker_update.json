@@ -1,0 +1,44 @@
+{
+  "operations": [
+    {
+      "op": "append",
+      "entity_fqn": "trading_core.transactions",
+      "rows": 25000,
+      "new_key_ratio": 0.01
+    },
+    {
+      "op": "update",
+      "entity_fqn": "trading_core.clients",
+      "predicate": [],
+      "set": {
+        "risk_profile": "Aggressive"
+      },
+      "limit": 20
+    },
+    {
+      "op": "update",
+      "entity_fqn": "trading_core.accounts",
+      "predicate": [],
+      "set": {
+        "status": "Closed"
+      },
+      "limit": 20
+    },
+    {
+      "op": "update",
+      "entity_fqn": "trading_core.deals",
+      "predicate": [],
+      "set": {
+        "market": "OTC"
+      },
+      "limit": 20
+    },
+    {
+      "op": "delete",
+      "entity_fqn": "trading_core.transactions",
+      "predicate": [],
+      "limit": 1000,
+      "cascade": false
+    }
+  ]
+}
