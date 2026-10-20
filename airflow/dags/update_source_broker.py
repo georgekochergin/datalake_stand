@@ -7,14 +7,7 @@
 """
 from __future__ import annotations
 
-import sys
 from datetime import datetime
-from pathlib import Path
-
-# Добавляем каталог plugins в sys.path для прозрачного импорта
-plugins_dir = str(Path(__file__).resolve().parent.parent / "plugins")
-if plugins_dir not in sys.path:
-    sys.path.insert(0, plugins_dir)
 
 from airflow import DAG
 from migrations import load_migration_operations
