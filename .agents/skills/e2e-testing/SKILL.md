@@ -29,14 +29,15 @@ description: Use when developing, extending, or debugging e2e and smoke tests in
 
 ### Механика синхронизации `test/.workspace/`
 Для чистоты репозитория и предотвращения дублирования файлов:
-1. `test/test.sh` перед запуском копирует актуальные рабочие файлы репозитория во временную директорию `test/.workspace/`:
-   - `conf/sydafa/sources.json` $\to$ `test/.workspace/conf/sydafa/sources.json`
-   - `airflow/dags/` $\to$ `test/.workspace/airflow/dags/`
-   - `airflow/migrations/` $\to$ `test/.workspace/airflow/migrations/`
-   - `airflow/plugins/` $\to$ `test/.workspace/airflow/plugins/`
-2. `test/.workspace/` внесена в `.gitignore` и не попадает в систему контроля версий.
-3. `test/docker-compose.override.yaml` монтирует тома для сервисов исключительно из `./test/.workspace/`.
-4. При завершении (успешном, аварийном или прерывании по `trap EXIT INT TERM HUP`) скрипт `test.sh` автоматически удаляет директорию `test/.workspace/`.
+1. В каталоге `test/` не хранится пользовательский код или демонстрационные схемы (каталог содержит только исполняемые файлы тестов: `test.sh`, `docker-compose.override.yaml`, `Dockerfile`, `run_flow.py`, `test_bank_broker.py`).
+2. `test/test.sh` перед запуском изолированно копирует актуальные рабочие каталоги репозитория во временную директорию `test/.workspace/`:
+   - `conf/` $\to$ `test/.workspace/conf/`
+   - `airflow/` $\to$ `test/.workspace/airflow/`
+   - `spark/` $\to$ `test/.workspace/spark/`
+   - `trino/` $\to$ `test/.workspace/trino/`
+3. `test/.workspace/` внесена в `.gitignore` и не попадает в систему контроля версий.
+4. `test/docker-compose.override.yaml` монтирует тома для всех сервисов (`sydafa`, `airflow`, `spark`, `trino`) исключительно из `./test/.workspace/`.
+5. При завершении (успешном, аварийном или прерывании по `trap EXIT INT TERM HUP`) скрипт `test.sh` автоматически удаляет директорию `test/.workspace/`.
 
 ---
 

@@ -171,12 +171,14 @@ trap cleanup EXIT INT TERM HUP
 cleanup
 
 echo "==> Подготовка изолированного дерева проекта в $TEST_WS..."
-mkdir -p "$TEST_WS/conf/sydafa" "$TEST_WS/airflow/dags" "$TEST_WS/airflow/migrations" "$TEST_WS/airflow/plugins"
-cp "$PROJECT_ROOT/conf/sydafa/sources.json" "$TEST_WS/conf/sydafa/sources.json"
-cp -R "$PROJECT_ROOT/airflow/dags/." "$TEST_WS/airflow/dags/"
-cp -R "$PROJECT_ROOT/airflow/migrations/." "$TEST_WS/airflow/migrations/"
-if [ -d "$PROJECT_ROOT/airflow/plugins" ]; then
-  cp -R "$PROJECT_ROOT/airflow/plugins/." "$TEST_WS/airflow/plugins/"
+mkdir -p "$TEST_WS/conf" "$TEST_WS/airflow" "$TEST_WS/spark" "$TEST_WS/trino"
+cp -R "$PROJECT_ROOT/conf/." "$TEST_WS/conf/"
+cp -R "$PROJECT_ROOT/airflow/." "$TEST_WS/airflow/"
+if [ -d "$PROJECT_ROOT/spark" ]; then
+  cp -R "$PROJECT_ROOT/spark/." "$TEST_WS/spark/"
+fi
+if [ -d "$PROJECT_ROOT/trino" ]; then
+  cp -R "$PROJECT_ROOT/trino/." "$TEST_WS/trino/"
 fi
 
 SYDAFA_IMG="${SYDAFA_IMAGE:-sydafa:latest}"

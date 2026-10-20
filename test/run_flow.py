@@ -180,6 +180,18 @@ def airflow_wait_run(token: str, dag_id: str, run_id: str, timeout: int = 300, n
                 return True
             if last == "failed":
                 check((name or dag_id) + " -> success", "failed", "success")
+                try:
+                    ti_url = "%s/api/v2/dags/%s/dagRuns/%s/taskInstances" % (AIRFLOW, dag_id, run_id)
+                    _, ti_raw = http("GET", ti_url, None, {"Authorization": "Bearer " + token})
+                    tis = json.loads(ti_raw).get("task_instances", [])
+                    for ti in tis:
+                        t_id = ti.get("task_id")
+                        print("Task %s state: %s" % (t_id, ti.get("state")))
+                        log_url = "%s/api/v2/dags/%s/dagRuns/%s/taskInstances/%s/logs/1" % (AIRFLOW, dag_id, run_id, t_id)
+                        _, log_raw = http("GET", log_url, None, {"Authorization": "Bearer " + token})
+                        print("=== LOG %s ===\n%s\n===============" % (t_id, log_raw[-2000:] if len(log_raw) > 2000 else log_raw))
+                except Exception as ex:
+                    print("Could not fetch task logs:", ex)
                 return False
         time.sleep(5)
     check((name or dag_id) + " -> success", "timeout:" + str(last), "success")
