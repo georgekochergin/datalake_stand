@@ -101,10 +101,11 @@ class TestBankBrokerSourcesAndDags(unittest.TestCase):
         self.assertEqual(len(append_ops), 1)
         self.assertEqual(append_ops[0]["entity_fqn"], "retail_bank.transactions")
         self.assertEqual(append_ops[0]["rows"], 25000)
+        self.assertEqual(append_ops[0]["new_key_ratio"], 0.01)
 
         self.assertEqual(len(update_ops), 3)
         for u in update_ops:
-            self.assertEqual(u["limit"], 100)
+            self.assertEqual(u["limit"], 20)
             self.assertEqual(len(u["set"]), 1)
 
         self.assertEqual(len(delete_ops), 0)
@@ -121,10 +122,11 @@ class TestBankBrokerSourcesAndDags(unittest.TestCase):
         self.assertEqual(len(b_append_ops), 1)
         self.assertEqual(b_append_ops[0]["entity_fqn"], "trading_core.transactions")
         self.assertEqual(b_append_ops[0]["rows"], 25000)
+        self.assertEqual(b_append_ops[0]["new_key_ratio"], 0.01)
 
         self.assertEqual(len(b_update_ops), 3)
         for u in b_update_ops:
-            self.assertEqual(u["limit"], 100)
+            self.assertEqual(u["limit"], 20)
             self.assertEqual(len(u["set"]), 1)
 
         self.assertEqual(len(b_delete_ops), 1)

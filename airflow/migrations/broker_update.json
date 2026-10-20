@@ -3,7 +3,8 @@
     {
       "op": "append",
       "entity_fqn": "trading_core.transactions",
-      "rows": 25000
+      "rows": 25000,
+      "new_key_ratio": 0.01
     },
     {
       "op": "update",
@@ -12,7 +13,7 @@
       "set": {
         "risk_profile": "Aggressive"
       },
-      "limit": 100
+      "limit": 20
     },
     {
       "op": "update",
@@ -21,7 +22,7 @@
       "set": {
         "status": "Closed"
       },
-      "limit": 100
+      "limit": 20
     },
     {
       "op": "update",
@@ -30,7 +31,7 @@
       "set": {
         "market": "OTC"
       },
-      "limit": 100
+      "limit": 20
     },
     {
       "op": "delete",
