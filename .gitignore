@@ -18,6 +18,10 @@ __pycache__/
 **/__pycache__/**
 **/*.pyc
 
+# Временное дерево проекта для e2e-тестов
+test/.workspace/
+test/.workspace/**
+
 /spark/*
 !/spark/.gitkeep
 

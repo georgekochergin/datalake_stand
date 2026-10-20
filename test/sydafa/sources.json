@@ -1,60 +1,88 @@
 {
   "sources": {
-    "db2": {
+    "bank": {
       "type": "mssql",
       "external_port": 14330,
       "schema": {
         "tables": {
-          "demo.customers": {
+          "retail_bank.clients": {
             "primary_key": [
-              "customer_id"
+              "client_id"
             ],
             "columns": {
-              "customer_id": "bigint",
-              "name": "string",
-              "segment": "string"
+              "client_id": "bigint",
+              "full_name": "string",
+              "client_type": "string",
+              "status": "string"
             },
             "foreign_keys": []
           },
-          "demo.products": {
+          "retail_bank.accounts": {
             "primary_key": [
-              "product_id"
+              "account_id"
             ],
             "columns": {
-              "product_id": "bigint",
-              "product_name": "string",
-              "price": "decimal(18,2)"
+              "account_id": "bigint",
+              "account_number": "string",
+              "account_type": "string",
+              "status": "string"
             },
             "foreign_keys": []
           },
-          "demo.orders": {
+          "retail_bank.deals": {
             "primary_key": [
-              "order_id"
+              "deal_id"
             ],
             "columns": {
-              "order_id": "bigint",
-              "customer_id": "bigint",
-              "product_id": "bigint",
+              "deal_id": "bigint",
+              "deal_number": "string",
+              "deal_type": "string",
+              "start_date": "date",
+              "end_date": "date",
+              "status": "string"
+            },
+            "foreign_keys": []
+          },
+          "retail_bank.transactions": {
+            "primary_key": [
+              "transaction_id"
+            ],
+            "columns": {
+              "transaction_id": "bigint",
+              "account_id": "bigint",
+              "client_id": "bigint",
+              "deal_id": "bigint",
+              "currency": "string",
               "amount": "decimal(18,2)",
-              "order_date": "date"
+              "posting_date": "date",
+              "description": "string"
             },
             "foreign_keys": [
               {
                 "columns": [
-                  "customer_id"
+                  "account_id"
                 ],
-                "ref_entity_fqn": "demo.customers",
+                "ref_entity_fqn": "retail_bank.accounts",
                 "ref_columns": [
-                  "customer_id"
+                  "account_id"
                 ]
               },
               {
                 "columns": [
-                  "product_id"
+                  "client_id"
                 ],
-                "ref_entity_fqn": "demo.products",
+                "ref_entity_fqn": "retail_bank.clients",
                 "ref_columns": [
-                  "product_id"
+                  "client_id"
+                ]
+              },
+              {
+                "columns": [
+                  "deal_id"
+                ],
+                "ref_entity_fqn": "retail_bank.deals",
+                "ref_columns": [
+                  "deal_id"
                 ]
               }
             ]
@@ -62,113 +90,242 @@
         }
       },
       "rules": {
-        "demo.customers": {
+        "retail_bank.clients": {
           "columns": {
-            "customer_id": {
+            "client_id": {
               "kind": "sequence"
             },
-            "name": {
+            "full_name": {
               "kind": "faker",
-              "provider": "company"
+              "provider": "name",
+              "locale": "ru_RU",
+              "null_ratio": 0.05
             },
-            "segment": {
+            "client_type": {
               "kind": "choice",
               "values": [
-                "Retail",
+                "Individual",
                 "Corporate",
-                "VIP"
-              ]
+                "SME"
+              ],
+              "null_ratio": 0.05
+            },
+            "status": {
+              "kind": "choice",
+              "values": [
+                "Active",
+                "Blocked",
+                "VIP",
+                "Archived"
+              ],
+              "null_ratio": 0.05
             }
           }
         },
-        "demo.products": {
+        "retail_bank.accounts": {
           "columns": {
-            "product_id": {
+            "account_id": {
               "kind": "sequence"
             },
-            "product_name": {
+            "account_number": {
               "kind": "faker",
-              "provider": "word"
+              "provider": "word",
+              "null_ratio": 0.05
             },
-            "price": {
-              "kind": "random_decimal",
-              "min": 1,
-              "max": 100000
+            "account_type": {
+              "kind": "choice",
+              "values": [
+                "Checking",
+                "Savings",
+                "Deposit",
+                "Credit"
+              ],
+              "null_ratio": 0.05
+            },
+            "status": {
+              "kind": "choice",
+              "values": [
+                "Open",
+                "Closed",
+                "Frozen"
+              ],
+              "null_ratio": 0.05
             }
           }
         },
-        "demo.orders": {
+        "retail_bank.deals": {
           "columns": {
-            "order_id": {
+            "deal_id": {
               "kind": "sequence"
+            },
+            "deal_number": {
+              "kind": "faker",
+              "provider": "word",
+              "null_ratio": 0.05
+            },
+            "deal_type": {
+              "kind": "choice",
+              "values": [
+                "Credit",
+                "Deposit",
+                "Overdraft",
+                "Guarantee"
+              ],
+              "null_ratio": 0.05
+            },
+            "start_date": {
+              "kind": "random_date",
+              "anchor": "start_of_year",
+              "dim": "d",
+              "min_offset": 0,
+              "max_offset": 180,
+              "null_ratio": 0.05
+            },
+            "end_date": {
+              "kind": "date_offset",
+              "ref_column": "start_date",
+              "dim": "d",
+              "min_offset": 1,
+              "max_offset": 365,
+              "null_ratio": 0.05
+            },
+            "status": {
+              "kind": "choice",
+              "values": [
+                "Active",
+                "Closed",
+                "Pending"
+              ],
+              "null_ratio": 0.05
+            }
+          }
+        },
+        "retail_bank.transactions": {
+          "columns": {
+            "transaction_id": {
+              "kind": "sequence"
+            },
+            "currency": {
+              "kind": "choice",
+              "values": [
+                "RUB"
+              ],
+              "null_ratio": 0.0
             },
             "amount": {
               "kind": "random_decimal",
-              "min": 1,
-              "max": 100000
+              "min": 10.0,
+              "max": 50000.0,
+              "null_ratio": 0.0
             },
-            "order_date": {
-              "kind": "random_date"
+            "posting_date": {
+              "kind": "random_date",
+              "null_ratio": 0.0
+            },
+            "description": {
+              "kind": "faker",
+              "provider": "word",
+              "null_ratio": 0.05
             }
-          }
+          },
+          "invariants": [
+            {
+              "kind": "cumulative_balance",
+              "amount_column": "amount",
+              "partition_by": [
+                "account_id"
+              ],
+              "min_balance": 0.0,
+              "validate_existing": false
+            }
+          ]
         }
       }
     },
-    "db1": {
+    "broker": {
       "type": "oracle",
       "external_port": 15211,
       "schema": {
         "tables": {
-          "demo.customers": {
+          "trading_core.clients": {
             "primary_key": [
-              "customer_id"
+              "client_id"
             ],
             "columns": {
-              "customer_id": "bigint",
-              "name": "string",
-              "segment": "string"
+              "client_id": "bigint",
+              "full_name": "string",
+              "risk_profile": "string",
+              "is_qualified": "string",
+              "status": "string"
             },
             "foreign_keys": []
           },
-          "demo.products": {
+          "trading_core.accounts": {
             "primary_key": [
-              "product_id"
+              "account_id"
             ],
             "columns": {
-              "product_id": "bigint",
-              "product_name": "string",
-              "price": "decimal(18,2)"
+              "account_id": "bigint",
+              "account_number": "string",
+              "account_type": "string",
+              "status": "string"
             },
             "foreign_keys": []
           },
-          "demo.orders": {
+          "trading_core.deals": {
             "primary_key": [
-              "order_id"
+              "deal_id"
             ],
             "columns": {
-              "order_id": "bigint",
-              "customer_id": "bigint",
-              "product_id": "bigint",
-              "amount": "decimal(18,2)",
-              "order_date": "date"
+              "deal_id": "bigint",
+              "deal_number": "string",
+              "order_type": "string",
+              "start_date": "date",
+              "end_date": "date",
+              "market": "string"
+            },
+            "foreign_keys": []
+          },
+          "trading_core.transactions": {
+            "primary_key": [
+              "transaction_id"
+            ],
+            "columns": {
+              "transaction_id": "bigint",
+              "account_id": "bigint",
+              "client_id": "bigint",
+              "deal_id": "bigint",
+              "security_type": "string",
+              "quantity": "decimal(18,2)",
+              "posting_date": "date",
+              "ticker": "string"
             },
             "foreign_keys": [
               {
                 "columns": [
-                  "customer_id"
+                  "account_id"
                 ],
-                "ref_entity_fqn": "demo.customers",
+                "ref_entity_fqn": "trading_core.accounts",
                 "ref_columns": [
-                  "customer_id"
+                  "account_id"
                 ]
               },
               {
                 "columns": [
-                  "product_id"
+                  "client_id"
                 ],
-                "ref_entity_fqn": "demo.products",
+                "ref_entity_fqn": "trading_core.clients",
                 "ref_columns": [
-                  "product_id"
+                  "client_id"
+                ]
+              },
+              {
+                "columns": [
+                  "deal_id"
+                ],
+                "ref_entity_fqn": "trading_core.deals",
+                "ref_columns": [
+                  "deal_id"
                 ]
               }
             ]
@@ -176,55 +333,168 @@
         }
       },
       "rules": {
-        "demo.customers": {
+        "trading_core.clients": {
           "columns": {
-            "customer_id": {
+            "client_id": {
               "kind": "sequence"
             },
-            "name": {
+            "full_name": {
               "kind": "faker",
-              "provider": "company"
+              "provider": "name",
+              "locale": "ru_RU",
+              "null_ratio": 0.05
             },
-            "segment": {
+            "risk_profile": {
               "kind": "choice",
               "values": [
-                "Retail",
-                "Corporate",
-                "VIP"
-              ]
+                "Conservative",
+                "Moderate",
+                "Aggressive"
+              ],
+              "null_ratio": 0.05
+            },
+            "is_qualified": {
+              "kind": "choice",
+              "values": [
+                "true",
+                "false"
+              ],
+              "null_ratio": 0.05
+            },
+            "status": {
+              "kind": "choice",
+              "values": [
+                "Active",
+                "Blocked"
+              ],
+              "null_ratio": 0.05
             }
           }
         },
-        "demo.products": {
+        "trading_core.accounts": {
           "columns": {
-            "product_id": {
+            "account_id": {
               "kind": "sequence"
             },
-            "product_name": {
+            "account_number": {
               "kind": "faker",
-              "provider": "word"
+              "provider": "word",
+              "null_ratio": 0.05
             },
-            "price": {
-              "kind": "random_decimal",
-              "min": 1,
-              "max": 100000
+            "account_type": {
+              "kind": "choice",
+              "values": [
+                "Brokerage",
+                "IIS_TypeA",
+                "IIS_TypeB",
+                "Margin"
+              ],
+              "null_ratio": 0.05
+            },
+            "status": {
+              "kind": "choice",
+              "values": [
+                "Open",
+                "Closed"
+              ],
+              "null_ratio": 0.05
             }
           }
         },
-        "demo.orders": {
+        "trading_core.deals": {
           "columns": {
-            "order_id": {
+            "deal_id": {
               "kind": "sequence"
             },
-            "amount": {
-              "kind": "random_decimal",
-              "min": 1,
-              "max": 100000
+            "deal_number": {
+              "kind": "faker",
+              "provider": "word",
+              "null_ratio": 0.05
             },
-            "order_date": {
-              "kind": "random_date"
+            "order_type": {
+              "kind": "choice",
+              "values": [
+                "Limit",
+                "Market",
+                "StopLoss"
+              ],
+              "null_ratio": 0.05
+            },
+            "start_date": {
+              "kind": "random_date",
+              "anchor": "start_of_year",
+              "dim": "d",
+              "min_offset": 0,
+              "max_offset": 180,
+              "null_ratio": 0.05
+            },
+            "end_date": {
+              "kind": "date_offset",
+              "ref_column": "start_date",
+              "dim": "d",
+              "min_offset": 1,
+              "max_offset": 365,
+              "null_ratio": 0.05
+            },
+            "market": {
+              "kind": "choice",
+              "values": [
+                "MOEX",
+                "SPBX",
+                "OTC"
+              ],
+              "null_ratio": 0.05
             }
           }
+        },
+        "trading_core.transactions": {
+          "columns": {
+            "transaction_id": {
+              "kind": "sequence"
+            },
+            "security_type": {
+              "kind": "choice",
+              "values": [
+                "Stock",
+                "Bond",
+                "ETF",
+                "Future"
+              ],
+              "null_ratio": 0.0
+            },
+            "quantity": {
+              "kind": "random_decimal",
+              "min": 1.0,
+              "max": 1000.0,
+              "null_ratio": 0.0
+            },
+            "posting_date": {
+              "kind": "random_date",
+              "null_ratio": 0.0
+            },
+            "ticker": {
+              "kind": "choice",
+              "values": [
+                "SBER",
+                "GAZP",
+                "LKOH",
+                "OFZ26238",
+                "YNDX"
+              ],
+              "null_ratio": 0.05
+            }
+          },
+          "invariants": [
+            {
+              "kind": "cumulative_balance",
+              "amount_column": "quantity",
+              "partition_by": [
+                "account_id"
+              ],
+              "min_balance": 0.0,
+              "validate_existing": false
+            }
+          ]
         }
       }
     }

@@ -149,6 +149,9 @@ if [ "$MODE" = "verify" ]; then
 fi
 
 # ==================== РЕЖИМ 2: Полный сквозной e2e запуск стенда ====================
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TEST_WS="$PROJECT_ROOT/test/.workspace"
+
 cleanup() {
   local ids
   ids=$(docker ps -aq --filter "name=test-runner-run-")
@@ -161,10 +164,21 @@ cleanup() {
   if [ -n "$sydafa_srcs" ]; then
     echo "$sydafa_srcs" | xargs docker rm -f >/dev/null 2>&1 || true
   fi
+  rm -rf "$TEST_WS"
 }
 trap cleanup EXIT INT TERM HUP
 
 cleanup
+
+echo "==> Подготовка изолированного дерева проекта в $TEST_WS..."
+mkdir -p "$TEST_WS/conf/sydafa" "$TEST_WS/airflow/dags" "$TEST_WS/airflow/migrations" "$TEST_WS/airflow/plugins"
+cp "$PROJECT_ROOT/conf/sydafa/sources.json" "$TEST_WS/conf/sydafa/sources.json"
+cp -R "$PROJECT_ROOT/airflow/dags/." "$TEST_WS/airflow/dags/"
+cp -R "$PROJECT_ROOT/airflow/migrations/." "$TEST_WS/airflow/migrations/"
+if [ -d "$PROJECT_ROOT/airflow/plugins" ]; then
+  cp -R "$PROJECT_ROOT/airflow/plugins/." "$TEST_WS/airflow/plugins/"
+fi
+
 SYDAFA_IMG="${SYDAFA_IMAGE:-sydafa:latest}"
 if ! docker image inspect "$SYDAFA_IMG" >/dev/null 2>&1; then
   if [ -d "../sydafa" ]; then
