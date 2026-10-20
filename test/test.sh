@@ -59,31 +59,54 @@ if [ "$MODE" = "verify" ]; then
   check "sydafa /docs" "$code" "200"
 
   sources=$(curl -s http://localhost:8090/sources 2>/dev/null | python3 -c "import sys,json;print(','.join(sorted(json.load(sys.stdin).get('sources',[]))))" 2>/dev/null)
-  if [[ "$sources" == *"mssql"* ]]; then
-    check "sydafa /sources contains mssql" "ok" "ok"
+  src_mssql="mssql"
+  table_mssql="demo.customers"
+  col_mssql="customer_id"
+  set_mssql='{"segment":"VIP"}'
+  if [[ "$sources" == *"bank"* ]]; then
+    src_mssql="bank"
+    table_mssql="retail_bank.clients"
+    col_mssql="client_id"
+    set_mssql='{"status":"VIP"}'
+  fi
+  src_oracle="oracle"
+  table_oracle="demo.customers"
+  col_oracle="customer_id"
+  set_oracle='{"segment":"VIP"}'
+  if [[ "$sources" == *"broker"* ]]; then
+    src_oracle="broker"
+    table_oracle="trading_core.clients"
+    col_oracle="client_id"
+    set_oracle='{"status":"Active"}'
+  fi
+
+  if [[ "$sources" == *"$src_mssql"* ]]; then
+    check "sydafa /sources contains $src_mssql" "ok" "ok"
   else
-    check "sydafa /sources contains mssql" "$sources" "mssql"
+    check "sydafa /sources contains $src_mssql" "$sources" "$src_mssql"
   fi
 
   # 1b. sydafa migrate update/delete — формализованный predicate, без SQL-инъекций
-  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/mssql/migrate \
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/${src_mssql}/migrate \
     -H 'Content-Type: application/json' \
-    -d '{"operations":[{"op":"update","entity_fqn":"demo.customers","predicate":[{"column":"customer_id","operator":"=","value":-999999}],"set":{"segment":"VIP"}}]}')
+    -d "{\"operations\":[{\"op\":\"update\",\"entity_fqn\":\"${table_mssql}\",\"predicate\":[{\"column\":\"${col_mssql}\",\"operator\":\"=\",\"value\":-999999}],\"set\":${set_mssql}}]}")
   check "sydafa migrate update formalized predicate" "$code" "200"
 
-  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/mssql/migrate \
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/${src_mssql}/migrate \
     -H 'Content-Type: application/json' \
-    -d '{"operations":[{"op":"delete","entity_fqn":"demo.customers","predicate":[{"column":"customer_id","operator":"=","value":-999999}],"cascade":false}]}')
+    -d "{\"operations\":[{\"op\":\"delete\",\"entity_fqn\":\"${table_mssql}\",\"predicate\":[{\"column\":\"${col_mssql}\",\"operator\":\"=\",\"value\":-999999}],\"cascade\":false}]}")
   check "sydafa migrate delete formalized predicate" "$code" "200"
 
-  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/oracle/migrate \
-    -H 'Content-Type: application/json' \
-    -d '{"operations":[{"op":"update","entity_fqn":"demo.customers","predicate":[{"column":"customer_id","operator":"=","value":-999999}],"set":{"segment":"VIP"}}]}')
-  check "sydafa migrate update oracle bind params" "$code" "200"
+  if [[ "$sources" == *"$src_oracle"* ]]; then
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/${src_oracle}/migrate \
+      -H 'Content-Type: application/json' \
+      -d "{\"operations\":[{\"op\":\"update\",\"entity_fqn\":\"${table_oracle}\",\"predicate\":[{\"column\":\"${col_oracle}\",\"operator\":\"=\",\"value\":-999999}],\"set\":${set_oracle}}]}")
+    check "sydafa migrate update oracle bind params" "$code" "200"
+  fi
 
-  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/mssql/migrate \
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/sources/${src_mssql}/migrate \
     -H 'Content-Type: application/json' \
-    -d '{"operations":[{"op":"update","entity_fqn":"demo.customers","predicate":[{"column":"customer_id; DROP TABLE demo.customers --","operator":"=","value":1}],"set":{"segment":"VIP"}}]}')
+    -d "{\"operations\":[{\"op\":\"update\",\"entity_fqn\":\"${table_mssql}\",\"predicate\":[{\"column\":\"${col_mssql}; DROP TABLE ${table_mssql} --\",\"operator\":\"=\",\"value\":1}],\"set\":${set_mssql}}]}")
   check "sydafa migrate rejects injected column" "$code" "422"
 
   # 2. Airflow
@@ -99,17 +122,20 @@ if [ "$MODE" = "verify" ]; then
 
   # 4. MSSQL (БД sydafa + таблицы под sydafa/sydafa)
   tables=$(docker compose exec -T sydafa python -c \
-    "import pymssql; c=pymssql.connect(server='sydafa-src-mssql-mssql',port=1433,user='sydafa',password='sydafa',database='sydafa'); cur=c.cursor(); cur.execute('SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME'); print(','.join(r[0] for r in cur.fetchall()))" 2>/dev/null)
+    "import pymssql; c=pymssql.connect(server='sydafa-src-mssql-${src_mssql}',port=1433,user='sydafa',password='sydafa',database='sydafa'); cur=c.cursor(); cur.execute('SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME'); print(','.join(r[0] for r in cur.fetchall()))" 2>/dev/null)
   case "$tables" in
-    *customers*orders*products*) check "MSSQL sydafa tables under reader" "ok" "ok" ;;
-    *) check "MSSQL sydafa tables under reader" "$tables" "customers,orders,products" ;;
+    *accounts*clients*deals*transactions*|*customers*orders*products*) check "MSSQL sydafa tables under reader" "ok" "ok" ;;
+    *) check "MSSQL sydafa tables under reader" "$tables" "accounts,clients,deals,transactions" ;;
   esac
 
   # 5. Oracle (БД sydafa + таблицы под sydafa/sydafa, если oracle сконфигурирован)
-  if [[ "$sources" == *"oracle"* ]]; then
+  if [[ "$sources" == *"$src_oracle"* ]]; then
     tables=$(docker compose exec -T sydafa python -c \
-      "import oracledb; c=oracledb.connect(user='sydafa', password='sydafa', dsn=oracledb.makedsn('sydafa-src-oracle-oracle',1521,service_name='sydafa')); cur=c.cursor(); cur.execute(\"SELECT table_name FROM all_tables WHERE owner = 'DEMO' ORDER BY table_name\"); print(','.join(r[0] for r in cur.fetchall()))" 2>/dev/null)
-    check "Oracle sydafa tables under reader" "$tables" "CUSTOMERS,ORDERS,PRODUCTS"
+      "import oracledb; c=oracledb.connect(user='sydafa', password='sydafa', dsn=oracledb.makedsn('sydafa-src-oracle-${src_oracle}',1521,service_name='sydafa')); cur=c.cursor(); cur.execute(\"SELECT table_name FROM all_tables WHERE owner IN ('DEMO','TRADING_CORE') ORDER BY table_name\"); print(','.join(r[0] for r in cur.fetchall()))" 2>/dev/null)
+    case "$tables" in
+      *ACCOUNTS*CLIENTS*DEALS*TRANSACTIONS*|*CUSTOMERS*ORDERS*PRODUCTS*) check "Oracle sydafa tables under reader" "ok" "ok" ;;
+      *) check "Oracle sydafa tables under reader" "$tables" "ACCOUNTS,CLIENTS,DEALS,TRANSACTIONS" ;;
+    esac
   fi
 
   # 6. Spark master видит worker
