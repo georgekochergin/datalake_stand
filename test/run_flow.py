@@ -64,7 +64,7 @@ def http(method: str, url: str, body: Any = None, headers: dict[str, str] | None
             return r.status, r.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", errors="replace")
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return 0, str(e)
 
 
@@ -77,22 +77,22 @@ def wait_http(url: str, want: int, tries: int = 40, interval: int = 3, body: Any
     return code, raw
 
 
-# ---------- sydafa API ----------
-
 def sydafa_post(path: str, body: Any) -> tuple[int, Any]:
+    """Отправляет POST-запрос в API sydafa."""
     code, raw = http("POST", SYDAFA + path, body, {"Content-Type": "application/json"})
     try:
         parsed = json.loads(raw) if raw else None
-    except Exception:  # noqa: BLE001
+    except Exception:
         parsed = raw
     return code, parsed
 
 
 def sydafa_get(path: str) -> tuple[int, Any]:
+    """Отправляет GET-запрос в API sydafa."""
     code, raw = http("GET", SYDAFA + path, None, {"Content-Type": "application/json"})
     try:
         parsed = json.loads(raw) if raw else None
-    except Exception:  # noqa: BLE001
+    except Exception:
         parsed = raw
     return code, parsed
 
@@ -101,9 +101,8 @@ def sydafa_migrate(source: str, operations: list[dict[str, Any]]) -> tuple[int, 
     return sydafa_post("/sources/%s/migrate" % source, {"operations": operations})
 
 
-# ---------- Airflow API ----------
-
 def airflow_token() -> str:
+    """Получает JWT токен авторизации в Airflow."""
     data = urllib.parse.urlencode({"username": AIRFLOW_USER, "password": AIRFLOW_PASSWORD})
     code, raw = http(
         "POST",
@@ -121,7 +120,7 @@ def airflow_token_retry(timeout: int = 180) -> str | None:
     while time.time() < deadline:
         try:
             return airflow_token()
-        except Exception:  # noqa: BLE001
+        except Exception:
             time.sleep(5)
     return None
 
@@ -200,11 +199,9 @@ def airflow_wait_run(token: str, dag_id: str, run_id: str, timeout: int = 300, n
     return False
 
 
-# ---------- Проверка манифестов и DAG-ов ----------
-
 def validate_manifests_and_dags() -> None:
+    """Выполняет валидацию манифестов источников, файлов миграций и синтаксиса DAG-ов."""
     print("==> Шаг 0: Проверка структуры манифестов источников, миграций и DAG-ов...")
-    # Ищем корень проекта: /workspace внутри test-runner или корень репозитория
     candidates = [
         Path(os.environ.get("WORKSPACE_DIR", "/workspace")),
         Path(__file__).resolve().parent.parent,
@@ -214,7 +211,6 @@ def validate_manifests_and_dags() -> None:
         print("WARN: Рабочий каталог с conf/sydafa/sources.json не найден, пропуск статических проверок")
         return
 
-    # 1. Валидация sources.json
     conf_file = ws / "conf" / "sydafa" / "sources.json"
     with open(conf_file, "r", encoding="utf-8") as f:
         conf = json.load(f)
@@ -285,9 +281,8 @@ def validate_manifests_and_dags() -> None:
     )
     check("broker cumulative_balance invariant (validate_existing=False)", has_broker_bal, True)
 
-    # 2. Валидация миграций (имена файлов строго совпадают с именами источников в sources.json)
-    bank_mig = ws / "airflow" / "migrations" / "bank.json"
-    broker_mig = ws / "airflow" / "migrations" / "broker.json"
+    bank_mig = ws / "airflow" / "plugins" / "migrations" / "bank.json"
+    broker_mig = ws / "airflow" / "plugins" / "migrations" / "broker.json"
     check("bank.json exists", bank_mig.exists(), True)
     check("broker.json exists", broker_mig.exists(), True)
 
@@ -324,17 +319,15 @@ def validate_manifests_and_dags() -> None:
         and b_deletes[0].get("entity_fqn") == "trading_core.transactions"
     ), True)
 
-    # 3. Валидация плагина migrations.py
-    plugin_path = ws / "airflow" / "plugins" / "migrations.py"
-    check("airflow/plugins/migrations.py exists", plugin_path.exists(), True)
+    plugin_path = ws / "airflow" / "plugins" / "migrations" / "__init__.py"
+    check("airflow/plugins/migrations/__init__.py exists", plugin_path.exists(), True)
     try:
         import ast
         ast.parse(plugin_path.read_text(encoding="utf-8"))
-        check("plugin migrations.py python syntax valid", True, True)
+        check("plugin migrations package python syntax valid", True, True)
     except Exception as e:
-        check("plugin migrations.py python syntax valid", str(e), True)
+        check("plugin migrations package python syntax valid", str(e), True)
 
-    # 4. Валидация синтаксиса и операторов DAG
     dag_bank_path = ws / "airflow" / "dags" / "update_source_bank.py"
     dag_broker_path = ws / "airflow" / "dags" / "update_source_broker.py"
     check("update_source_bank.py exists", dag_bank_path.exists(), True)
@@ -374,10 +367,9 @@ def main() -> None:
         sources_sorted = sorted(sources_list)
         check("sydafa /sources contains bank", "bank" in sources_sorted, True)
         check("sydafa /sources contains broker", "broker" in sources_sorted, True)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         check("sydafa /sources parse", str(e), "ok")
 
-    # Интроспекция схем источников bank и broker
     for src in ["bank", "broker"]:
         code, meta = sydafa_get("/sources/%s" % src)
         check("GET /sources/%s" % src, code, 200)
@@ -401,7 +393,6 @@ def main() -> None:
         print("FATAL: Не удалось авторизоваться в Airflow")
         return
 
-    # Ожидание обнаружения DAG-ов планировщиком Airflow
     print("Ожидание регистрации DAG update_source_bank и update_source_broker в Airflow...")
     bank_dag_ok = airflow_wait_dag_registered(token, "update_source_bank", timeout=180)
     check("DAG update_source_bank registered in Airflow", bank_dag_ok, True)
@@ -432,7 +423,7 @@ if __name__ == "__main__":
     if "--validate-manifests-only" in sys.argv:
         try:
             validate_manifests_and_dags()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print("FATAL: %s: %s" % (type(e).__name__, e))
             FAIL += 1
         print("---")
@@ -441,7 +432,7 @@ if __name__ == "__main__":
 
     try:
         main()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print("FATAL: %s: %s" % (type(e).__name__, e))
         FAIL += 1
     print("---")

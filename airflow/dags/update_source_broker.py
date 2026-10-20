@@ -22,7 +22,6 @@ with DAG(
     start_date=datetime(2026, 1, 1),
     schedule=None,
     catchup=False,
-    is_paused_upon_creation=False,
     tags=["sydafa", "broker", "oracle", "migrate"],
 ) as dag:
     migrate_broker = SydafaMigrateOperator(
