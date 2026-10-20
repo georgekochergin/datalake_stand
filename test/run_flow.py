@@ -285,11 +285,11 @@ def validate_manifests_and_dags() -> None:
     )
     check("broker cumulative_balance invariant (validate_existing=False)", has_broker_bal, True)
 
-    # 2. Валидация миграций
-    bank_mig = ws / "airflow" / "migrations" / "bank_update.json"
-    broker_mig = ws / "airflow" / "migrations" / "broker_update.json"
-    check("bank_update.json exists", bank_mig.exists(), True)
-    check("broker_update.json exists", broker_mig.exists(), True)
+    # 2. Валидация миграций (имена файлов строго совпадают с именами источников в sources.json)
+    bank_mig = ws / "airflow" / "migrations" / "bank.json"
+    broker_mig = ws / "airflow" / "migrations" / "broker.json"
+    check("bank.json exists", bank_mig.exists(), True)
+    check("broker.json exists", broker_mig.exists(), True)
 
     with open(bank_mig, "r", encoding="utf-8") as f:
         bank_ops = json.load(f).get("operations", [])
@@ -324,7 +324,17 @@ def validate_manifests_and_dags() -> None:
         and b_deletes[0].get("entity_fqn") == "trading_core.transactions"
     ), True)
 
-    # 3. Валидация синтаксиса и операторов DAG
+    # 3. Валидация плагина migrations.py
+    plugin_path = ws / "airflow" / "plugins" / "migrations.py"
+    check("airflow/plugins/migrations.py exists", plugin_path.exists(), True)
+    try:
+        import ast
+        ast.parse(plugin_path.read_text(encoding="utf-8"))
+        check("plugin migrations.py python syntax valid", True, True)
+    except Exception as e:
+        check("plugin migrations.py python syntax valid", str(e), True)
+
+    # 4. Валидация синтаксиса и операторов DAG
     dag_bank_path = ws / "airflow" / "dags" / "update_source_bank.py"
     dag_broker_path = ws / "airflow" / "dags" / "update_source_broker.py"
     check("update_source_bank.py exists", dag_bank_path.exists(), True)
@@ -339,12 +349,12 @@ def validate_manifests_and_dags() -> None:
         check("DAG files python syntax valid", str(e), True)
 
     c_bank = dag_bank_path.read_text(encoding="utf-8")
-    check("bank DAG uses SydafaMigrateOperator and conn_id", (
-        "SydafaMigrateOperator" in c_bank and 'conn_id="sydafa_default"' in c_bank and 'source="bank"' in c_bank
+    check("bank DAG imports load_migration_operations and uses source bank", (
+        "load_migration_operations" in c_bank and 'load_migration_operations("bank")' in c_bank and "SydafaMigrateOperator" in c_bank
     ), True)
     c_broker = dag_broker_path.read_text(encoding="utf-8")
-    check("broker DAG uses SydafaMigrateOperator and conn_id", (
-        "SydafaMigrateOperator" in c_broker and 'conn_id="sydafa_default"' in c_broker and 'source="broker"' in c_broker
+    check("broker DAG imports load_migration_operations and uses source broker", (
+        "load_migration_operations" in c_broker and 'load_migration_operations("broker")' in c_broker and "SydafaMigrateOperator" in c_broker
     ), True)
 
 

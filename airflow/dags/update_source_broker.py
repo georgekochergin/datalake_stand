@@ -7,30 +7,21 @@
 """
 from __future__ import annotations
 
-import json
+import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+
+# Добавляем каталог plugins в sys.path для прозрачного импорта
+plugins_dir = str(Path(__file__).resolve().parent.parent / "plugins")
+if plugins_dir not in sys.path:
+    sys.path.insert(0, plugins_dir)
 
 from airflow import DAG
+from migrations import load_migration_operations
 from sydafa_airflow.operators import SydafaMigrateOperator
 
 
-def _load_migration_operations(filename: str) -> list[dict[str, Any]]:
-    candidates = [
-        Path(__file__).resolve().parent.parent / "migrations" / filename,
-        Path(__file__).resolve().parent / "migrations" / filename,
-        Path("/opt/airflow/migrations") / filename,
-        Path("/opt/airflow/dags/migrations") / filename,
-    ]
-    for candidate in candidates:
-        if candidate.is_file():
-            with open(candidate, "r", encoding="utf-8") as f:
-                return json.load(f)["operations"]
-    raise FileNotFoundError(f"Файл миграции '{filename}' не найден по путям: {candidates}")
-
-
-broker_operations = _load_migration_operations("broker_update.json")
+broker_operations = load_migration_operations("broker")
 
 with DAG(
     dag_id="update_source_broker",
