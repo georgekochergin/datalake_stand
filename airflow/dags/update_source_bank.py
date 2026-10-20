@@ -28,5 +28,4 @@ with DAG(
         conn_id="sydafa_default",
         source="bank",
         operations=bank_operations,
-        timeout_seconds=300,
     )
