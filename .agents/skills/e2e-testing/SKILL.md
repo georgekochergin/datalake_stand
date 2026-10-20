@@ -29,8 +29,8 @@ description: Use when developing, extending, or debugging e2e and smoke tests in
 
 ### Механика синхронизации `test/.workspace/`
 Для чистоты репозитория и предотвращения дублирования файлов:
-1. В каталоге `test/` не хранится пользовательский код или демонстрационные схемы (каталог содержит только исполняемые файлы тестов: `test.sh`, `docker-compose.override.yaml`, `Dockerfile`, `run_flow.py`, `test_bank_broker.py`).
-2. `test/test.sh` перед запуском изолированно копирует актуальные рабочие каталоги репозитория во временную директорию `test/.workspace/`:
+1. В каталоге `test/` не хранится пользовательский код или демонстрационные схемы (каталог содержит только исполняемые файлы тестов: `test.sh`, `docker-compose.override.yaml`, `Dockerfile`, `run_flow.py`).
+2. `test/test.sh` перед запуском выполняет предварительную статическую валидацию манифестов и изолированно копирует актуальные рабочие каталоги репозитория во временную директорию `test/.workspace/`:
    - `conf/` $\to$ `test/.workspace/conf/`
    - `airflow/` $\to$ `test/.workspace/airflow/`
    - `spark/` $\to$ `test/.workspace/spark/`
@@ -59,8 +59,12 @@ description: Use when developing, extending, or debugging e2e and smoke tests in
 
 ## 4. Сценарий сквозного тестирования (`test/run_flow.py`)
 
-Контейнер `test-runner` (`test/Dockerfile` на базе `python:3.12-slim`) исполняет скрипт `run_flow.py`:
+Контейнер `test-runner` (`test/Dockerfile` на базе `python:3.12-slim`) исполняет скрипт `run_flow.py` (также скрипт вызывается на хосте с флагом `--validate-manifests-only`):
 
+0. **Валидация манифестов источников, миграций и DAG-ов**:
+   - `sources.json`: проверка схемы звезда для источников `bank` (MSSQL) и `broker` (Oracle), внешние ключи транзакций, не-nullable ограничения, относительные даты (`date_offset`), инварианты `cumulative_balance` с `validate_existing: false`;
+   - Миграции `bank_update.json` и `broker_update.json`: append 25k с `new_key_ratio: 0.01`, update 20 строк по 3 справочникам, broker delete 1000 строк без каскада;
+   - Python-синтаксис DAG-ов и использование `SydafaMigrateOperator` с `conn_id="sydafa_default"`.
 1. **Readiness & Healthcheck**:
    - `GET http://sydafa:8000/health` (код 200);
    - `GET http://sydafa:8000/docs` (код 200);

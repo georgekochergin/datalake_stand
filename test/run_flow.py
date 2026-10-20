@@ -11,8 +11,10 @@
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
+from pathlib import Path
 import ssl
 import sys
 import time
@@ -198,7 +200,156 @@ def airflow_wait_run(token: str, dag_id: str, run_id: str, timeout: int = 300, n
     return False
 
 
+# ---------- Проверка манифестов и DAG-ов ----------
+
+def validate_manifests_and_dags() -> None:
+    print("==> Шаг 0: Проверка структуры манифестов источников, миграций и DAG-ов...")
+    # Ищем корень проекта: /workspace внутри test-runner или корень репозитория
+    candidates = [
+        Path(os.environ.get("WORKSPACE_DIR", "/workspace")),
+        Path(__file__).resolve().parent.parent,
+    ]
+    ws = next((p for p in candidates if (p / "conf" / "sydafa" / "sources.json").exists()), None)
+    if not ws:
+        print("WARN: Рабочий каталог с conf/sydafa/sources.json не найден, пропуск статических проверок")
+        return
+
+    # 1. Валидация sources.json
+    conf_file = ws / "conf" / "sydafa" / "sources.json"
+    with open(conf_file, "r", encoding="utf-8") as f:
+        conf = json.load(f)
+    sources = conf.get("sources", {})
+
+    check("sources.json has bank source", "bank" in sources, True)
+    check("sources.json has broker source", "broker" in sources, True)
+
+    bank = sources.get("bank", {})
+    check("bank type is mssql", bank.get("type"), "mssql")
+    check("bank external_port is 14330", bank.get("external_port"), 14330)
+
+    bank_tables = bank.get("schema", {}).get("tables", {})
+    bank_tbl_names = sorted(bank_tables.keys())
+    check("bank star schema tables", ",".join(bank_tbl_names), "retail_bank.accounts,retail_bank.clients,retail_bank.deals,retail_bank.transactions")
+
+    tx_fks = bank_tables.get("retail_bank.transactions", {}).get("foreign_keys", [])
+    ref_entities = sorted(fk["ref_entity_fqn"] for fk in tx_fks)
+    check("bank transactions foreign keys", ",".join(ref_entities), "retail_bank.accounts,retail_bank.clients,retail_bank.deals")
+
+    bank_rules = bank.get("rules", {})
+    tx_rules = bank_rules.get("retail_bank.transactions", {}).get("columns", {})
+    check("bank currency choice RUB", tx_rules.get("currency", {}).get("values"), ["RUB"])
+    check("bank currency null_ratio 0.0", tx_rules.get("currency", {}).get("null_ratio"), 0.0)
+    check("bank amount null_ratio 0.0", tx_rules.get("amount", {}).get("null_ratio"), 0.0)
+    check("bank posting_date null_ratio 0.0", tx_rules.get("posting_date", {}).get("null_ratio"), 0.0)
+    check("bank description null_ratio 0.05", tx_rules.get("description", {}).get("null_ratio"), 0.05)
+
+    deals_rules = bank_rules.get("retail_bank.deals", {}).get("columns", {})
+    check("bank deals end_date date_offset", deals_rules.get("end_date", {}).get("kind"), "date_offset")
+    check("bank deals end_date ref start_date", deals_rules.get("end_date", {}).get("ref_column"), "start_date")
+
+    bank_invs = bank_rules.get("retail_bank.transactions", {}).get("invariants", [])
+    has_bank_bal = any(
+        inv.get("kind") == "cumulative_balance"
+        and inv.get("amount_column") == "amount"
+        and inv.get("partition_by") == ["account_id"]
+        and inv.get("min_balance") == 0.0
+        and inv.get("validate_existing") is False
+        for inv in bank_invs
+    )
+    check("bank cumulative_balance invariant (validate_existing=False)", has_bank_bal, True)
+
+    broker = sources.get("broker", {})
+    check("broker type is oracle", broker.get("type"), "oracle")
+    check("broker external_port is 15211", broker.get("external_port"), 15211)
+
+    broker_tables = broker.get("schema", {}).get("tables", {})
+    broker_tbl_names = sorted(broker_tables.keys())
+    check("broker star schema tables", ",".join(broker_tbl_names), "trading_core.accounts,trading_core.clients,trading_core.deals,trading_core.transactions")
+
+    broker_rules = broker.get("rules", {})
+    b_tx_rules = broker_rules.get("trading_core.transactions", {}).get("columns", {})
+    check("broker security_type choice", b_tx_rules.get("security_type", {}).get("kind"), "choice")
+    check("broker security_type null_ratio 0.0", b_tx_rules.get("security_type", {}).get("null_ratio"), 0.0)
+    check("broker quantity null_ratio 0.0", b_tx_rules.get("quantity", {}).get("null_ratio"), 0.0)
+    check("broker posting_date null_ratio 0.0", b_tx_rules.get("posting_date", {}).get("null_ratio"), 0.0)
+    check("broker ticker null_ratio 0.05", b_tx_rules.get("ticker", {}).get("null_ratio"), 0.05)
+
+    broker_invs = broker_rules.get("trading_core.transactions", {}).get("invariants", [])
+    has_broker_bal = any(
+        inv.get("kind") == "cumulative_balance"
+        and inv.get("amount_column") == "quantity"
+        and inv.get("partition_by") == ["account_id"]
+        and inv.get("min_balance") == 0.0
+        and inv.get("validate_existing") is False
+        for inv in broker_invs
+    )
+    check("broker cumulative_balance invariant (validate_existing=False)", has_broker_bal, True)
+
+    # 2. Валидация миграций
+    bank_mig = ws / "airflow" / "migrations" / "bank_update.json"
+    broker_mig = ws / "airflow" / "migrations" / "broker_update.json"
+    check("bank_update.json exists", bank_mig.exists(), True)
+    check("broker_update.json exists", broker_mig.exists(), True)
+
+    with open(bank_mig, "r", encoding="utf-8") as f:
+        bank_ops = json.load(f).get("operations", [])
+    bank_appends = [op for op in bank_ops if op.get("op") == "append"]
+    bank_updates = [op for op in bank_ops if op.get("op") == "update"]
+    bank_deletes = [op for op in bank_ops if op.get("op") == "delete"]
+    check("bank migration has 1 append (25k, new_key_ratio=0.01)", (
+        len(bank_appends) == 1
+        and bank_appends[0].get("rows") == 25000
+        and bank_appends[0].get("new_key_ratio") == 0.01
+        and bank_appends[0].get("entity_fqn") == "retail_bank.transactions"
+    ), True)
+    check("bank migration has 3 updates of 20 rows", len(bank_updates) == 3 and all(u.get("limit") == 20 for u in bank_updates), True)
+    check("bank migration is append-only (0 deletes)", len(bank_deletes), 0)
+
+    with open(broker_mig, "r", encoding="utf-8") as f:
+        broker_ops = json.load(f).get("operations", [])
+    b_appends = [op for op in broker_ops if op.get("op") == "append"]
+    b_updates = [op for op in broker_ops if op.get("op") == "update"]
+    b_deletes = [op for op in broker_ops if op.get("op") == "delete"]
+    check("broker migration has 1 append (25k, new_key_ratio=0.01)", (
+        len(b_appends) == 1
+        and b_appends[0].get("rows") == 25000
+        and b_appends[0].get("new_key_ratio") == 0.01
+        and b_appends[0].get("entity_fqn") == "trading_core.transactions"
+    ), True)
+    check("broker migration has 3 updates of 20 rows", len(b_updates) == 3 and all(u.get("limit") == 20 for u in b_updates), True)
+    check("broker migration has 1 delete of 1000 rows (no cascade)", (
+        len(b_deletes) == 1
+        and b_deletes[0].get("limit") == 1000
+        and b_deletes[0].get("cascade") is False
+        and b_deletes[0].get("entity_fqn") == "trading_core.transactions"
+    ), True)
+
+    # 3. Валидация синтаксиса и операторов DAG
+    dag_bank_path = ws / "airflow" / "dags" / "update_source_bank.py"
+    dag_broker_path = ws / "airflow" / "dags" / "update_source_broker.py"
+    check("update_source_bank.py exists", dag_bank_path.exists(), True)
+    check("update_source_broker.py exists", dag_broker_path.exists(), True)
+
+    try:
+        import ast
+        ast.parse(dag_bank_path.read_text(encoding="utf-8"))
+        ast.parse(dag_broker_path.read_text(encoding="utf-8"))
+        check("DAG files python syntax valid", True, True)
+    except Exception as e:
+        check("DAG files python syntax valid", str(e), True)
+
+    c_bank = dag_bank_path.read_text(encoding="utf-8")
+    check("bank DAG uses SydafaMigrateOperator and conn_id", (
+        "SydafaMigrateOperator" in c_bank and 'conn_id="sydafa_default"' in c_bank and 'source="bank"' in c_bank
+    ), True)
+    c_broker = dag_broker_path.read_text(encoding="utf-8")
+    check("broker DAG uses SydafaMigrateOperator and conn_id", (
+        "SydafaMigrateOperator" in c_broker and 'conn_id="sydafa_default"' in c_broker and 'source="broker"' in c_broker
+    ), True)
+
+
 def main() -> None:
+    validate_manifests_and_dags()
     print("==> Шаг 1: Проверка готовности sydafa API...")
     code, _ = wait_http(SYDAFA + "/health", 200, tries=50, interval=3)
     check("sydafa /health", code, 200)
@@ -268,6 +419,16 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if "--validate-manifests-only" in sys.argv:
+        try:
+            validate_manifests_and_dags()
+        except Exception as e:  # noqa: BLE001
+            print("FATAL: %s: %s" % (type(e).__name__, e))
+            FAIL += 1
+        print("---")
+        print("PASS=%d FAIL=%d" % (PASS, FAIL))
+        sys.exit(0 if FAIL == 0 else 1)
+
     try:
         main()
     except Exception as e:  # noqa: BLE001

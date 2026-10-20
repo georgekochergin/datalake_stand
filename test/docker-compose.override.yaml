@@ -69,6 +69,10 @@ services:
     ports: !override []
 
   test-runner:
+    volumes: !override
+      - ./test/.workspace:/workspace:ro
     depends_on: !override
-      sydafa: {condition: service_healthy}
-      airflow-webserver: {condition: service_started}
+      sydafa:
+        condition: service_healthy
+      airflow-webserver:
+        condition: service_started
