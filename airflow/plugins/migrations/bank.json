@@ -18,8 +18,7 @@
     {
       "op": "append",
       "entity_fqn": "retail_bank.transactions",
-      "rows": 25000,
-      "new_key_ratio": 0.0
+      "rows": 25000
     },
     {
       "op": "delete",
