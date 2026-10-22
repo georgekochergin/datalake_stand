@@ -1,9 +1,4 @@
-"""update_source_bank: транзакционное обновление источника bank (MSSQL).
-
-1 Dagrun = 1 вызов POST /sources/bank/migrate (All-or-Nothing в единой транзакции БД):
-- Добавление 25000 записей в retail_bank.transactions (append-only)
-- Обновление по 100 записей в retail_bank.clients, retail_bank.accounts, retail_bank.deals
-"""
+"""DAG обновления источника bank (MSSQL)."""
 from __future__ import annotations
 
 from datetime import datetime

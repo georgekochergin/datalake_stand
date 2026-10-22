@@ -291,32 +291,65 @@ def validate_manifests_and_dags() -> None:
     bank_appends = [op for op in bank_ops if op.get("op") == "append"]
     bank_updates = [op for op in bank_ops if op.get("op") == "update"]
     bank_deletes = [op for op in bank_ops if op.get("op") == "delete"]
-    check("bank migration has 1 append (25k, new_key_ratio=0.01)", (
-        len(bank_appends) == 1
-        and bank_appends[0].get("rows") == 25000
-        and bank_appends[0].get("new_key_ratio") == 0.01
-        and bank_appends[0].get("entity_fqn") == "retail_bank.transactions"
+    check("bank migration has 4 appends (dims 100, 100, 1000 + fact 25k new_key_ratio=0.0)", (
+        len(bank_appends) == 4
+        and bank_appends[0].get("entity_fqn") == "retail_bank.clients" and bank_appends[0].get("rows") == 100
+        and bank_appends[1].get("entity_fqn") == "retail_bank.accounts" and bank_appends[1].get("rows") == 100
+        and bank_appends[2].get("entity_fqn") == "retail_bank.deals" and bank_appends[2].get("rows") == 1000
+        and bank_appends[3].get("entity_fqn") == "retail_bank.transactions"
+        and bank_appends[3].get("rows") == 25000
+        and bank_appends[3].get("new_key_ratio") == 0.0
     ), True)
-    check("bank migration has 3 updates of 20 rows", len(bank_updates) == 3 and all(u.get("limit") == 20 for u in bank_updates), True)
-    check("bank migration is append-only (0 deletes)", len(bank_deletes), 0)
+    check("bank migration has 1 cascade delete of 50 deals", (
+        len(bank_deletes) == 1
+        and bank_deletes[0].get("entity_fqn") == "retail_bank.deals"
+        and bank_deletes[0].get("limit") == 50
+        and bank_deletes[0].get("cascade") is True
+    ), True)
+    check("bank migration has 3 updates with predicates (limits 10, 10, 50)", (
+        len(bank_updates) == 3
+        and bank_updates[0].get("entity_fqn") == "retail_bank.clients"
+        and bank_updates[0].get("limit") == 10
+        and bank_updates[0].get("predicate") == [{"column": "status", "operator": "!=", "value": "VIP"}]
+        and bank_updates[1].get("entity_fqn") == "retail_bank.accounts"
+        and bank_updates[1].get("limit") == 10
+        and bank_updates[1].get("predicate") == [{"column": "status", "operator": "!=", "value": "Frozen"}]
+        and bank_updates[2].get("entity_fqn") == "retail_bank.deals"
+        and bank_updates[2].get("limit") == 50
+        and bank_updates[2].get("predicate") == [{"column": "status", "operator": "!=", "value": "Closed"}]
+    ), True)
 
     with open(broker_mig, "r", encoding="utf-8") as f:
         broker_ops = json.load(f).get("operations", [])
     b_appends = [op for op in broker_ops if op.get("op") == "append"]
     b_updates = [op for op in broker_ops if op.get("op") == "update"]
     b_deletes = [op for op in broker_ops if op.get("op") == "delete"]
-    check("broker migration has 1 append (25k, new_key_ratio=0.01)", (
-        len(b_appends) == 1
-        and b_appends[0].get("rows") == 25000
-        and b_appends[0].get("new_key_ratio") == 0.01
-        and b_appends[0].get("entity_fqn") == "trading_core.transactions"
+    check("broker migration has 4 appends (dims 100, 100, 1000 + fact 25k new_key_ratio=0.0)", (
+        len(b_appends) == 4
+        and b_appends[0].get("entity_fqn") == "trading_core.clients" and b_appends[0].get("rows") == 100
+        and b_appends[1].get("entity_fqn") == "trading_core.accounts" and b_appends[1].get("rows") == 100
+        and b_appends[2].get("entity_fqn") == "trading_core.deals" and b_appends[2].get("rows") == 1000
+        and b_appends[3].get("entity_fqn") == "trading_core.transactions"
+        and b_appends[3].get("rows") == 25000
+        and b_appends[3].get("new_key_ratio") == 0.0
     ), True)
-    check("broker migration has 3 updates of 20 rows", len(b_updates) == 3 and all(u.get("limit") == 20 for u in b_updates), True)
-    check("broker migration has 1 delete of 1000 rows (no cascade)", (
+    check("broker migration has 1 cascade delete of 50 deals", (
         len(b_deletes) == 1
-        and b_deletes[0].get("limit") == 1000
-        and b_deletes[0].get("cascade") is False
-        and b_deletes[0].get("entity_fqn") == "trading_core.transactions"
+        and b_deletes[0].get("entity_fqn") == "trading_core.deals"
+        and b_deletes[0].get("limit") == 50
+        and b_deletes[0].get("cascade") is True
+    ), True)
+    check("broker migration has 3 updates with predicates (limits 10, 10, 50)", (
+        len(b_updates) == 3
+        and b_updates[0].get("entity_fqn") == "trading_core.clients"
+        and b_updates[0].get("limit") == 10
+        and b_updates[0].get("predicate") == [{"column": "risk_profile", "operator": "!=", "value": "Aggressive"}]
+        and b_updates[1].get("entity_fqn") == "trading_core.accounts"
+        and b_updates[1].get("limit") == 10
+        and b_updates[1].get("predicate") == [{"column": "status", "operator": "!=", "value": "Closed"}]
+        and b_updates[2].get("entity_fqn") == "trading_core.deals"
+        and b_updates[2].get("limit") == 50
+        and b_updates[2].get("predicate") == [{"column": "market", "operator": "!=", "value": "OTC"}]
     ), True)
 
     plugin_path = ws / "airflow" / "plugins" / "migrations" / "__init__.py"

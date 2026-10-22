@@ -2,36 +2,76 @@
   "operations": [
     {
       "op": "append",
+      "entity_fqn": "retail_bank.clients",
+      "rows": 100
+    },
+    {
+      "op": "append",
+      "entity_fqn": "retail_bank.accounts",
+      "rows": 100
+    },
+    {
+      "op": "append",
+      "entity_fqn": "retail_bank.deals",
+      "rows": 1000
+    },
+    {
+      "op": "append",
       "entity_fqn": "retail_bank.transactions",
       "rows": 25000,
-      "new_key_ratio": 0.01
+      "new_key_ratio": 0.0
+    },
+    {
+      "op": "delete",
+      "entity_fqn": "retail_bank.deals",
+      "predicate": [],
+      "limit": 50,
+      "cascade": true
     },
     {
       "op": "update",
       "entity_fqn": "retail_bank.clients",
-      "predicate": [],
+      "predicate": [
+        {
+          "column": "status",
+          "operator": "!=",
+          "value": "VIP"
+        }
+      ],
       "set": {
         "status": "VIP"
       },
-      "limit": 20
+      "limit": 10
     },
     {
       "op": "update",
       "entity_fqn": "retail_bank.accounts",
-      "predicate": [],
+      "predicate": [
+        {
+          "column": "status",
+          "operator": "!=",
+          "value": "Frozen"
+        }
+      ],
       "set": {
         "status": "Frozen"
       },
-      "limit": 20
+      "limit": 10
     },
     {
       "op": "update",
       "entity_fqn": "retail_bank.deals",
-      "predicate": [],
+      "predicate": [
+        {
+          "column": "status",
+          "operator": "!=",
+          "value": "Closed"
+        }
+      ],
       "set": {
         "status": "Closed"
       },
-      "limit": 20
+      "limit": 50
     }
   ]
 }
