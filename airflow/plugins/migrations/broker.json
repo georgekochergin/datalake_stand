@@ -2,43 +2,76 @@
   "operations": [
     {
       "op": "append",
+      "entity_fqn": "trading_core.clients",
+      "rows": 100
+    },
+    {
+      "op": "append",
+      "entity_fqn": "trading_core.accounts",
+      "rows": 100
+    },
+    {
+      "op": "append",
+      "entity_fqn": "trading_core.deals",
+      "rows": 1000
+    },
+    {
+      "op": "append",
       "entity_fqn": "trading_core.transactions",
       "rows": 25000,
-      "new_key_ratio": 0.01
+      "new_key_ratio": 0.0
+    },
+    {
+      "op": "delete",
+      "entity_fqn": "trading_core.deals",
+      "predicate": [],
+      "limit": 50,
+      "cascade": true
     },
     {
       "op": "update",
       "entity_fqn": "trading_core.clients",
-      "predicate": [],
+      "predicate": [
+        {
+          "column": "risk_profile",
+          "operator": "!=",
+          "value": "Aggressive"
+        }
+      ],
       "set": {
         "risk_profile": "Aggressive"
       },
-      "limit": 20
+      "limit": 10
     },
     {
       "op": "update",
       "entity_fqn": "trading_core.accounts",
-      "predicate": [],
+      "predicate": [
+        {
+          "column": "status",
+          "operator": "!=",
+          "value": "Closed"
+        }
+      ],
       "set": {
         "status": "Closed"
       },
-      "limit": 20
+      "limit": 10
     },
     {
       "op": "update",
       "entity_fqn": "trading_core.deals",
-      "predicate": [],
+      "predicate": [
+        {
+          "column": "market",
+          "operator": "!=",
+          "value": "OTC"
+        }
+      ],
       "set": {
         "market": "OTC"
       },
-      "limit": 20
-    },
-    {
-      "op": "delete",
-      "entity_fqn": "trading_core.transactions",
-      "predicate": [],
-      "limit": 1000,
-      "cascade": false
+      "limit": 50
     }
   ]
 }

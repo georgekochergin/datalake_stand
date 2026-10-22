@@ -1,10 +1,4 @@
-"""update_source_broker: транзакционное обновление источника broker (Oracle).
-
-1 Dagrun = 1 вызов POST /sources/broker/migrate (All-or-Nothing в единой транзакции БД):
-- Добавление 25000 записей в trading_core.transactions
-- Обновление по 100 записей в trading_core.clients, trading_core.accounts, trading_core.deals
-- Удаление 1000 случайных транзакций из trading_core.transactions
-"""
+"""DAG обновления источника broker (Oracle)."""
 from __future__ import annotations
 
 from datetime import datetime
