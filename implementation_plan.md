@@ -201,7 +201,7 @@ Entity entry keys:
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `fqn` | string | yes | — | `rdbms`: `<schema>.<table>` (exactly 2 fragments, quoted fragments allowed). `kafka`: the raw topic name. Resolved by §2; used verbatim in the asset URI. |
-| `incremental_column` | string | no | full snapshot | Monotonically increasing source column switching the entity to incremental mode (§3.5): read `WHERE col > last_watermark` via `dbtable` subquery; watermark on pg-meta; at-least-once; source deletes not captured. Also the first-choice parallel-read column (§4). |
+| `incremental_column` | string | no | full snapshot | Monotonically increasing source column (`updated_at`, autoincrement id, or a source-maintained tech column such as sydafa's `_batch_id` — implicitly added to every table and bumped on every append **and update**) switching the entity to incremental mode (§3.5): read `WHERE col > last_watermark` via `dbtable` subquery; watermark on pg-meta; at-least-once; source deletes not captured. Also the first-choice parallel-read column (§4). |
 
 Example:
 
@@ -217,7 +217,7 @@ tags:
 entities:
   - fqn: retail_bank.clients                    (full-snapshot append, default)
   - fqn: retail_bank.transactions
-    incremental_column: transaction_id          (incremental append)
+    incremental_column: _batch_id               (incremental append)
 ```
 
 ### 5.3 Authoring conventions
@@ -317,7 +317,7 @@ RDBMS sources only are *implemented*; the code must not assume RDBMS-only (§1.3
 | Artifact | Path | Tracked | Content |
 |---|---|---|---|
 | Sources registry | `ingestion/sources.yaml` | yes | `bank`, `broker` (`type: rdbms` + conn id) |
-| Pipeline manifests | `ingestion/pipelines/{bank,broker}.yaml` | yes | bank: full-snapshot entities; broker: `incremental_column` entities (both modes exercised) |
+| Pipeline manifests | `ingestion/pipelines/{bank,broker}.yaml` | yes | all entities full-snapshot except `transactions` in both pipelines — `incremental_column: _batch_id` (both modes exercised in both pipelines) |
 | Shared lib | `ingestion/lib/{naming.py, manifest.py}` | yes | FQN resolution; manifest dataclasses + strict validation |
 | Generator | `ingestion/generate_dags.py` | yes | YAML → deterministic DAG emission; `--check` drift mode |
 | Spark job | `spark/raw/load_entity.py` | yes (`.gitignore` whitelist) | arg-only append loader, both modes; no YAML, no Airflow imports. Spark jobs are organized by layer — `spark/<layer>/<job>.py` (future: `spark/ods/…`, `spark/marts/…`, shared `spark/common/`) |
@@ -350,11 +350,11 @@ The operator renders JDBC URLs from Connection fields (mssql → `jdbc:sqlserver
 
 ### 8.5 e2e scenario (Trino REST via stdlib `urllib`, same technique as the existing Airflow steps)
 
-After `update_source_{bank,broker}` succeed: trigger `ingest_bank` (full-snapshot) and `ingest_broker` (incremental), poll to success, then per table:
+After `update_source_{bank,broker}` succeed: trigger `ingest_bank` and `ingest_broker` (each mixes both modes: everything full-snapshot except `transactions`, incremental by `_batch_id`), poll to success, then per table:
 
-- first run: `count(*)` equals the expected source count (dims 100/100/1000, fact 25000); `count(distinct __process_id) = 1`; `max(__process_id)` identical across all tables of the run and greater than the previous run's;
-- second `ingest_bank` trigger (no source change in between): total `count(*)` doubles (append semantics), rows of the latest snapshot (`max(__load_dttm)`) still equal the source count, history preserved with the old `__process_id`;
-- second `ingest_broker` trigger after a source migration: only the migrated delta is appended (rows with the new `__process_id` ≈ migrated row counts), watermark advanced in `table_watermarks`;
+- first run: `count(*)` equals the expected source count (dims 100/100/1000, fact 25000 — incremental entities bootstrap by reading everything); `count(distinct __process_id) = 1`; `max(__process_id)` identical across all tables of the run and greater than the previous run's;
+- second trigger with no source change: full-snapshot tables double (`count(*)` = 2× source) with the latest snapshot (`max(__load_dttm)`) still equal to the source count; incremental tables (`transactions`) append 0 rows and stay flat;
+- trigger after a source migration: snapshot tables append a full new snapshot; `transactions` appends only the migrated delta (rows with the new `__process_id` ≈ migrated counts) and the watermark advances in `table_watermarks`;
 - migrated source updates visible in the latest snapshot.
 
 ### 8.6 Assumptions
@@ -509,7 +509,7 @@ docker compose exec airflow-scheduler spark-submit \
   --process-id 1
 ```
 
-Run twice; in Trino: `SELECT count(*), count(distinct __process_id) FROM raw.bank.retail_bank__clients` → `(100, 1)` then `(200, 2)`; the §3.4 latest-snapshot query → `100` both times. Incremental smoke (broker, service name from the activate response): add `--incremental-column client_id` → first run loads all rows; re-run → `rows_appended=0` and the count is unchanged (watermark gate works).
+Run twice; in Trino: `SELECT count(*), count(distinct __process_id) FROM raw.bank.retail_bank__clients` → `(100, 1)` then `(200, 2)`; the §3.4 latest-snapshot query → `100` both times. Incremental smoke: run the same command against `retail_bank.transactions` with `--incremental-column _batch_id` added → first run loads all rows; re-run → `rows_appended=0` and the count is unchanged (watermark gate works).
 
 ### 9.8 Git
 

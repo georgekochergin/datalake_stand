@@ -176,6 +176,17 @@ class TestLoadPipeline(unittest.TestCase):
             manifest.load_pipeline(path)
 
     @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
+    def test_leading_underscore_incremental_column(self):
+        path = write_temp_yaml(
+            "source_id: bank\n"
+            "entities:\n"
+            "  - fqn: retail_bank.transactions\n"
+            "    incremental_column: _batch_id\n"
+        )
+        pipeline = manifest.load_pipeline(path)
+        self.assertEqual(pipeline.entities[0].incremental_column, "_batch_id")
+
+    @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
     def test_invalid_incremental_column(self):
         path = write_temp_yaml(
             "source_id: bank\n"
