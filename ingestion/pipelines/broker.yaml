@@ -1,0 +1,17 @@
+source_id: broker
+schedule: "@daily"
+catchup: false
+tags:
+  - ingestion
+  - broker
+  - oracle
+
+entities:
+  - fqn: trading_core.clients
+    incremental_column: client_id
+  - fqn: trading_core.accounts
+    incremental_column: account_id
+  - fqn: trading_core.deals
+    incremental_column: deal_id
+  - fqn: trading_core.transactions
+    incremental_column: transaction_id

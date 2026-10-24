@@ -1,0 +1,13 @@
+source_id: bank
+schedule: "@daily"
+catchup: false
+tags:
+  - ingestion
+  - bank
+  - mssql
+
+entities:
+  - fqn: retail_bank.clients
+  - fqn: retail_bank.accounts
+  - fqn: retail_bank.deals
+  - fqn: retail_bank.transactions
