@@ -50,7 +50,7 @@ Every load **appends** rows; rows are never updated or deleted in place; full hi
 
 - **First load** emits a generated DDL and appends:
   `CREATE TABLE <target> (<columns from the discovered df.schema>, __load_dttm timestamptz, __process_id bigint) USING iceberg PARTITIONED BY (days(__load_dttm)) TBLPROPERTIES ('write.spark.accept-any-schema'='true')`
-  (the column list is generated at runtime from the discovered schema — never declared in YAML; SQL DDL because `DataFrameWriterV2.partitionedBy()` supports identity transforms only; `timestamptz` matches what Spark's `current_timestamp()` produces — Iceberg maps Spark `TimestampType` to `timestamptz`, and declaring zone-less `timestamp` would make appends hit the §3.2 type-change fail-fast; day partitions are UTC-day boundaries).
+  (the column list is generated at runtime from the discovered schema — never declared in YAML; SQL DDL because `DataFrameWriterV2.partitionedBy()` supports identity transforms only; `timestamptz` matches what Spark's `current_timestamp()` produces — Iceberg maps Spark `TimestampType` to `timestamptz`, and declaring zone-less `timestamp` would make appends hit the §3.2 type-change fail-fast; day partitions follow UTC-day boundaries — time-zone-aware query patterns in §3.4).
 - **Every subsequent load**: `df.writeTo(target).option("mergeSchema", "true").append()`.
 - The two schema knobs that make this tolerant are explained below.
 - **Partitioning is framework-fixed**: `days(__load_dttm)` — the load timestamp is the natural analytics dimension; business-driven partitioning belongs to the future ods/dds layers. No user-facing partitioning config.
@@ -108,7 +108,26 @@ WHERE __load_dttm = (SELECT max(__load_dttm) FROM raw.bank.retail_bank__clients)
 ```sql
 SELECT * FROM raw.bank.retail_bank__clients WHERE __load_dttm >= current_date;
 ```
-— **today's loaded data** (prunes to the day partition).
+— **today's loaded data** (in the session calendar — see the time-zone note below).
+
+**Time zones and day partitions.** `__load_dttm` is a `timestamptz` — an absolute instant. Partitions (`days(__load_dttm)`) follow **UTC day boundaries**, while "today" is a local-calendar notion. The two reconcile by always comparing against **zone-aware** expressions:
+
+```sql
+SET TIME ZONE 'Europe/Moscow';
+SELECT * FROM raw.bank.retail_bank__clients
+WHERE __load_dttm >= current_date
+  AND __load_dttm < current_date + INTERVAL '1' DAY;
+```
+— **the current day in the analyst's calendar**: `current_date` is evaluated in the session zone, so the window starts at local midnight. MSK midnight is 21:00 UTC of the previous day, so pruning touches 1–2 UTC day partitions — always correct, still cheap. Set the zone once per session/connection (DBeaver: connection property or `SET TIME ZONE`).
+
+```sql
+SELECT * FROM raw.bank.retail_bank__clients
+WHERE __load_dttm >= current_date('UTC') AT TIME ZONE 'UTC'
+  AND __load_dttm < (current_date('UTC') + INTERVAL '1' DAY) AT TIME ZONE 'UTC';
+```
+— **the exact UTC day**: the bounds are UTC-midnight instants, so this scans exactly one day partition.
+
+The mistake to avoid: comparing `__load_dttm` to a zone-less timestamp literal (`TIMESTAMP '2026-10-24 00:00:00'`) — it is interpreted in the session zone and silently shifts the window by hours. Write literals as `TIMESTAMP '…' AT TIME ZONE 'UTC'` (or the local zone you mean).
 
 ```sql
 SELECT ... FROM raw.bank.retail_bank__clients WHERE __process_id = :pid
