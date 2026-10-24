@@ -49,8 +49,8 @@ Fully qualified name: `raw.<source_id>.<schema>__<table>`. The two dots are the 
 Every load **appends** rows; rows are never updated or deleted in place; full history is retained as data.
 
 - **First load** emits a generated DDL and appends:
-  `CREATE TABLE <target> (<columns from the discovered df.schema>, __load_dttm timestamp, __process_id bigint) USING iceberg PARTITIONED BY (days(__load_dttm)) TBLPROPERTIES ('write.spark.accept-any-schema'='true')`
-  (the column list is generated at runtime from the discovered schema — never declared in YAML; SQL DDL because `DataFrameWriterV2.partitionedBy()` supports identity transforms only).
+  `CREATE TABLE <target> (<columns from the discovered df.schema>, __load_dttm timestamptz, __process_id bigint) USING iceberg PARTITIONED BY (days(__load_dttm)) TBLPROPERTIES ('write.spark.accept-any-schema'='true')`
+  (the column list is generated at runtime from the discovered schema — never declared in YAML; SQL DDL because `DataFrameWriterV2.partitionedBy()` supports identity transforms only; `timestamptz` matches what Spark's `current_timestamp()` produces — Iceberg maps Spark `TimestampType` to `timestamptz`, and declaring zone-less `timestamp` would make appends hit the §3.2 type-change fail-fast; day partitions are UTC-day boundaries).
 - **Every subsequent load**: `df.writeTo(target).option("mergeSchema", "true").append()`.
 - The two schema knobs that make this tolerant are explained below.
 - **Partitioning is framework-fixed**: `days(__load_dttm)` — the load timestamp is the natural analytics dimension; business-driven partitioning belongs to the future ods/dds layers. No user-facing partitioning config.
