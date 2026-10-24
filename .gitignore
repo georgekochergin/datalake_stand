@@ -26,6 +26,8 @@ test/.workspace/**
 !/spark/.gitkeep
 !/spark/raw/
 !/spark/raw/**
+/spark/raw/**/__pycache__/
+/spark/raw/**/*.pyc
 
 /trino/*
 !/trino/.gitkeep
