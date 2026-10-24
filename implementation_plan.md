@@ -417,7 +417,7 @@ def resolve_fully_qualified(source_id: str, fqn: str) -> str
 def assert_unique_targets(fqns: list[str]) -> None
 ```
 
-Rules: quote-aware tokenization into exactly 2 fragments (RDBMS; a Kafka topic is one flat fragment); unquote, lowercase, replace every inner `.` with `__`; join with `__`; validate `^[a-z][a-z0-9_]*$` (fail-fast `ValueError`); `resolve_fully_qualified` → `raw.<ns>.<table>`; `assert_unique_targets` raises on collisions. Error cases → unit tests: empty; 1 fragment; 3 fragments; leading/trailing dot; unbalanced quotes; empty quoted fragment; invalid chars; duplicates; lowercase folding (`RetailBank.Clients` → `retail_bank__clients`); known quirk `"a._b"` → `a___b` (never split on `__`).
+Rules: quote-aware tokenization into exactly 2 fragments (RDBMS; a Kafka topic is one flat fragment); unquote, lowercase, replace every inner `.` with `__`; join with `__`; validate `^[a-z][a-z0-9_]*$` (fail-fast `ValueError`); `resolve_fully_qualified` → `raw.<ns>.<table>`; `assert_unique_targets` raises on collisions. Error cases → unit tests: empty; 1 fragment; 3 fragments; leading/trailing/double dot; unbalanced quotes; empty quoted fragment; invalid chars; duplicates; lowercase folding (`RetailBank.Clients` → `retailbank__clients`); known quirk `x."a._b"` → `x__a___b` (an encoded fragment may itself contain `__` — the builder never splits on `__`).
 
 ### 9.3 `ingestion/lib/manifest.py`
 
