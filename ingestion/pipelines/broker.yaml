@@ -1,5 +1,4 @@
 source_id: broker
-schedule: "@daily"
 catchup: false
 tags:
   - ingestion

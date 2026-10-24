@@ -1,5 +1,4 @@
 source_id: bank
-schedule: "@daily"
 catchup: false
 tags:
   - ingestion

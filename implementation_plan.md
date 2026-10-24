@@ -191,7 +191,7 @@ One file = one DAG. Root mapping; unknown keys rejected at every level.
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `source_id` | string | yes | — | Must exist in `sources.yaml`; defines the target namespace and source config for all entities. |
-| `schedule` | string \| null | no | `null` (manual) | Airflow schedule expression or `null`. |
+| `schedule` | string \| null | no | `null` (manual) | Airflow schedule expression or `null`. Phase 1 manifests leave it unset — all DAGs are manual-trigger; set it when a real schedule is needed. |
 | `catchup` | bool | no | `false` | Airflow catchup. |
 | `tags` | list[string] | no | `[]` | Airflow tags. |
 | `entities` | list[mapping] | yes | — | Non-empty; duplicate `fqn` rejected. Keys per entry below. |
@@ -207,7 +207,6 @@ Example:
 
 ```yaml
 source_id: bank
-schedule: "@daily"
 catchup: false
 tags:
   - ingestion
@@ -236,7 +235,7 @@ Block notation only (`-` + newline) — no flow lists (`[a, b]`). Scalars are pr
 ### 6.2 DAG and TaskGroup structure
 
 ```text
-DAG ingest_bank   (schedule from YAML, catchup=False, max_active_runs=1, tags from YAML,
+DAG ingest_bank   (schedule from YAML (unset = manual), catchup=False, max_active_runs=1, tags from YAML,
                    on_success/on_failure callbacks → append dagruns_log END/FAILED)
 ├── activate_source      SydafaActivateOperator (conn_id=sydafa_default, source=bank, ttl_minutes=15)
 ├── generate_process_id  bootstrap DDL → nextval → INSERT airflow_dagruns_log(START) → XCom push
