@@ -5,6 +5,7 @@ networks:
 
 volumes:
   pg_catalog_data:
+  pg_meta_data:
   airflow_pg_data:
   silo_data:
   sydafa_state:
@@ -41,6 +42,20 @@ services:
       timeout: 5s
       retries: 10
 
+  pg-meta:
+    image: postgres:16.15-bookworm
+    environment:
+      POSTGRES_DB: meta
+      POSTGRES_USER: ${PG_META_USER}
+      POSTGRES_PASSWORD: ${PG_META_PASSWORD}
+    volumes: ["pg_meta_data:/var/lib/postgresql/data"]
+    networks: [dlh-poc]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_META_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   nessie:
     image: ghcr.io/projectnessie/nessie:0.99.0
     environment:
@@ -49,9 +64,9 @@ services:
       quarkus.datasource.jdbc.url: jdbc:postgresql://pg-catalog:5432/nessie
       quarkus.datasource.username: ${PG_CATALOG_USER}
       quarkus.datasource.password: ${PG_CATALOG_PASSWORD}
-      # Iceberg REST-каталог: объектное хранилище SILO + warehouse
-      nessie.catalog.default-warehouse: warehouse
-      nessie.catalog.warehouses.warehouse.location: s3://warehouse/
+      # Iceberg REST-каталог: объектное хранилище SILO + warehouse "raw" (layer = catalog)
+      nessie.catalog.default-warehouse: raw
+      nessie.catalog.warehouses.raw.location: s3://datalake/raw/
       nessie.catalog.service.s3.default-options.endpoint: http://silo:9000
       nessie.catalog.service.s3.default-options.path-style-access: "true"
       nessie.catalog.service.s3.default-options.auth-type: STATIC
@@ -157,14 +172,16 @@ services:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_PG_USER}:${AIRFLOW_PG_PASSWORD}@airflow-postgres:5432/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW_CONN_SPARK_DEFAULT: "spark://spark-master:7077?spark_binary=spark-submit"
-      AIRFLOW_CONN_TRINO_DEFAULT: "trino://admin:admin@trino:8443/iceberg?protocol=https&verify=false"
+      AIRFLOW_CONN_TRINO_DEFAULT: "trino://admin:admin@trino:8443/raw?protocol=https&verify=false"
       AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "${AIRFLOW_UI_USER}:ADMIN"
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
       AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow-webserver:8080/execution/"
       AIRFLOW__API_AUTH__JWT_SECRET: "datalake-stand-test-jwt-secret-0123456789abcdef"
       AIRFLOW_CONN_SYDAFA_DEFAULT: "http://sydafa:8000"
       SYDAFA_URL: http://sydafa:8000
-    depends_on: {airflow-postgres: {condition: service_healthy}}
+    depends_on:
+      airflow-postgres: {condition: service_healthy}
+      pg-meta: {condition: service_healthy}
     volumes:
       - ./airflow:/opt/airflow/dags
       - ./airflow/plugins:/opt/airflow/plugins:ro

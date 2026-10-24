@@ -42,6 +42,14 @@ if [ "$val_rc" -ne 0 ]; then
   exit "$val_rc"
 fi
 
+echo "==> Запуск unit-тестов фреймворка ингестии (test/unit)..."
+python3 -m unittest discover -s test/unit
+ut_rc=$?
+if [ "$ut_rc" -ne 0 ]; then
+  echo "FAIL: Unit-тесты завершились с ошибкой."
+  exit "$ut_rc"
+fi
+
 # ==================== ШАГ 2 (verify): Запуск на работающем стенде ====================
 if [ "$MODE" = "verify" ]; then
   echo "==> Запуск e2e-проверок в test-runner на работающем стенде..."
