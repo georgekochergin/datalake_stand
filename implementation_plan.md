@@ -464,6 +464,7 @@ def resolve_driver(jdbc_url: str) -> str
 def validate_target_table(target: str) -> tuple[str, str]
 def build_read_query(source_table: str, incremental_column: str | None, watermark_value: str | None) -> str
 def pick_partition_column(candidates: list[tuple[str, str]]) -> str | None
+def build_create_table_sql(target: str, columns: list[tuple[str, str]]) -> str
 def detect_key_columns(spark, jdbc_url, user, password, source_table) -> list[tuple[str, str]]
 
 def main(argv: list[str] | None = None) -> None
@@ -475,8 +476,8 @@ def main(argv: list[str] | None = None) -> None
 - `build_read_query`: full mode → the bare table; incremental mode → `(SELECT * FROM <table> WHERE <col> > <watermark>) AS q` (watermark omitted → bare table = bootstrap read). Pure, unit-tested.
 - `pick_partition_column(candidates)`: `(name, jdbc_type)` pairs ordered PK-first then unique-index; first numeric/date/timestamp wins, else `None`. Pure, unit-tested.
 - `detect_key_columns`: JVM interop over `spark._jvm.java.sql.DriverManager…getMetaData()` combining `getPrimaryKeys` + `getIndexInfo(unique=true)` + `getColumns`; any exception → empty list (single-partition fallback).
-- `main`: parse/validate → SparkSession → `CREATE NAMESPACE IF NOT EXISTS raw.<ns>` → log start → choose partition column (`--partition-column` → `--incremental-column` → `pick_partition_column(detect_key_columns(…))`); if chosen → `SELECT min/max` bounds → partitioned JDBC read of `build_read_query(...)`; else single-stream → `withColumn("__load_dttm", F.current_timestamp())`, `withColumn("__process_id", F.lit(pid).cast("long"))` → if `not spark.catalog.tableExists(target)` run the generated §3.1 DDL via `spark.sql` → `df.writeTo(target).option("mergeSchema","true").append()` → log `load finished … rows_appended=<df.count()>` (+ `new_watermark=<max incremental col>` in incremental mode, informational).
-- No YAML, no Airflow imports, no `#` comments. `__init__.py` files are empty-with-docstring.
+- `main`: parse/validate → SparkSession → `CREATE NAMESPACE IF NOT EXISTS raw.<ns>` → log start → choose partition column (`--partition-column` → `--incremental-column` → `pick_partition_column(detect_key_columns(…))`; detection retries with uppercased identifiers — Oracle stores metadata upper-case); if chosen → `SELECT min/max` bounds — NULL bounds (empty delta) → log `rows_appended=0` and exit (clean no-op), equal bounds → single-stream read (JDBC partitioning needs a range), else partitioned JDBC read of `build_read_query(...)`; else single-stream → `withColumn("__load_dttm", F.current_timestamp())`, `withColumn("__process_id", F.lit(pid).cast("long"))`, frame cached (count/max/write pass once) → if `not spark.catalog.tableExists(target)` run `build_create_table_sql` via `spark.sql` → `df.writeTo(target).option("mergeSchema","true").append()` → log `load finished … rows_appended=<df.count()>` (+ `new_watermark=<max incremental col>` in incremental mode, informational).
+- No YAML, no Airflow imports, no `ingestion.lib` imports (the job runs inside containers where only `spark/` is mounted; PySpark is imported lazily so the pure helpers test without a Spark installation), no `#` comments. `__init__.py` files are empty-with-docstring.
 
 ### 9.5 `test/unit/` (stdlib `unittest`)
 

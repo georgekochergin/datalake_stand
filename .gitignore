@@ -24,6 +24,8 @@ test/.workspace/**
 
 /spark/*
 !/spark/.gitkeep
+!/spark/raw/
+!/spark/raw/**
 
 /trino/*
 !/trino/.gitkeep
