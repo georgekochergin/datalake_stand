@@ -252,6 +252,8 @@ activate_source >> generate_process_id >> each entity group; inside a group: log
 
 `activate_source` wakes the lazily-started sydafa DB; `generate_process_id` precedes every load. `max_active_runs=1` serializes runs so latest-snapshot reads and watermarks are unambiguous. Entities load in parallel. The per-entity TaskGroup exists so extra steps (quality checks, sensors) can be appended alongside `load` later.
 
+`IngestAppendOperator` is a thin **`SparkSubmitOperator` subclass** (`application=/opt/spark-jobs/raw/load_entity.py`, `conn_id=spark_default`, `deploy_mode=client` — the driver runs in the scheduler container where `/opt/spark-jobs` and the `raw`-catalog `spark-defaults.conf` are mounted). At execute time it resolves the source Airflow Connection into a JDBC URL (asserting scheme vs `type`), pulls `__process_id` from XCom, reads the entity's watermark from `pg-meta` when `incremental_column` is set, and assembles `application_args`; generated DAGs therefore contain only literal entity parameters — no hooks, no credentials.
+
 ## 7. Metadata store — standalone `pg-meta`
 
 ### 7.1 Instance
