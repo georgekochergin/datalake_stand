@@ -133,7 +133,7 @@ def build_read_query(
             "quoted/ISO watermarks are not supported"
         )
     column = sql_reference(jdbc_url, incremental_column)
-    return f"(SELECT * FROM {source_table} WHERE {column} > {watermark_value}) AS q"
+    return f"(SELECT * FROM {source_table} WHERE {column} > {watermark_value}) q"
 
 
 def _normalize_type(jdbc_type: str) -> str:
@@ -323,7 +323,7 @@ def _read_bounds(spark, args, read_query, column):
     column_ref = sql_reference(args.jdbc_url, column)
     query = (
         f"(SELECT MIN({column_ref}) AS lower_bound, MAX({column_ref}) AS upper_bound "
-        f"FROM {read_query}) AS bounds"
+        f"FROM {read_query}) bounds"
     )
     frame = _jdbc_reader(spark, args, query).load()
     return frame.collect()[0]

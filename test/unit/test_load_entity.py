@@ -151,13 +151,13 @@ class TestBuildReadQuery(unittest.TestCase):
     def test_incremental_builds_subquery_mssql(self):
         self.assertEqual(
             load_entity.build_read_query("retail_bank.clients", "_batch_id", "100", "jdbc:sqlserver://h:1433"),
-            "(SELECT * FROM retail_bank.clients WHERE _batch_id > 100) AS q",
+            "(SELECT * FROM retail_bank.clients WHERE _batch_id > 100) q",
         )
 
     def test_incremental_builds_subquery_oracle_quotes_underscore(self):
         self.assertEqual(
             load_entity.build_read_query("trading_core.transactions", "_batch_id", "100", "jdbc:oracle:thin:@//h:1521/sydafa"),
-            '(SELECT * FROM trading_core.transactions WHERE "_batch_id" > 100) AS q',
+            '(SELECT * FROM trading_core.transactions WHERE "_batch_id" > 100) q',
         )
 
     def test_bootstrap_without_watermark_reads_everything(self):
