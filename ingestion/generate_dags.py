@@ -27,6 +27,7 @@ DEFAULT_SOURCES = REPO_ROOT / "ingestion" / "sources.yaml"
 DEFAULT_PIPELINES = REPO_ROOT / "ingestion" / "pipelines"
 DEFAULT_OUTPUT = REPO_ROOT / "airflow" / "dags" / "generated"
 ACTIVATE_TTL_MINUTES = 15
+LOAD_POOL = "ingest_loads"
 
 
 def dag_id_for(source_id: str) -> str:
@@ -62,6 +63,7 @@ def _entity_block(source: SourceConfig, entity) -> list[str]:
         '            )',
         '            load = IngestAppendOperator(',
         '                task_id="load",',
+        f'                pool="{LOAD_POOL}",',
         f'                source_id="{source.source_id}",',
         f'                airflow_conn_id="{source.airflow_conn_id}",',
         f'                fqn="{entity.fqn}",',

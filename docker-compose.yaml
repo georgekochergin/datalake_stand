@@ -169,7 +169,7 @@ services:
     build: {context: ., dockerfile: conf/airflow/Dockerfile}
     image: dlh-poc-airflow:latest
     entrypoint: ["/bin/bash", "-c"]
-    command: ["airflow db migrate"]
+    command: ["airflow db migrate && airflow pools set ingest_loads 4 'Raw-layer ingestion load tasks (shared across ingest DAGs)'"]
     environment: &airflow-env
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_PG_USER}:${AIRFLOW_PG_PASSWORD}@airflow-postgres:5432/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"

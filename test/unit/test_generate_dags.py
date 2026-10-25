@@ -56,6 +56,10 @@ class TestGenerateDagSource(unittest.TestCase):
         self.assertIn('Asset("raw://bank/retail_bank.transactions")', self.source)
         self.assertIn('datalake_table="raw.bank.retail_bank__transactions"', self.source)
 
+    def test_load_tasks_share_pool(self):
+        self.assertIn('pool="ingest_loads"', self.source)
+        self.assertEqual(self.source.count('pool="ingest_loads"'), 2)
+
     def test_incremental_column_only_where_configured(self):
         self.assertEqual(self.source.count('incremental_column="_batch_id"'), 2)
         self.assertIn('entity_fqn="retail_bank.clients"', self.source)

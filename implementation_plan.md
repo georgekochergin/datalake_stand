@@ -243,6 +243,7 @@ DAG ingest_bank   (schedule from YAML (unset = manual), catchup=False, max_activ
     ├── TaskGroup "load_retail_bank__clients"
     │   ├── log_start   INSERT airflow_tasks_log(START)
     │   ├── load        IngestAppendOperator → /opt/spark-jobs/raw/load_entity.py
+    │   │               pool="ingest_loads" (shared, 4 slots)
     │   │               outlets=[Asset("raw://bank/retail_bank.clients")]
     │   └── log_end     INSERT airflow_tasks_log(END);
     │                   if incremental_column set → advance watermark (§7.2) via Trino + pg-meta
@@ -250,7 +251,7 @@ DAG ingest_bank   (schedule from YAML (unset = manual), catchup=False, max_activ
 activate_source >> generate_process_id >> each entity group; inside a group: log_start >> load >> log_end
 ```
 
-`activate_source` wakes the lazily-started sydafa DB; `generate_process_id` precedes every load. `max_active_runs=1` serializes runs so latest-snapshot reads and watermarks are unambiguous. Entities load in parallel. The per-entity TaskGroup exists so extra steps (quality checks, sensors) can be appended alongside `load` later.
+`activate_source` wakes the lazily-started sydafa DB; `generate_process_id` precedes every load. `max_active_runs=1` serializes runs so latest-snapshot reads and watermarks are unambiguous. Entities load in parallel; all `load` tasks across every ingest DAG share the `ingest_loads` pool (4 slots, created idempotently by the `airflow-init` service after `db migrate`), capping the number of concurrent Spark applications — each load is a full driver+executors footprint the stand's Docker VM cannot host unbounded. The per-entity TaskGroup exists so extra steps (quality checks, sensors) can be appended alongside `load` later.
 
 `IngestAppendOperator` is a thin **`SparkSubmitOperator` subclass** (`application=/opt/spark-jobs/raw/load_entity.py`, `conn_id=spark_default`, `deploy_mode=client` — the driver runs in the scheduler container where `/opt/spark-jobs` and the `raw`-catalog `spark-defaults.conf` are mounted). At execute time it resolves the source Airflow Connection into a JDBC URL (asserting scheme vs `type`), pulls `__process_id` from XCom, reads the entity's watermark from `pg-meta` when `incremental_column` is set, and assembles `application_args`; generated DAGs therefore contain only literal entity parameters — no hooks, no credentials.
 
