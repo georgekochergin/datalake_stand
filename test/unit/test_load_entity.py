@@ -203,12 +203,19 @@ class TestBuildCreateTableSql(unittest.TestCase):
         )
         self.assertEqual(
             ddl,
-            'CREATE TABLE raw.bank.retail_bank__clients '
-            '("client_id" bigint, "full_name" string, "__load_dttm" timestamptz, '
-            '"__process_id" bigint) USING iceberg '
-            "PARTITIONED BY (days(__load_dttm)) "
+            "CREATE TABLE raw.bank.retail_bank__clients "
+            "(`client_id` bigint, `full_name` string, "
+            "`__load_dttm` timestamp_ltz, `__process_id` bigint) USING iceberg "
+            "PARTITIONED BY (days(`__load_dttm`)) "
             "TBLPROPERTIES ('write.spark.accept-any-schema'='true')",
         )
+
+    def test_backtick_in_column_name_escaped(self):
+        ddl = load_entity.build_create_table_sql(
+            "raw.bank.t",
+            [("a`b", "string")],
+        )
+        self.assertIn("`a``b` string", ddl)
 
     def test_metadata_collision_rejected(self):
         with self.assertRaises(ValueError):

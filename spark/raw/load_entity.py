@@ -129,6 +129,11 @@ def pick_partition_column(candidates: list[tuple[str, str]]) -> str | None:
     return None
 
 
+def quote_identifier(name: str) -> str:
+    """Quote a column name for Spark SQL DDL (backticks; embedded backticks doubled)."""
+    return "`%s`" % name.replace("`", "``")
+
+
 def build_create_table_sql(target: str, columns: list[tuple[str, str]]) -> str:
     """Build the first-load Iceberg DDL from (column name, DDL type) pairs."""
     validate_target_table(target)
@@ -136,14 +141,13 @@ def build_create_table_sql(target: str, columns: list[tuple[str, str]]) -> str:
     for name, ddl_type in columns:
         if name in (METADATA_DTTM, METADATA_PID):
             raise ValueError(f"source column {name!r} collides with a metadata column")
-        quoted = '"%s"' % name.replace('"', '""')
-        rendered.append(f"{quoted} {ddl_type}")
-    rendered.append(f'"{METADATA_DTTM}" timestamptz')
-    rendered.append(f'"{METADATA_PID}" bigint')
+        rendered.append(f"{quote_identifier(name)} {ddl_type}")
+    rendered.append(f"{quote_identifier(METADATA_DTTM)} timestamp_ltz")
+    rendered.append(f"{quote_identifier(METADATA_PID)} bigint")
     joined = ", ".join(rendered)
     return (
         f"CREATE TABLE {target} ({joined}) USING iceberg "
-        f"PARTITIONED BY (days({METADATA_DTTM})) "
+        f"PARTITIONED BY (days({quote_identifier(METADATA_DTTM)})) "
         f"TBLPROPERTIES ('write.spark.accept-any-schema'='true')"
     )
 
@@ -186,9 +190,9 @@ def _schema_columns(schema) -> list[tuple[str, str]]:
         if isinstance(data_type, DateType):
             return "date"
         if isinstance(data_type, TimestampType):
-            return "timestamptz"
+            return "timestamp_ltz"
         if isinstance(data_type, TimestampNTZType):
-            return "timestamp"
+            return "timestamp_ntz"
         if isinstance(data_type, DecimalType):
             return f"decimal({data_type.precision},{data_type.scale})"
         if isinstance(data_type, BinaryType):
