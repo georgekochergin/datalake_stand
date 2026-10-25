@@ -220,7 +220,11 @@ def airflow_wait_run(token: str, dag_id: str, run_id: str, timeout: int = 300, n
 
 
 def trino_query(sql: str, timeout: int = 120) -> list[list[Any]]:
-    """Выполняет SQL в Trino через REST (/v1/statement) и возвращает строки данных."""
+    """Выполняет SQL в Trino через REST (/v1/statement) и возвращает строки данных.
+
+    Страницы данных приходят в промежуточных ответах (в терминальном ответе
+    поля data нет), поэтому строки накапливаются со всех ответов опроса.
+    """
     auth = "Basic " + base64.b64encode(("%s:%s" % (TRINO_USER, TRINO_PASSWORD)).encode("utf-8")).decode("utf-8")
     headers = {"Authorization": auth, "X-Trino-User": TRINO_USER, "Content-Type": "text/plain"}
     code, raw = http("POST", TRINO + "/v1/statement", sql, headers, timeout=60)
@@ -228,6 +232,7 @@ def trino_query(sql: str, timeout: int = 120) -> list[list[Any]]:
         raise RuntimeError("trino statement %s: %s" % (code, raw[:300]))
     deadline = time.time() + timeout
     payload = json.loads(raw)
+    rows: list[list[Any]] = list(payload.get("data") or [])
     while payload.get("nextUri"):
         if time.time() > deadline:
             raise RuntimeError("trino query timeout: %s" % sql[:200])
@@ -239,11 +244,12 @@ def trino_query(sql: str, timeout: int = 120) -> list[list[Any]]:
         if code != 200:
             raise RuntimeError("trino poll %s: %s" % (code, raw[:300]))
         payload = json.loads(raw)
+        rows.extend(payload.get("data") or [])
         time.sleep(0.5)
     if payload.get("stats", {}).get("state") == "FAILED":
         error = payload.get("error", {}).get("message", "unknown trino error")
         raise RuntimeError("trino failed: %s (%s)" % (error, sql[:200]))
-    return payload.get("data", [])
+    return rows
 
 
 def raw_stats(table: str) -> tuple[int, int, int]:
