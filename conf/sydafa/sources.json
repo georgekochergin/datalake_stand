@@ -10,10 +10,18 @@
               "client_id"
             ],
             "columns": {
-              "client_id": "bigint",
-              "full_name": "string",
-              "client_type": "string",
-              "status": "string"
+              "client_id": {
+                "type": "bigint"
+              },
+              "full_name": {
+                "type": "string"
+              },
+              "client_type": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
             },
             "foreign_keys": []
           },
@@ -22,10 +30,18 @@
               "account_id"
             ],
             "columns": {
-              "account_id": "bigint",
-              "account_number": "string",
-              "account_type": "string",
-              "status": "string"
+              "account_id": {
+                "type": "bigint"
+              },
+              "account_number": {
+                "type": "string"
+              },
+              "account_type": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
             },
             "foreign_keys": []
           },
@@ -34,12 +50,24 @@
               "deal_id"
             ],
             "columns": {
-              "deal_id": "bigint",
-              "deal_number": "string",
-              "deal_type": "string",
-              "start_date": "date",
-              "end_date": "date",
-              "status": "string"
+              "deal_id": {
+                "type": "bigint"
+              },
+              "deal_number": {
+                "type": "string"
+              },
+              "deal_type": {
+                "type": "string"
+              },
+              "start_date": {
+                "type": "date"
+              },
+              "end_date": {
+                "type": "date"
+              },
+              "status": {
+                "type": "string"
+              }
             },
             "foreign_keys": []
           },
@@ -48,14 +76,30 @@
               "transaction_id"
             ],
             "columns": {
-              "transaction_id": "bigint",
-              "account_id": "bigint",
-              "client_id": "bigint",
-              "deal_id": "bigint",
-              "currency": "string",
-              "amount": "decimal(18,2)",
-              "posting_date": "date",
-              "description": "string"
+              "transaction_id": {
+                "type": "bigint"
+              },
+              "account_id": {
+                "type": "bigint"
+              },
+              "client_id": {
+                "type": "bigint"
+              },
+              "deal_id": {
+                "type": "bigint"
+              },
+              "currency": {
+                "type": "string"
+              },
+              "amount": {
+                "type": "decimal(18,2)"
+              },
+              "posting_date": {
+                "type": "date"
+              },
+              "description": {
+                "type": "string"
+              }
             },
             "foreign_keys": [
               {
@@ -252,11 +296,21 @@
               "client_id"
             ],
             "columns": {
-              "client_id": "bigint",
-              "full_name": "string",
-              "risk_profile": "string",
-              "is_qualified": "string",
-              "status": "string"
+              "client_id": {
+                "type": "bigint"
+              },
+              "full_name": {
+                "type": "string"
+              },
+              "risk_profile": {
+                "type": "string"
+              },
+              "is_qualified": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
             },
             "foreign_keys": []
           },
@@ -265,10 +319,18 @@
               "account_id"
             ],
             "columns": {
-              "account_id": "bigint",
-              "account_number": "string",
-              "account_type": "string",
-              "status": "string"
+              "account_id": {
+                "type": "bigint"
+              },
+              "account_number": {
+                "type": "string"
+              },
+              "account_type": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
             },
             "foreign_keys": []
           },
@@ -277,12 +339,24 @@
               "deal_id"
             ],
             "columns": {
-              "deal_id": "bigint",
-              "deal_number": "string",
-              "order_type": "string",
-              "start_date": "date",
-              "end_date": "date",
-              "market": "string"
+              "deal_id": {
+                "type": "bigint"
+              },
+              "deal_number": {
+                "type": "string"
+              },
+              "order_type": {
+                "type": "string"
+              },
+              "start_date": {
+                "type": "date"
+              },
+              "end_date": {
+                "type": "date"
+              },
+              "market": {
+                "type": "string"
+              }
             },
             "foreign_keys": []
           },
@@ -291,14 +365,30 @@
               "transaction_id"
             ],
             "columns": {
-              "transaction_id": "bigint",
-              "account_id": "bigint",
-              "client_id": "bigint",
-              "deal_id": "bigint",
-              "security_type": "string",
-              "quantity": "decimal(18,2)",
-              "posting_date": "date",
-              "ticker": "string"
+              "transaction_id": {
+                "type": "bigint"
+              },
+              "account_id": {
+                "type": "bigint"
+              },
+              "client_id": {
+                "type": "bigint"
+              },
+              "deal_id": {
+                "type": "bigint"
+              },
+              "security_type": {
+                "type": "string"
+              },
+              "quantity": {
+                "type": "decimal(18,2)"
+              },
+              "posting_date": {
+                "type": "date"
+              },
+              "ticker": {
+                "type": "string"
+              }
             },
             "foreign_keys": [
               {
