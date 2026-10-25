@@ -354,7 +354,7 @@ The reader login is `sydafa`/`sydafa` (strictly SELECT, per the sydafa README). 
 
 After `update_source_{bank,broker}` succeed, `run_flow.py` runs three ingest rounds and verifies everything through Trino (stdlib REST client for `POST /v1/statement`):
 
-- **run 1** (`ingest_bank` + `ingest_broker`, each mixes both modes — everything full-snapshot except `transactions`, incremental by `_batch_id`): per table `count(*) > 0`, `count(distinct __process_id) = 1`, and `max(__process_id)` identical across all 8 tables (one shared run id); latest-snapshot count (`max(__load_dttm)` filter) equals the total.
+- **run 1** (`ingest_bank` + `ingest_broker`, each mixes both modes — everything full-snapshot except `transactions`, incremental by `_batch_id`): per table `count(*) > 0`, `count(distinct __process_id) = 1`, and `max(__process_id)` identical within each pipeline's four tables — one id per DAG run; the bank and broker runs take consecutive ids from the shared sequence (§3.3); latest-snapshot count (`max(__load_dttm)` filter) equals the total.
 - **run 2** (`ingest_bank` re-triggered, no source change): full-snapshot tables double with two portions; `transactions` appends nothing and keeps one portion — the read of the stored watermark gating the delta, proven end-to-end; latest snapshot of a snapshot table still equals its first-run count.
 - **run 3** (second `update_source_bank` migration, then `ingest_bank`): `clients` shows three portions with the newest snapshot larger than the first (source grew); `transactions` shows exactly two portions — its first portion intact (append-only history) plus a non-zero `_batch_id` delta, with total = history + delta.
 

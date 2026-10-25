@@ -559,15 +559,19 @@ def main() -> None:
     print("\n==> Шаг 7: Проверка raw-таблиц в Trino (первая загрузка)...")
     first_counts: dict[str, int] = {}
     try:
-        max_pids = []
+        max_pids = {}
         for table in RAW_SNAPSHOT_TABLES + RAW_INCREMENTAL_TABLES:
             total, distinct_pids, max_pid = raw_stats(table)
             first_counts[table] = total
             check("%s: rows loaded" % table, total > 0, True)
             check("%s: single process_id (one portion)" % table, distinct_pids, 1)
-            max_pids.append(max_pid)
-        check("all tables share the run's process_id", len(set(max_pids)), 1)
-        process_id_1 = max_pids[0]
+            max_pids[table] = max_pid
+        bank_pids = {pid for table, pid in max_pids.items() if ".bank." in table}
+        broker_pids = {pid for table, pid in max_pids.items() if ".broker." in table}
+        check("bank tables share the bank run's process_id", len(bank_pids), 1)
+        check("broker tables share the broker run's process_id", len(broker_pids), 1)
+        check("each DAG run has its own process_id", len(bank_pids | broker_pids), 2)
+        process_id_1 = max_pids["raw.bank.retail_bank__clients"]
         rows = trino_query(
             "SELECT count(*) FROM raw.bank.retail_bank__clients "
             "WHERE __load_dttm = (SELECT max(__load_dttm) FROM raw.bank.retail_bank__clients)"
