@@ -358,14 +358,14 @@ def validate_manifests_and_dags() -> None:
     bank_appends = [op for op in bank_ops if op.get("op") == "append"]
     bank_updates = [op for op in bank_ops if op.get("op") == "update"]
     bank_deletes = [op for op in bank_ops if op.get("op") == "delete"]
-    check("bank migration has 4 appends (dims 100, 100, 1000 + fact 25k new_key_ratio=0.0)", (
+    check("bank migration has 4 appends (dims 100, 100, 1000 + fact 25k)", (
         len(bank_appends) == 4
         and bank_appends[0].get("entity_fqn") == "retail_bank.clients" and bank_appends[0].get("rows") == 100
         and bank_appends[1].get("entity_fqn") == "retail_bank.accounts" and bank_appends[1].get("rows") == 100
         and bank_appends[2].get("entity_fqn") == "retail_bank.deals" and bank_appends[2].get("rows") == 1000
         and bank_appends[3].get("entity_fqn") == "retail_bank.transactions"
         and bank_appends[3].get("rows") == 25000
-        and bank_appends[3].get("new_key_ratio") == 0.0
+        and "new_key_ratio" not in bank_appends[3]
     ), True)
     check("bank migration has 1 cascade delete of 50 deals", (
         len(bank_deletes) == 1
@@ -391,14 +391,14 @@ def validate_manifests_and_dags() -> None:
     b_appends = [op for op in broker_ops if op.get("op") == "append"]
     b_updates = [op for op in broker_ops if op.get("op") == "update"]
     b_deletes = [op for op in broker_ops if op.get("op") == "delete"]
-    check("broker migration has 4 appends (dims 100, 100, 1000 + fact 25k new_key_ratio=0.0)", (
+    check("broker migration has 4 appends (dims 100, 100, 1000 + fact 25k)", (
         len(b_appends) == 4
         and b_appends[0].get("entity_fqn") == "trading_core.clients" and b_appends[0].get("rows") == 100
         and b_appends[1].get("entity_fqn") == "trading_core.accounts" and b_appends[1].get("rows") == 100
         and b_appends[2].get("entity_fqn") == "trading_core.deals" and b_appends[2].get("rows") == 1000
         and b_appends[3].get("entity_fqn") == "trading_core.transactions"
         and b_appends[3].get("rows") == 25000
-        and b_appends[3].get("new_key_ratio") == 0.0
+        and "new_key_ratio" not in b_appends[3]
     ), True)
     check("broker migration has 1 cascade delete of 50 deals", (
         len(b_deletes) == 1

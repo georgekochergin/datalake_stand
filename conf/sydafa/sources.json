@@ -79,15 +79,9 @@
               "transaction_id": {
                 "type": "bigint"
               },
-              "account_id": {
-                "type": "bigint"
-              },
-              "client_id": {
-                "type": "bigint"
-              },
-              "deal_id": {
-                "type": "bigint"
-              },
+              "account_id": {},
+              "client_id": {},
+              "deal_id": {},
               "currency": {
                 "type": "string"
               },
@@ -368,15 +362,9 @@
               "transaction_id": {
                 "type": "bigint"
               },
-              "account_id": {
-                "type": "bigint"
-              },
-              "client_id": {
-                "type": "bigint"
-              },
-              "deal_id": {
-                "type": "bigint"
-              },
+              "account_id": {},
+              "client_id": {},
+              "deal_id": {},
               "security_type": {
                 "type": "string"
               },
