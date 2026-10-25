@@ -2,6 +2,7 @@
 
 import importlib.util
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).resolve().parents[2] / "spark" / "raw" / "load_entity.py"
@@ -217,6 +218,26 @@ class TestPickPartitionColumn(unittest.TestCase):
     def test_no_suitable_column(self):
         candidates = [("code", "varchar"), ("payload", "nvarchar")]
         self.assertIsNone(load_entity.pick_partition_column(candidates))
+
+
+class TestBoundLiteral(unittest.TestCase):
+    """Rendering of JDBC partition bounds."""
+
+    def test_integral_decimal_collapses_to_integer(self):
+        self.assertEqual(
+            load_entity._bound_literal(Decimal("1.0000000000")),
+            "1",
+        )
+
+    def test_fractional_decimal_kept_as_is(self):
+        self.assertEqual(
+            load_entity._bound_literal(Decimal("12.50")),
+            "12.50",
+        )
+
+    def test_int_and_float_untouched(self):
+        self.assertEqual(load_entity._bound_literal(7), "7")
+        self.assertEqual(load_entity._bound_literal(1.5), "1.5")
 
 
 class TestBuildCreateTableSql(unittest.TestCase):

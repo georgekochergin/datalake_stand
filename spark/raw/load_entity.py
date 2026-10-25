@@ -15,6 +15,7 @@ helpers stay testable without a Spark installation.
 
 import argparse
 import re
+from decimal import Decimal
 
 CATALOG = "raw"
 METADATA_DTTM = "__load_dttm"
@@ -318,7 +319,19 @@ def _jdbc_reader(spark, args, read_query):
     )
 
 
-def _read_bounds(spark, args, read_query, column):
+def _bound_literal(value) -> str:
+    """Render a JDBC partition bound; integral Decimals collapse to plain integers.
+
+    Oracle NUMBER bounds arrive as Decimal('1.0000000000'), which the JDBC
+    partitioner cannot parse when the partition column itself maps to an
+    integral type.
+    """
+    if isinstance(value, Decimal) and value == value.to_integral_value():
+        return str(int(value))
+    return str(value)
+
+
+def _read_bounds(spark, args, read_query, column) -> tuple:
     """Read MIN/MAX of the partition column over the read query (one-row JDBC read)."""
     column_ref = sql_reference(args.jdbc_url, column)
     query = (
@@ -326,7 +339,8 @@ def _read_bounds(spark, args, read_query, column):
         f"FROM {read_query}) bounds"
     )
     frame = _jdbc_reader(spark, args, query).load()
-    return frame.collect()[0]
+    row = frame.collect()[0]
+    return row[0], row[1]
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -355,18 +369,18 @@ def main(argv: list[str] | None = None) -> None:
             )
         reader = _jdbc_reader(spark, args, read_query)
         if partition_column is not None:
-            bounds = _read_bounds(spark, args, read_query, partition_column)
-            if bounds["lower_bound"] is None:
+            lower_bound, upper_bound = _read_bounds(spark, args, read_query, partition_column)
+            if lower_bound is None:
                 print(
                     f"load finished table={args.source_table} target={args.target_table} "
                     f"process_id={args.process_id} rows_appended=0"
                 )
                 return
-            if bounds["lower_bound"] != bounds["upper_bound"]:
+            if lower_bound != upper_bound:
                 reader = (
                     reader.option("partitionColumn", partition_column)
-                    .option("lowerBound", str(bounds["lower_bound"]))
-                    .option("upperBound", str(bounds["upper_bound"]))
+                    .option("lowerBound", _bound_literal(lower_bound))
+                    .option("upperBound", _bound_literal(upper_bound))
                     .option("numPartitions", args.num_partitions)
                 )
         source_frame = reader.load()
