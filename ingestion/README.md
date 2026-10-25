@@ -9,7 +9,9 @@ at the repo root.
 
 - `sources.yaml` — source registry (`type: rdbms` + `airflow_conn_id`).
 - `pipelines/<source_id>.yaml` — DAG configs: entities list; optional scalar
-  `incremental_column` switches an entity from full-snapshot to incremental.
+  `incremental_column` switches an entity from full-snapshot to incremental
+  (integral columns only — autoincrement ids / tech batch ids; the watermark is
+  a plain integer).
 - `lib/` — naming (every dot becomes `__`) and strict manifest validation.
 - `generate_dags.py` — renders static DAG files into `airflow/dags/generated/`.
 

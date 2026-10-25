@@ -5,10 +5,12 @@ by default, or an incremental slice above a numeric watermark), tags every
 row with __load_dttm/__process_id and appends into the raw catalog. The
 first load creates the table partitioned by days(__load_dttm) with the
 write.spark.accept-any-schema property; every later load appends with the
-mergeSchema option. The module is self-contained: it runs inside Spark
-containers where only the spark/ tree is mounted, so it must not import
-from the ingestion package; PySpark is imported lazily so pure helpers
-stay testable without a Spark installation.
+mergeSchema option. Incremental mode requires an integral incremental
+column (the watermark is a plain integer); presence and type of the column
+are validated on every load. The module is self-contained: it runs inside
+Spark containers where only the spark/ tree is mounted, so it must not
+import from the ingestion package; PySpark is imported lazily so pure
+helpers stay testable without a Spark installation.
 """
 
 import argparse
@@ -97,7 +99,25 @@ def validate_target_table(target: str) -> tuple[str, str]:
     return namespace, table
 
 
-def build_read_query(source_table: str, incremental_column: str | None, watermark_value: str | None) -> str:
+def sql_reference(jdbc_url: str, name: str) -> str:
+    """Render a column reference for source SQL.
+
+    '_'-prefixed columns are stored lowercase (quoted identifiers) in Oracle,
+    so they must be referenced quoted there; unquoted reference would fold to
+    uppercase and miss the column. MSSQL is case-insensitive and needs no
+    quoting; an unknown dialect (empty url) is rendered unquoted.
+    """
+    if name.startswith("_") and jdbc_url.startswith("jdbc:oracle:"):
+        return '"%s"' % name.replace('"', '""')
+    return name
+
+
+def build_read_query(
+    source_table: str,
+    incremental_column: str | None,
+    watermark_value: str | None,
+    jdbc_url: str = "",
+) -> str:
     """Build the JDBC dbtable expression: bare table, or an incremental subquery."""
     if not SOURCE_TABLE_PATTERN.match(source_table):
         raise ValueError(f"invalid source table reference: {source_table!r}")
@@ -112,7 +132,8 @@ def build_read_query(source_table: str, incremental_column: str | None, watermar
             f"watermark must be a plain integer (got {watermark_value!r}); "
             "quoted/ISO watermarks are not supported"
         )
-    return f"(SELECT * FROM {source_table} WHERE {incremental_column} > {watermark_value}) AS q"
+    column = sql_reference(jdbc_url, incremental_column)
+    return f"(SELECT * FROM {source_table} WHERE {column} > {watermark_value}) AS q"
 
 
 def _normalize_type(jdbc_type: str) -> str:
@@ -150,6 +171,24 @@ def build_create_table_sql(target: str, columns: list[tuple[str, str]]) -> str:
         f"PARTITIONED BY (days({quote_identifier(METADATA_DTTM)})) "
         f"TBLPROPERTIES ('write.spark.accept-any-schema'='true')"
     )
+
+
+def validate_incremental_column(schema, incremental_column: str) -> None:
+    """Raise ValueError unless the incremental column exists and is integral."""
+    field = next((f for f in schema.fields if f.name == incremental_column), None)
+    if field is None:
+        raise ValueError(
+            f"incremental column {incremental_column!r} not found in source schema"
+        )
+    data_type = field.dataType
+    type_name = data_type.typeName()
+    if type_name not in ("byte", "short", "integer", "long") and not (
+        type_name == "decimal" and data_type.scale == 0
+    ):
+        raise ValueError(
+            f"incremental column {incremental_column!r} has unsupported type "
+            f"{type_name!r}: numeric (integral) incremental columns are required"
+        )
 
 
 def _schema_columns(schema) -> list[tuple[str, str]]:
@@ -281,8 +320,9 @@ def _jdbc_reader(spark, args, read_query):
 
 def _read_bounds(spark, args, read_query, column):
     """Read MIN/MAX of the partition column over the read query (one-row JDBC read)."""
+    column_ref = sql_reference(args.jdbc_url, column)
     query = (
-        f"(SELECT MIN({column}) AS lower_bound, MAX({column}) AS upper_bound "
+        f"(SELECT MIN({column_ref}) AS lower_bound, MAX({column_ref}) AS upper_bound "
         f"FROM {read_query}) AS bounds"
     )
     frame = _jdbc_reader(spark, args, query).load()
@@ -300,7 +340,7 @@ def main(argv: list[str] | None = None) -> None:
     try:
         spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{namespace}")
         read_query = build_read_query(
-            args.source_table, args.incremental_column, args.watermark_value
+            args.source_table, args.incremental_column, args.watermark_value, args.jdbc_url
         )
         print(
             f"load started table={args.source_table} target={args.target_table} "
@@ -330,6 +370,8 @@ def main(argv: list[str] | None = None) -> None:
                     .option("numPartitions", args.num_partitions)
                 )
         source_frame = reader.load()
+        if args.incremental_column is not None:
+            validate_incremental_column(source_frame.schema, args.incremental_column)
         create_sql = build_create_table_sql(args.target_table, _schema_columns(source_frame.schema))
         frame = (
             source_frame.withColumn(METADATA_DTTM, F.current_timestamp())

@@ -119,6 +119,26 @@ class TestValidateTargetTable(unittest.TestCase):
             load_entity.validate_target_table("raw..clients")
 
 
+class TestSqlReference(unittest.TestCase):
+    """Dialect-aware column references for source SQL."""
+
+    def test_mssql_underscore_column_unquoted(self):
+        self.assertEqual(
+            load_entity.sql_reference("jdbc:sqlserver://host:1433", "_batch_id"),
+            "_batch_id",
+        )
+
+    def test_oracle_underscore_column_quoted(self):
+        self.assertEqual(
+            load_entity.sql_reference("jdbc:oracle:thin:@//host:1521/sydafa", "_batch_id"),
+            '"_batch_id"',
+        )
+
+    def test_regular_column_unquoted_everywhere(self):
+        self.assertEqual(load_entity.sql_reference("jdbc:oracle:thin:@//h:1521/s", "updated_at"), "updated_at")
+        self.assertEqual(load_entity.sql_reference("jdbc:sqlserver://h:1433", "updated_at"), "updated_at")
+
+
 class TestBuildReadQuery(unittest.TestCase):
     """JDBC dbtable expression construction."""
 
@@ -128,10 +148,16 @@ class TestBuildReadQuery(unittest.TestCase):
             "retail_bank.clients",
         )
 
-    def test_incremental_builds_subquery(self):
+    def test_incremental_builds_subquery_mssql(self):
         self.assertEqual(
-            load_entity.build_read_query("retail_bank.clients", "_batch_id", "100"),
+            load_entity.build_read_query("retail_bank.clients", "_batch_id", "100", "jdbc:sqlserver://h:1433"),
             "(SELECT * FROM retail_bank.clients WHERE _batch_id > 100) AS q",
+        )
+
+    def test_incremental_builds_subquery_oracle_quotes_underscore(self):
+        self.assertEqual(
+            load_entity.build_read_query("trading_core.transactions", "_batch_id", "100", "jdbc:oracle:thin:@//h:1521/sydafa"),
+            '(SELECT * FROM trading_core.transactions WHERE "_batch_id" > 100) AS q',
         )
 
     def test_bootstrap_without_watermark_reads_everything(self):
@@ -227,6 +253,72 @@ class TestBuildCreateTableSql(unittest.TestCase):
     def test_invalid_target_rejected(self):
         with self.assertRaises(ValueError):
             load_entity.build_create_table_sql("bank.t", [("a", "int")])
+
+
+class _FakeType:
+    """Minimal stand-in for a pyspark DataType."""
+
+    def __init__(self, name: str, scale: int | None = None):
+        self._name = name
+        self.scale = scale
+
+    def typeName(self) -> str:
+        return self._name
+
+
+class _FakeField:
+    """Minimal stand-in for a pyspark StructField."""
+
+    def __init__(self, name: str, data_type: _FakeType):
+        self.name = name
+        self.dataType = data_type
+
+
+class _FakeSchema:
+    """Minimal stand-in for a pyspark StructType."""
+
+    def __init__(self, *fields: _FakeField):
+        self.fields = list(fields)
+
+
+class TestValidateIncrementalColumn(unittest.TestCase):
+    """Existence and integral-type checks on the incremental column."""
+
+    def schema_with(self, data_type):
+        return _FakeSchema(
+            _FakeField("account_id", _FakeType("bigint")),
+            _FakeField("_batch_id", data_type),
+        )
+
+    def test_missing_column_rejected(self):
+        with self.assertRaises(ValueError):
+            load_entity.validate_incremental_column(
+                _FakeSchema(_FakeField("account_id", _FakeType("bigint"))), "_batch_id"
+            )
+
+    def test_integral_types_accepted(self):
+        for type_name in ("byte", "short", "integer", "long"):
+            load_entity.validate_incremental_column(
+                self.schema_with(_FakeType(type_name)), "_batch_id"
+            )
+
+    def test_integral_decimal_accepted(self):
+        load_entity.validate_incremental_column(
+            self.schema_with(_FakeType("decimal", scale=0)), "_batch_id"
+        )
+
+    def test_fractional_decimal_rejected(self):
+        with self.assertRaises(ValueError):
+            load_entity.validate_incremental_column(
+                self.schema_with(_FakeType("decimal", scale=2)), "_batch_id"
+            )
+
+    def test_non_numeric_types_rejected(self):
+        for type_name in ("string", "date", "timestamp", "boolean", "double"):
+            with self.assertRaises(ValueError):
+                load_entity.validate_incremental_column(
+                    self.schema_with(_FakeType(type_name)), "_batch_id"
+                )
 
 
 if __name__ == "__main__":

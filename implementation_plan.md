@@ -147,7 +147,7 @@ Diffs between portions, deleted-at-source rows (absent from the latest snapshot 
 | bootstrap | — | first run without a stored watermark reads everything |
 | use when | controlled volumes (default) | large, append-dominated sources |
 
-`incremental_column` must be monotonically increasing (`updated_at`, autoincrement id); it is also the first-choice parallel-read column (§4).
+`incremental_column` must be a monotonically increasing **integral** column (autoincrement id, source-maintained tech id); it is also the first-choice parallel-read column (§4).
 
 ### 3.6 Kafka outlook (topics as future sources — same strategy)
 
@@ -201,7 +201,7 @@ Entity entry keys:
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `fqn` | string | yes | — | `rdbms`: `<schema>.<table>` (exactly 2 fragments, quoted fragments allowed). `kafka`: the raw topic name. Resolved by §2; used verbatim in the asset URI. |
-| `incremental_column` | string | no | full snapshot | Monotonically increasing source column (`updated_at`, autoincrement id, or a source-maintained tech column such as sydafa's `_batch_id` — implicitly added to every table and bumped on every append **and update**) switching the entity to incremental mode (§3.5): read `WHERE col > last_watermark` via `dbtable` subquery; watermark on pg-meta; at-least-once; source deletes not captured. Also the first-choice parallel-read column (§4). |
+| `incremental_column` | string | no | full snapshot | Monotonically increasing **integral** source column — an autoincrement id or a source-maintained tech column such as sydafa's `_batch_id` (implicitly added to every table and bumped on every append **and update**); presence and integral type are validated at load time, and the watermark is a plain integer (date/timestamp incremental columns are a future feature, §10). Switches the entity to incremental mode (§3.5): read `WHERE col > last_watermark` via `dbtable` subquery; watermark on pg-meta; at-least-once; source deletes not captured. Also the first-choice parallel-read column (§4). |
 
 Example:
 
@@ -521,5 +521,6 @@ One branch `kodik/ingestion-raw-phase1`, one PR for the whole phase, commits per
 
 - **ods layer**: processing of raw tables — column selection, merge/upsert strategies, conformed models; reads raw, writes its own catalog.
 - **Kafka sources**: §3.6 — offset windows as the natural incremental column, Schema Registry schemas, flat topic entities.
+- **Date/timestamp incremental columns**: dialect-aware watermark literal rendering (Oracle `TO_TIMESTAMP`/`DATE` literals vs MSSQL string literals) plus timezone semantics of the stored watermark; Phase 1 incremental mode is integral-columns-only (§5.2).
 - Optional `__latest` views; table maintenance (`expire_snapshots`, `rewrite_data_files`); Spark worker/shuffle tuning; reject-vs-map for Kafka `-`/uppercase topic names.
 - Registry monitoring/dashboards; Dataset-driven Mart DAGs on the `raw://` assets; optional inter-table topology in the generator.
