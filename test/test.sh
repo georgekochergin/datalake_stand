@@ -76,6 +76,14 @@ trap cleanup EXIT INT TERM HUP
 
 cleanup
 
+echo "==> Генерация DAG-ов ингестии (ingestion/generate_dags.py)..."
+python3 ingestion/generate_dags.py
+gen_rc=$?
+if [ "$gen_rc" -ne 0 ]; then
+  echo "FAIL: Генерация DAG-ов завершилась с ошибкой."
+  exit "$gen_rc"
+fi
+
 echo "==> Подготовка изолированного дерева проекта в $TEST_WS..."
 mkdir -p "$TEST_WS/conf" "$TEST_WS/airflow" "$TEST_WS/spark" "$TEST_WS/trino"
 cp -R "$PROJECT_ROOT/conf/." "$TEST_WS/conf/"

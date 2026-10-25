@@ -351,12 +351,11 @@ The reader login is `sydafa`/`sydafa` (strictly SELECT, per the sydafa README). 
 
 ### 8.5 e2e scenario (Trino REST via stdlib `urllib`, same technique as the existing Airflow steps)
 
-After `update_source_{bank,broker}` succeed: trigger `ingest_bank` and `ingest_broker` (each mixes both modes: everything full-snapshot except `transactions`, incremental by `_batch_id`), poll to success, then per table:
+After `update_source_{bank,broker}` succeed, `run_flow.py` runs three ingest rounds and verifies everything through Trino (stdlib REST client for `POST /v1/statement`):
 
-- first run: `count(*)` equals the expected source count (dims 100/100/1000, fact 25000 — incremental entities bootstrap by reading everything); `count(distinct __process_id) = 1`; `max(__process_id)` identical across all tables of the run and greater than the previous run's;
-- second trigger with no source change: full-snapshot tables double (`count(*)` = 2× source) with the latest snapshot (`max(__load_dttm)`) still equal to the source count; incremental tables (`transactions`) append 0 rows and stay flat;
-- trigger after a source migration: snapshot tables append a full new snapshot; `transactions` appends only the migrated delta (rows with the new `__process_id` ≈ migrated counts) and the watermark advances in `table_watermarks`;
-- migrated source updates visible in the latest snapshot.
+- **run 1** (`ingest_bank` + `ingest_broker`, each mixes both modes — everything full-snapshot except `transactions`, incremental by `_batch_id`): per table `count(*) > 0`, `count(distinct __process_id) = 1`, and `max(__process_id)` identical across all 8 tables (one shared run id); latest-snapshot count (`max(__load_dttm)` filter) equals the total.
+- **run 2** (`ingest_bank` re-triggered, no source change): full-snapshot tables double with two portions; `transactions` appends nothing and keeps one portion — the read of the stored watermark gating the delta, proven end-to-end; latest snapshot of a snapshot table still equals its first-run count.
+- **run 3** (second `update_source_bank` migration, then `ingest_bank`): `clients` shows three portions with the newest snapshot larger than the first (source grew); `transactions` shows exactly two portions — its first portion intact (append-only history) plus a non-zero `_batch_id` delta, with total = history + delta.
 
 ### 8.6 Assumptions
 

@@ -8,10 +8,14 @@
 4. Исполнение и успешное завершение (state=success) DAG-ов обновления источников:
    - update_source_bank (All-or-Nothing миграция MSSQL)
    - update_source_broker (All-or-Nothing миграция Oracle)
+5. Исполнение DAG-ов ингестии ingest_bank / ingest_broker (raw-слой) и проверку
+   данных в Iceberg через Trino REST: append-only семантика, общий __process_id
+   на запуск, работа инкрементального режима по _batch_id (watermark).
 """
 from __future__ import annotations
 
 import ast
+import base64
 import json
 import os
 from pathlib import Path
@@ -27,6 +31,22 @@ SYDAFA = os.environ.get("SYDAFA_URL", "http://sydafa:8000")
 AIRFLOW = os.environ.get("AIRFLOW_URL", "http://airflow-webserver:8080")
 AIRFLOW_USER = os.environ.get("AIRFLOW_USER", "admin")
 AIRFLOW_PASSWORD = os.environ.get("AIRFLOW_PASSWORD", "admin")
+TRINO = os.environ.get("TRINO_URL", "https://trino:8443")
+TRINO_USER = os.environ.get("TRINO_USER", "admin")
+TRINO_PASSWORD = os.environ.get("TRINO_PASSWORD", "admin")
+
+RAW_SNAPSHOT_TABLES = [
+    "raw.bank.retail_bank__clients",
+    "raw.bank.retail_bank__accounts",
+    "raw.bank.retail_bank__deals",
+    "raw.broker.trading_core__clients",
+    "raw.broker.trading_core__accounts",
+    "raw.broker.trading_core__deals",
+]
+RAW_INCREMENTAL_TABLES = [
+    "raw.bank.retail_bank__transactions",
+    "raw.broker.trading_core__transactions",
+]
 
 _CTX = ssl.create_default_context()
 _CTX.check_hostname = False
@@ -197,6 +217,47 @@ def airflow_wait_run(token: str, dag_id: str, run_id: str, timeout: int = 300, n
         time.sleep(5)
     check((name or dag_id) + " -> success", "timeout:" + str(last), "success")
     return False
+
+
+def trino_query(sql: str, timeout: int = 120) -> list[list[Any]]:
+    """Выполняет SQL в Trino через REST (/v1/statement) и возвращает строки данных."""
+    auth = "Basic " + base64.b64encode(("%s:%s" % (TRINO_USER, TRINO_PASSWORD)).encode("utf-8")).decode("utf-8")
+    headers = {"Authorization": auth, "X-Trino-User": TRINO_USER, "Content-Type": "text/plain"}
+    code, raw = http("POST", TRINO + "/v1/statement", sql, headers, timeout=60)
+    if code != 200:
+        raise RuntimeError("trino statement %s: %s" % (code, raw[:300]))
+    deadline = time.time() + timeout
+    payload = json.loads(raw)
+    while payload.get("nextUri"):
+        if time.time() > deadline:
+            raise RuntimeError("trino query timeout: %s" % sql[:200])
+        state = payload.get("stats", {}).get("state")
+        if state == "FAILED":
+            error = payload.get("error", {}).get("message", "unknown trino error")
+            raise RuntimeError("trino failed: %s (%s)" % (error, sql[:200]))
+        code, raw = http("GET", payload["nextUri"], None, headers, timeout=60)
+        if code != 200:
+            raise RuntimeError("trino poll %s: %s" % (code, raw[:300]))
+        payload = json.loads(raw)
+        time.sleep(0.5)
+    if payload.get("stats", {}).get("state") == "FAILED":
+        error = payload.get("error", {}).get("message", "unknown trino error")
+        raise RuntimeError("trino failed: %s (%s)" % (error, sql[:200]))
+    return payload.get("data", [])
+
+
+def raw_stats(table: str) -> tuple[int, int, int]:
+    """(count, count distinct __process_id, max __process_id) сырой таблицы."""
+    rows = trino_query(
+        "SELECT count(*), count(DISTINCT __process_id), max(__process_id) FROM %s" % table
+    )
+    return int(rows[0][0]), int(rows[0][1]), int(rows[0][2])
+
+
+def raw_rows_with_process(table: str, process_id: int) -> int:
+    """Число строк, загруженных конкретным запуском."""
+    rows = trino_query("SELECT count(*) FROM %s WHERE __process_id = %d" % (table, process_id))
+    return int(rows[0][0])
 
 
 def validate_manifests_and_dags() -> None:
@@ -383,6 +444,26 @@ def validate_manifests_and_dags() -> None:
         "load_migration_operations" in c_broker and 'load_migration_operations("broker")' in c_broker and "SydafaMigrateOperator" in c_broker
     ), True)
 
+    generated_dir = ws / "airflow" / "dags" / "generated"
+    generated = sorted(generated_dir.glob("ingest__*.py")) if generated_dir.exists() else []
+    if generated:
+        check("generated DAG set", ",".join(p.name for p in generated), "ingest__bank.py,ingest__broker.py")
+        for path in generated:
+            try:
+                ast.parse(path.read_text(encoding="utf-8"))
+                check("generated DAG %s syntax valid" % path.name, True, True)
+            except Exception as e:
+                check("generated DAG %s syntax valid" % path.name, str(e), True)
+        bank_gen = (generated_dir / "ingest__bank.py").read_text(encoding="utf-8")
+        check("generated bank DAG structure", (
+            'dag_id="ingest_bank"' in bank_gen
+            and 'group_id="load_retail_bank__transactions"' in bank_gen
+            and 'incremental_column="_batch_id"' in bank_gen
+            and 'Asset("raw://bank/retail_bank.clients")' in bank_gen
+        ), True)
+    else:
+        print("WARN: сгенерированные DAG-и не найдены (запустите python3 ingestion/generate_dags.py)")
+
 
 def main() -> None:
     validate_manifests_and_dags()
@@ -450,6 +531,91 @@ def main() -> None:
     check("trigger update_source_broker", code, 200)
     broker_success = airflow_wait_run(token, "update_source_broker", run_id_broker, timeout=360, name="update_source_broker")
     check("update_source_broker completed successfully", broker_success, True)
+
+    print("\n==> Шаг 6: Регистрация и запуск DAG-ов ингестии (raw-слой), первая загрузка...")
+    for dag_id in ("ingest_bank", "ingest_broker"):
+        registered = airflow_wait_dag_registered(token, dag_id, timeout=240)
+        check("DAG %s registered in Airflow" % dag_id, registered, True)
+        if not registered:
+            print("FATAL: DAG %s не зарегистрирован (проверьте импорты плагина ingestion)" % dag_id)
+            return
+
+    stamp = str(int(time.time()))
+    for dag_id in ("ingest_bank", "ingest_broker"):
+        run_id = "e2e-ingest1-%s-%s" % (dag_id, stamp)
+        code, _ = airflow_trigger_retry(token, dag_id, run_id)
+        check("trigger %s (run 1)" % dag_id, code, 200)
+    run1_ok = True
+    for dag_id in ("ingest_bank", "ingest_broker"):
+        run_id = "e2e-ingest1-%s-%s" % (dag_id, stamp)
+        run1_ok = airflow_wait_run(token, dag_id, run_id, timeout=900, name=dag_id + " run 1") and run1_ok
+
+    print("\n==> Шаг 7: Проверка raw-таблиц в Trino (первая загрузка)...")
+    first_counts: dict[str, int] = {}
+    try:
+        max_pids = []
+        for table in RAW_SNAPSHOT_TABLES + RAW_INCREMENTAL_TABLES:
+            total, distinct_pids, max_pid = raw_stats(table)
+            first_counts[table] = total
+            check("%s: rows loaded" % table, total > 0, True)
+            check("%s: single process_id (one portion)" % table, distinct_pids, 1)
+            max_pids.append(max_pid)
+        check("all tables share the run's process_id", len(set(max_pids)), 1)
+        process_id_1 = max_pids[0]
+        rows = trino_query(
+            "SELECT count(*) FROM raw.bank.retail_bank__clients "
+            "WHERE __load_dttm = (SELECT max(__load_dttm) FROM raw.bank.retail_bank__clients)"
+        )
+        check("bank clients latest snapshot equals total (run 1)", int(rows[0][0]), first_counts["raw.bank.retail_bank__clients"])
+    except Exception as e:
+        check("raw tables query", str(e), "ok")
+
+    print("\n==> Шаг 8: Повторный ingest_bank без изменений источника (watermark gate)...")
+    run_id = "e2e-ingest2-bank-" + stamp
+    code, _ = airflow_trigger_retry(token, "ingest_bank", run_id)
+    check("trigger ingest_bank (run 2)", code, 200)
+    airflow_wait_run(token, "ingest_bank", run_id, timeout=900, name="ingest_bank run 2")
+    try:
+        for table in ("raw.bank.retail_bank__clients", "raw.bank.retail_bank__accounts", "raw.bank.retail_bank__deals"):
+            total, distinct_pids, _ = raw_stats(table)
+            check("%s: full-snapshot table doubles on re-run" % table, total, 2 * first_counts[table])
+            check("%s: two portions after re-run" % table, distinct_pids, 2)
+        total, distinct_pids, _ = raw_stats("raw.bank.retail_bank__transactions")
+        check("bank transactions: incremental appends nothing without source changes", total, first_counts["raw.bank.retail_bank__transactions"])
+        check("bank transactions: still one portion (watermark gate works)", distinct_pids, 1)
+        rows = trino_query(
+            "SELECT count(*) FROM raw.bank.retail_bank__clients "
+            "WHERE __load_dttm = (SELECT max(__load_dttm) FROM raw.bank.retail_bank__clients)"
+        )
+        check("bank clients latest snapshot equals first load count", int(rows[0][0]), first_counts["raw.bank.retail_bank__clients"])
+    except Exception as e:
+        check("raw tables query (run 2)", str(e), "ok")
+
+    print("\n==> Шаг 9: Миграция источника + третья загрузка (подхват дельты _batch_id)...")
+    run_id_mig2 = "e2e-run-bank2-" + stamp
+    code, _ = airflow_trigger_retry(token, "update_source_bank", run_id_mig2)
+    check("trigger update_source_bank (migration 2)", code, 200)
+    airflow_wait_run(token, "update_source_bank", run_id_mig2, timeout=360, name="update_source_bank migration 2")
+
+    run_id = "e2e-ingest3-bank-" + stamp
+    code, _ = airflow_trigger_retry(token, "ingest_bank", run_id)
+    check("trigger ingest_bank (run 3)", code, 200)
+    airflow_wait_run(token, "ingest_bank", run_id, timeout=900, name="ingest_bank run 3")
+    try:
+        total, distinct_pids, max_pid = raw_stats("raw.bank.retail_bank__clients")
+        check("bank clients: three portions after third run", distinct_pids, 3)
+        newest = raw_rows_with_process("raw.bank.retail_bank__clients", max_pid)
+        oldest = raw_rows_with_process("raw.bank.retail_bank__clients", process_id_1)
+        check("bank clients: newest snapshot larger than first (source grew)", newest > oldest, True)
+
+        total, distinct_pids, max_pid = raw_stats("raw.bank.retail_bank__transactions")
+        check("bank transactions: two portions (initial + delta)", distinct_pids, 2)
+        check("bank transactions: history of first portion intact", raw_rows_with_process("raw.bank.retail_bank__transactions", process_id_1), first_counts["raw.bank.retail_bank__transactions"])
+        delta = raw_rows_with_process("raw.bank.retail_bank__transactions", max_pid)
+        check("bank transactions: delta picked up by _batch_id watermark", delta > 0, True)
+        check("bank transactions: total equals history + delta", total, first_counts["raw.bank.retail_bank__transactions"] + delta)
+    except Exception as e:
+        check("raw tables query (run 3)", str(e), "ok")
 
 
 if __name__ == "__main__":
