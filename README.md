@@ -28,8 +28,8 @@ flowchart TB
     ANALYST["Аналитик\n(Trino CLI / BI-инструмент)"]
 
     subgraph Sources["Источники данных (оркестрируются sydafa)"]
-        MSSQL[("sydafa-src-mssql-mssql:1433\nmcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04\nDB: sydafa\nuser: sydafa (только чтение)")]
-        ORA[("sydafa-src-oracle-oracle:1521\ngvenzl/oracle-free:23-slim-faststart\nPDB: sydafa\nuser: sydafa (только чтение)")]
+        MSSQL[("sydafa-src-mssql-bank:1433\nmcr.microsoft.com/mssql/server:2022-CU27-ubuntu-22.04\nDB: sydafa\nuser: sydafa (только чтение)")]
+        ORA[("sydafa-src-oracle-broker:1521\ngvenzl/oracle-free:23-slim-faststart\nPDB: sydafa\nuser: sydafa (только чтение)")]
     end
 
     subgraph SydafaService["Эмулятор источников (подключаемый модуль sydafa)"]
@@ -191,7 +191,7 @@ docker compose up -d --build
 Сервис **sydafa** (Synthetic Data Factory & DB Orchestrator) вынесен в отдельный независимый репозиторий [georgekochergin/sydafa](https://github.com/georgekochergin/sydafa) и поставляется в виде Docker-образа (`ghcr.io/georgekochergin/sydafa:latest` или локальный `sydafa:latest`).
 
 На данном стенде `sydafa` эмулирует реляционные источники данных:
-- Лениво оркестрирует контейнеры СУБД `sydafa-src-mssql-mssql` / `sydafa-src-oracle-oracle` через Docker API (данные живут в named volume);
+- Лениво оркестрирует контейнеры СУБД `sydafa-src-mssql-bank` / `sydafa-src-oracle-broker` через Docker API (данные живут в named volume);
 - Создаёт рабочую базу/PDB `sydafa` и читателя `sydafa` / `sydafa` (только чтение); админский доступ извне заблокирован;
 - Внешний доступ для DBeaver: порт `14330` задан в манифесте `sources.json`;
 - REST API: транзакционный DDL/DML через `POST /sources/{source}/migrate` и lifecycle (`activate` / `deactivate` / `status`).

@@ -342,8 +342,8 @@ Read (full or `WHERE col > watermark` via subquery, auto-parallelized) → add `
 ### 8.4 Airflow connections (compose `&airflow-env`)
 
 ```
-AIRFLOW_CONN_BANK_SOURCE:     "mssql://sydafa:sydafa@sydafa-src-mssql-mssql:1433/sydafa"
-AIRFLOW_CONN_BROKER_SOURCE:   "oracle://sydafa:sydafa@sydafa-src-oracle-oracle:1521/sydafa"
+AIRFLOW_CONN_BANK_SOURCE:     "mssql://sydafa:sydafa@sydafa-src-mssql-bank:1433/sydafa"
+AIRFLOW_CONN_BROKER_SOURCE:   "oracle://sydafa:sydafa@sydafa-src-oracle-broker:1521/sydafa"
 AIRFLOW_CONN_INGESTION_META:  "postgres://${PG_META_USER}:${PG_META_PASSWORD}@pg-meta:5432/meta"
 ```
 
@@ -504,7 +504,7 @@ curl -X POST "http://localhost:8090/sources/bank/activate?ttl_minutes=15"
 docker compose exec airflow-scheduler spark-submit \
   --master spark://spark-master:7077 --deploy-mode client \
   /opt/spark-jobs/raw/load_entity.py \
-  --jdbc-url "jdbc:sqlserver://sydafa-src-mssql-mssql:1433;databaseName=sydafa;encrypt=false" \
+  --jdbc-url "jdbc:sqlserver://sydafa-src-mssql-bank:1433;databaseName=sydafa;encrypt=false" \
   --jdbc-user sydafa --jdbc-password sydafa \
   --source-table retail_bank.clients \
   --target-table raw.bank.retail_bank__clients \
