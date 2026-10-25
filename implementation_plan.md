@@ -342,12 +342,12 @@ Read (full or `WHERE col > watermark` via subquery, auto-parallelized) → add `
 ### 8.4 Airflow connections (compose `&airflow-env`)
 
 ```
-AIRFLOW_CONN_BANK_SOURCE:     "mssql://sydafa:<pass>@sydafa-src-mssql-mssql:1433/retail_bank"
-AIRFLOW_CONN_BROKER_SOURCE:   "oracle://sydafa:<pass>@sydafa-src-oracle-oracle:1521/<service>"
-AIRFLOW_CONN_INGESTION_META:  "postgres://<user>:<pass>@pg-meta:5432/meta"
+AIRFLOW_CONN_BANK_SOURCE:     "mssql://sydafa:sydafa@sydafa-src-mssql-mssql:1433/sydafa"
+AIRFLOW_CONN_BROKER_SOURCE:   "oracle://sydafa:sydafa@sydafa-src-oracle-oracle:1521/sydafa"
+AIRFLOW_CONN_INGESTION_META:  "postgres://${PG_META_USER}:${PG_META_PASSWORD}@pg-meta:5432/meta"
 ```
 
-The operator renders JDBC URLs from Connection fields (mssql → `jdbc:sqlserver://host:1433;databaseName=<schema>;encrypt=false`; oracle → `jdbc:oracle:thin:@//host:1521/<service>`) and asserts the scheme matches the declared `type`.
+The reader login is `sydafa`/`sydafa` (strictly SELECT, per the sydafa README). The working database name (MSSQL) and the service name (Oracle) are both **`sydafa`** — `retail_bank`/`trading_core` are schemas inside it, so the JDBC URLs use `databaseName=sydafa` / service `sydafa`. The operator renders the URL from Connection fields (mssql → `jdbc:sqlserver://host:1433;databaseName=<schema-part>;encrypt=false`; oracle → `jdbc:oracle:thin:@//host:1521/<schema-part>`) and fails-fast when the connection scheme is not a supported JDBC dialect.
 
 ### 8.5 e2e scenario (Trino REST via stdlib `urllib`, same technique as the existing Airflow steps)
 
@@ -488,7 +488,8 @@ def main(argv: list[str] | None = None) -> None
 | `test_naming.py` | §2 examples, all §9.2 error cases, uniqueness, composition |
 | `test_manifest.py` | valid objects; unknown keys; missing source; empty entities; missing `fqn`; duplicate FQN; `incremental_column` valid/invalid identifier; lazy-YAML load (`skipUnless`) |
 | `test_load_entity.py` | `parse_args` incl. incremental args, bad `--process-id`; `resolve_driver` 3 cases; `validate_target_table` ok/wrong prefix/2/4 parts/bad identifier; `build_read_query` full / incremental / bootstrap (no watermark); `pick_partition_column` priority + skip + none |
-| `test_code_style.py` | zero `tokenize.COMMENT` tokens in `ingestion/` + `spark/raw/` (shebang exempt) |
+| `test_code_style.py` | zero `tokenize.COMMENT` tokens in `ingestion/` + `spark/raw/` + `airflow/plugins/ingestion/` (shebang exempt) |
+| `test_plugin_syntax.py` | ast-parse all `airflow/plugins/ingestion/*.py` (Airflow imports resolve only inside containers; behavior is covered by e2e) |
 
 Tests put the repo root on `sys.path`; `load_entity.py` loads via `importlib.util.spec_from_file_location`.
 
@@ -504,8 +505,8 @@ curl -X POST "http://localhost:8090/sources/bank/activate?ttl_minutes=15"
 docker compose exec airflow-scheduler spark-submit \
   --master spark://spark-master:7077 --deploy-mode client \
   /opt/spark-jobs/raw/load_entity.py \
-  --jdbc-url "jdbc:sqlserver://sydafa-src-mssql-mssql:1433;databaseName=retail_bank;encrypt=false" \
-  --jdbc-user sydafa --jdbc-password "<reader password from conf/sydafa/sources.json>" \
+  --jdbc-url "jdbc:sqlserver://sydafa-src-mssql-mssql:1433;databaseName=sydafa;encrypt=false" \
+  --jdbc-user sydafa --jdbc-password sydafa \
   --source-table retail_bank.clients \
   --target-table raw.bank.retail_bank__clients \
   --process-id 1

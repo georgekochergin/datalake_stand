@@ -178,6 +178,9 @@ services:
       AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow-webserver:8080/execution/"
       AIRFLOW__API_AUTH__JWT_SECRET: "datalake-stand-test-jwt-secret-0123456789abcdef"
       AIRFLOW_CONN_SYDAFA_DEFAULT: "http://sydafa:8000"
+      AIRFLOW_CONN_BANK_SOURCE: "mssql://sydafa:sydafa@sydafa-src-mssql-mssql:1433/sydafa"
+      AIRFLOW_CONN_BROKER_SOURCE: "oracle://sydafa:sydafa@sydafa-src-oracle-oracle:1521/sydafa"
+      AIRFLOW_CONN_INGESTION_META: "postgres://${PG_META_USER}:${PG_META_PASSWORD}@pg-meta:5432/meta"
       SYDAFA_URL: http://sydafa:8000
     depends_on:
       airflow-postgres: {condition: service_healthy}
