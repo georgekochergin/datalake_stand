@@ -15,6 +15,11 @@ services:
       retries: 30
       start_period: 30s
 
+  pg-meta:
+    volumes: !override
+      - pg_meta_data:/var/lib/postgresql/data
+      - ./test/.workspace/conf/pg-meta/init:/docker-entrypoint-initdb.d:ro
+
   nessie:
     ports: !override []
 

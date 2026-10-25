@@ -59,14 +59,13 @@ def log_task_failed(
 
 
 class GenerateProcessIdOperator(BaseOperator):
-    """Bootstrap the registry, allocate the run's __process_id, log dagrun START, push XCom."""
+    """Allocate the run's __process_id, log dagrun START, push XCom."""
 
     def __init__(self, task_id="generate_process_id", pg_conn_id="ingestion_meta", **kwargs):
         super().__init__(task_id=task_id, **kwargs)
         self.pg_conn_id = pg_conn_id
 
     def execute(self, context):
-        registry.bootstrap(self.pg_conn_id)
         process_id = registry.next_process_id(self.pg_conn_id)
         dag_run = context["dag_run"]
         registry.log_dagrun(

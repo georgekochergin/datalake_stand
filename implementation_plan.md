@@ -238,7 +238,7 @@ Block notation only (`-` + newline) — no flow lists (`[a, b]`). Scalars are pr
 DAG ingest_bank   (schedule from YAML (unset = manual), catchup=False, max_active_runs=1, tags from YAML,
                    on_success/on_failure callbacks → append dagruns_log END/FAILED)
 ├── activate_source      SydafaActivateOperator (conn_id=sydafa_default, source=bank, ttl_minutes=15)
-├── generate_process_id  bootstrap DDL → nextval → INSERT airflow_dagruns_log(START) → XCom push
+├── generate_process_id  nextval → INSERT airflow_dagruns_log(START) → XCom push
 └── TaskGroup "ingest_group"
     ├── TaskGroup "load_retail_bank__clients"
     │   ├── log_start   INSERT airflow_tasks_log(START)
@@ -258,7 +258,7 @@ activate_source >> generate_process_id >> each entity group; inside a group: log
 
 ### 7.1 Instance
 
-Dedicated Postgres service (db `meta`, schema `ingestion`), decoupled from both the lake and Nessie's own `pg-catalog`: the sequence cannot live in the lake (no atomic increment on object storage), and operational telemetry must survive lake outages (independent failure domain from Nessie/Trino/S3/Spark). All operational state lives here: the sequence, DAG/task lifecycle logs, incremental watermarks. DDL is self-bootstrapped (idempotent `CREATE … IF NOT EXISTS` inside the first task). Access from Airflow via `PostgresHook` (provider ships with the image).
+Dedicated Postgres service (db `meta`, schema `ingestion`), decoupled from both the lake and Nessie's own `pg-catalog`: the sequence cannot live in the lake (no atomic increment on object storage), and operational telemetry must survive lake outages (independent failure domain from Nessie/Trino/S3/Spark). All operational state lives here: the sequence, DAG/task lifecycle logs, incremental watermarks. DDL is applied by the pg-meta container itself on first startup (`conf/pg-meta/init/` mounted at `/docker-entrypoint-initdb.d`), so the operational schema exists before any task runs and runtime code never issues DDL; changing the DDL requires re-initializing the `pg_meta_data` volume. Access from Airflow via `PostgresHook` (provider ships with the image).
 
 ### 7.2 Tables
 
