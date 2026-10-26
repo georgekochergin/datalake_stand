@@ -3,7 +3,6 @@
 from functools import partial
 
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
-from airflow.providers.trino.hooks.trino import TrinoHook
 from airflow.sdk import BaseHook, BaseOperator
 
 from . import registry
@@ -46,6 +45,22 @@ def _validate_process_id(value) -> int:
     raise ValueError("process_id must be a positive integer from generate_process_id")
 
 
+def validate_run_conf(conf, entities):
+    """Validate manual overrides before source activation, including API triggers."""
+    conf = conf or {}
+    if not isinstance(conf, dict) or set(conf) - {"force_full_snapshot_fqns", "reason"}:
+        raise ValueError("unknown or invalid ingestion run configuration")
+    fqns = conf.get("force_full_snapshot_fqns", [])
+    reason = conf.get("reason", "")
+    if not isinstance(fqns, list) or any(not isinstance(fqn, str) for fqn in fqns):
+        raise ValueError("force_full_snapshot_fqns must be an array of FQNs")
+    if len(set(fqns)) != len(fqns) or set(fqns) - set(entities):
+        raise ValueError("duplicate or unknown FQN in force_full_snapshot_fqns")
+    if not isinstance(reason, str) or (fqns and not reason.strip()):
+        raise ValueError("manual full snapshot requires a non-empty reason")
+    return fqns, reason
+
+
 def log_task_failed(
     context,
     source_id: str,
@@ -70,22 +85,18 @@ def log_task_failed(
 class GenerateProcessIdOperator(BaseOperator):
     """Allocate the run's __process_id, log dagrun START, push XCom."""
 
-    def __init__(self, task_id="generate_process_id", pg_conn_id="ingestion_meta", **kwargs):
+    def __init__(self, task_id="generate_process_id", pg_conn_id="ingestion_meta", entities=(), **kwargs):
         super().__init__(task_id=task_id, **kwargs)
         self.pg_conn_id = pg_conn_id
+        self.entities = entities
 
     def execute(self, context):
-        process_id = registry.next_process_id(self.pg_conn_id)
         dag_run = context["dag_run"]
-        registry.log_dagrun(
-            pg_conn_id=self.pg_conn_id,
-            process_id=process_id,
-            dag_id=dag_run.dag_id,
-            run_id=dag_run.run_id,
-            execution_date=dag_run.logical_date,
-            status="START",
+        validate_run_conf(dag_run.conf, self.entities)
+        return registry.get_or_create_process_id(
+            self.pg_conn_id, dag_id=dag_run.dag_id, run_id=dag_run.run_id,
+            execution_date=dag_run.logical_date
         )
-        return process_id
 
 
 def _dagrun_event(status: str, context) -> None:
@@ -115,7 +126,7 @@ def dagrun_failure_callback(context) -> None:
 
 
 class TableLogOperator(BaseOperator):
-    """Append a task lifecycle event; on END advance the watermark for incremental entities."""
+    """Append lifecycle events after managed loading has finalized its own state."""
 
     template_fields = ("process_id",)
 
@@ -143,19 +154,6 @@ class TableLogOperator(BaseOperator):
 
     def execute(self, context):
         process_id = _validate_process_id(self.process_id)
-        if self.status == "END" and self.incremental_column:
-            watermark = TrinoHook(trino_conn_id=self.trino_conn_id).get_first(
-                f"SELECT max({self.incremental_column}) FROM {self.datalake_table} "
-                f"WHERE __process_id = {process_id}"
-            )[0]
-            if watermark is not None:
-                registry.set_watermark(
-                    pg_conn_id=self.pg_conn_id,
-                    source_id=self.source_id,
-                    entity_fqn=self.entity_fqn,
-                    watermark_value=watermark,
-                    process_id=process_id,
-                )
         registry.log_task(
             pg_conn_id=self.pg_conn_id,
             process_id=process_id,
@@ -180,10 +178,17 @@ class IngestAppendOperator(SparkSubmitOperator):
         source_type: str = "rdbms",
         parallelism: bool = True,
         num_partitions: int = 4,
+        lookback_size: int = 0,
+        lookback_unit: str | None = None,
+        lookback_specified: bool = False,
         **kwargs,
     ):
         if not isinstance(source_type, str):
             raise ValueError("source_type must be a string")
+        if type(lookback_size) is not int or lookback_size < 0:
+            raise ValueError("lookback_size must be a nonnegative integer")
+        if type(lookback_specified) is not bool:
+            raise ValueError("lookback_specified must be a boolean")
         if type(parallelism) is not bool:
             raise ValueError("parallelism must be a boolean")
         if type(num_partitions) is not int or num_partitions <= 0:
@@ -203,6 +208,9 @@ class IngestAppendOperator(SparkSubmitOperator):
         self.source_type = source_type
         self.parallelism = parallelism
         self.num_partitions = num_partitions
+        self.lookback_size = lookback_size
+        self.lookback_unit = lookback_unit
+        self.lookback_specified = lookback_specified
         if self.on_failure_callback is None:
             self.on_failure_callback = partial(
                 log_task_failed,
@@ -238,10 +246,20 @@ class IngestAppendOperator(SparkSubmitOperator):
         ]
         if not self.parallelism:
             application_args.append("--no-parallelism")
+        dag_run = context["dag_run"]
+        conf = dag_run.conf or {}
+        meta = BaseHook.get_connection(self.pg_conn_id)
+        self.env_vars = dict(self.env_vars or {}, PGHOST=meta.host, PGPORT=str(meta.port or 5432),
+                             PGDATABASE=meta.schema, PGUSER=meta.login, PGPASSWORD=meta.password)
+        application_args += ["--source-id", self.source_id, "--dag-id", dag_run.dag_id,
+                             "--run-id", dag_run.run_id, "--lookback-size", str(self.lookback_size)]
+        if self.lookback_unit:
+            application_args += ["--lookback-unit", self.lookback_unit]
+        if self.lookback_specified:
+            application_args.append("--lookback-given")
+        if self.fqn in conf.get("force_full_snapshot_fqns", []):
+            application_args += ["--force-full", "--reason", conf["reason"]]
         if self.incremental_column:
             application_args += ["--incremental-column", self.incremental_column]
-            watermark = registry.get_watermark(self.pg_conn_id, self.source_id, self.fqn)
-            if watermark is not None:
-                application_args += ["--watermark-value", watermark]
         self.application_args = application_args
         super().execute(context)

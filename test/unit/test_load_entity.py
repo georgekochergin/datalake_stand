@@ -52,6 +52,29 @@ class TestParseArgs(unittest.TestCase):
         self.assertEqual(args.incremental_column, "_batch_id")
         self.assertEqual(args.watermark_value, "100")
 
+    def test_managed_incremental_args(self):
+        args = load_entity.parse_args(build_argv(
+            "--source-id", "bank", "--dag-id", "dag", "--run-id", "run",
+            "--incremental-column", "updated_at", "--lookback-size", "3", "--lookback-unit", "h",
+            "--lookback-given", "--force-full", "--reason", "repair",
+        ))
+        self.assertEqual((args.source_id, args.dag_id, args.run_id), ("bank", "dag", "run"))
+        self.assertEqual((args.lookback_size, args.lookback_unit), (3, "h"))
+        self.assertTrue(args.lookback_given)
+        self.assertTrue(args.force_full)
+        self.assertEqual(args.reason, "repair")
+        self.assertIsNone(args.watermark_value)
+
+    def test_lookback_given_defaults_off(self):
+        args = load_entity.parse_args(build_argv("--source-id", "bank"))
+        self.assertFalse(args.lookback_given)
+        self.assertEqual(args.lookback_size, 0)
+        self.assertIsNone(args.lookback_unit)
+
+    def test_unknown_lookback_unit_rejected(self):
+        with self.assertRaises(SystemExit):
+            load_entity.parse_args(build_argv("--lookback-unit", "minutes"))
+
     def test_missing_required_argument(self):
         with self.assertRaises(SystemExit):
             load_entity.parse_args(build_argv()[2:])
@@ -261,7 +284,7 @@ class TestBuildCreateTableSql(unittest.TestCase):
             ddl,
             "CREATE TABLE raw.bank.retail_bank__clients "
             "(`client_id` bigint, `full_name` string, "
-            "`__load_dttm` timestamp_ltz, `__process_id` bigint) USING iceberg "
+            "`__load_dttm` timestamp_ltz, `__process_id` bigint, `__batch_id` bigint) USING iceberg "
             "PARTITIONED BY (days(`__load_dttm`)) "
             "TBLPROPERTIES ('write.spark.accept-any-schema'='true')",
         )
@@ -422,13 +445,41 @@ class TestMain(unittest.TestCase):
                 self.run_loader(("--incremental-column", "_batch_id"), schema)
 
     def test_metadata_collision_still_rejected_for_empty_source(self):
-        for name in ("__process_id", "__load_dttm"):
+        for name in ("__process_id", "__load_dttm", "__batch_id", "__extract_position"):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "collides"):
                 self.run_loader(("--no-parallelism",), _FakeSchema(_FakeField(name, _FakeType("long"))))
 
 
+class TestOracleUtcProjection(unittest.TestCase):
+    """Timezone-column rewriting engages only for the Oracle dialect."""
+
+    def test_non_oracle_dialects_keep_plain_select(self):
+        args = types.SimpleNamespace(jdbc_url="jdbc:sqlserver://host;databaseName=db")
+        self.assertIsNone(load_entity.oracle_utc_projection(None, args))
+        args = types.SimpleNamespace(jdbc_url="jdbc:oracle:thin:@//host:1521/db")
+        with self.assertRaises(Exception):
+            load_entity.oracle_utc_projection(None, args)
+
+
+class TestEmptyIncrementalWindow(unittest.TestCase):
+    """Only a zero-lookback window with equal typed bounds is provably empty."""
+
+    def batch(self, mode="incremental", lower="10", upper="10"):
+        return {"mode": mode, "lower_bound": lower, "upper_bound": upper}
+
+    def test_equal_bounds_with_lookback_gap_is_empty(self):
+        self.assertTrue(load_entity.empty_incremental_window(self.batch()))
+        self.assertTrue(load_entity.empty_incremental_window(self.batch(lower="2026-10-26", upper="2026-10-26")))
+
+    def test_strict_window_with_distinct_bounds_is_not_empty(self):
+        for changes in ({"lower": "7"}, {"upper": "12"}, {"lower": None}, {"lower": None, "upper": None},
+                        {"mode": "full_snapshot"}, {"mode": "full_snapshot", "lower": None, "upper": None}):
+            with self.subTest(changes=changes):
+                self.assertFalse(load_entity.empty_incremental_window(self.batch(**changes)))
+
+
 class TestValidateIncrementalColumn(unittest.TestCase):
-    """Existence and integral-type checks on the incremental column."""
+    """Existence and integral or temporal type checks on the incremental column."""
 
     def schema_with(self, data_type):
         return _FakeSchema(
@@ -459,8 +510,13 @@ class TestValidateIncrementalColumn(unittest.TestCase):
                 self.schema_with(_FakeType("decimal", scale=2)), "_batch_id"
             )
 
-    def test_non_numeric_types_rejected(self):
-        for type_name in ("string", "date", "timestamp", "boolean", "double"):
+    def test_temporal_types_accepted(self):
+        for type_name in ("date", "timestamp", "timestamp_ntz"):
+            with self.subTest(type_name=type_name):
+                load_entity.validate_incremental_column(self.schema_with(_FakeType(type_name)), "_batch_id")
+
+    def test_unsupported_types_rejected(self):
+        for type_name in ("string", "boolean", "double", "float", "binary"):
             with self.assertRaises(ValueError):
                 load_entity.validate_incremental_column(
                     self.schema_with(_FakeType(type_name)), "_batch_id"

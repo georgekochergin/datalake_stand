@@ -24,7 +24,8 @@ PIPELINE = PipelineManifest(
     tags=("ingestion", "bank"),
     entities=(
         EntityConfig("retail_bank.clients", "retail_bank__clients", None),
-        EntityConfig("retail_bank.transactions", "retail_bank__transactions", "_batch_id"),
+        EntityConfig("retail_bank.transactions", "retail_bank__transactions", "_batch_id", lookback_size=12,
+                     lookback_unit="h", lookback_specified=True),
     ),
 )
 
@@ -47,7 +48,13 @@ class TestGenerateDagSource(unittest.TestCase):
     def test_pre_pipeline_tasks(self):
         self.assertIn('source="bank"', self.source)
         self.assertIn("ttl_minutes=15", self.source)
-        self.assertIn('GenerateProcessIdOperator(task_id="generate_process_id")', self.source)
+        self.assertIn('GenerateProcessIdOperator(task_id="generate_process_id", entities=', self.source)
+        self.assertIn("generate_process_id >> activate_source >> ingest_group", self.source)
+
+    def test_manual_snapshot_params_restrict_entities(self):
+        self.assertIn("uniqueItems=True", self.source)
+        self.assertIn("'enum': ['retail_bank.clients', 'retail_bank.transactions']", self.source)
+        self.assertIn("'reason': Param('', type='string')", self.source)
 
     def test_entity_groups_and_assets(self):
         self.assertIn('group_id="load_retail_bank__clients"', self.source)
@@ -56,6 +63,18 @@ class TestGenerateDagSource(unittest.TestCase):
         self.assertIn('Asset("raw://bank/retail_bank.transactions")', self.source)
         self.assertIn('datalake_table="raw.bank.retail_bank__transactions"', self.source)
 
+    def test_assets_are_published_only_by_end_logging(self):
+        import ast
+
+        calls = [node for node in ast.walk(ast.parse(self.source)) if isinstance(node, ast.Call)]
+        publishers = [node for node in calls if any(keyword.arg == "outlets" for keyword in node.keywords)]
+        self.assertEqual(len(publishers), 2)
+        for node in publishers:
+            self.assertEqual(node.func.id, "TableLogOperator")
+            keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+            self.assertEqual(ast.literal_eval(keywords["task_id"]), "log_end")
+            self.assertEqual(ast.literal_eval(keywords["status"]), "END")
+
     def test_load_tasks_share_pool(self):
         self.assertIn('pool="default_pool"', self.source)
         self.assertEqual(self.source.count('pool_slots=1'), 2)
@@ -63,6 +82,10 @@ class TestGenerateDagSource(unittest.TestCase):
     def test_incremental_column_only_where_configured(self):
         self.assertEqual(self.source.count('incremental_column="_batch_id"'), 2)
         self.assertIn('entity_fqn="retail_bank.clients"', self.source)
+        self.assertEqual(self.source.count("lookback_size=12"), 1)
+        self.assertEqual(self.source.count("lookback_unit='h'"), 1)
+        self.assertEqual(self.source.count("lookback_specified=True"), 1)
+        self.assertNotIn("lookback_specified=False", self.source)
 
     def test_no_hash_comments(self):
         self.assertNotIn("\n#", self.source)

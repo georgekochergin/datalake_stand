@@ -102,7 +102,7 @@ class TestLoadPipeline(unittest.TestCase):
             "entities:\n"
             "  - fqn: retail_bank.clients\n"
             "  - fqn: retail_bank.transactions\n"
-            "    incremental_column: transaction_id\n"
+            "    incremental: {source_column: transaction_id}\n"
         )
         pipeline = manifest.load_pipeline(path)
         self.assertEqual(pipeline.source_id, "bank")
@@ -148,7 +148,7 @@ class TestLoadPipeline(unittest.TestCase):
         path = write_temp_yaml(
             "source_id: bank\n"
             "entities:\n"
-            "  - incremental_column: client_id\n"
+            "  - incremental: {source_column: client_id}\n"
         )
         with self.assertRaises(ValueError):
             manifest.load_pipeline(path)
@@ -181,7 +181,7 @@ class TestLoadPipeline(unittest.TestCase):
             "source_id: bank\n"
             "entities:\n"
             "  - fqn: retail_bank.transactions\n"
-            "    incremental_column: _batch_id\n"
+            "    incremental: {source_column: _batch_id}\n"
         )
         pipeline = manifest.load_pipeline(path)
         self.assertEqual(pipeline.entities[0].incremental_column, "_batch_id")
@@ -192,7 +192,7 @@ class TestLoadPipeline(unittest.TestCase):
             "source_id: bank\n"
             "entities:\n"
             "  - fqn: retail_bank.clients\n"
-            "    incremental_column: Client-Id\n"
+            "    incremental: {source_column: Client-Id}\n"
         )
         with self.assertRaises(ValueError):
             manifest.load_pipeline(path)

@@ -5,7 +5,8 @@ tags:
   - main
 entities:
   - fqn: trading_core.transactions
-    incremental_column: _batch_id
+    incremental:
+      source_column: _batch_id
     airflow:
       pool:
         name: ingest_loads

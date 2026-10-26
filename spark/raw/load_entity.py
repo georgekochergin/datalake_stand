@@ -1,26 +1,21 @@
-"""Append-only entity loader: JDBC source -> raw-layer Iceberg with metadata columns.
+"""Append JDBC data to Iceberg with persisted, typed extraction batches.
 
-Loads one entity per invocation. Reads the source over JDBC (full snapshot
-by default, or an incremental slice above a numeric watermark), tags every
-row with __load_dttm/__process_id and appends into the raw catalog. The
-first load creates the table partitioned by days(__load_dttm) with the
-write.spark.accept-any-schema property; every later load appends with the
-mergeSchema option. Incremental mode requires an integral incremental
-column (the watermark is a plain integer); presence and type of the column
-are validated on every load. The module is self-contained: it runs inside
-Spark containers where only the spark/ tree is mounted, so it must not
-import from the ingestion package; PySpark is imported lazily so pure
-helpers stay testable without a Spark installation.
+Managed Airflow execution plans fixed source bounds in pg-meta, preserves
+batch identity across retries and atomically finalizes its watermark.
+Repeated appends remain valid at-least-once behavior. Pure helpers import
+without Spark; managed execution uses the registry mounted with Airflow.
 """
 
 import argparse
 import logging
 import re
+import sys
 from decimal import Decimal
 
 CATALOG = "raw"
 METADATA_DTTM = "__load_dttm"
 METADATA_PID = "__process_id"
+METADATA_BATCH = "__batch_id"
 
 IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 COLUMN_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -67,6 +62,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--partition-column")
     parser.add_argument("--num-partitions", type=int, default=4)
     parser.add_argument("--no-parallelism", action="store_true")
+    parser.add_argument("--source-id")
+    parser.add_argument("--dag-id")
+    parser.add_argument("--run-id")
+    parser.add_argument("--lookback-size", type=int, default=0)
+    parser.add_argument("--lookback-unit", choices=("h", "d"))
+    parser.add_argument("--lookback-given", action="store_true")
+    parser.add_argument("--force-full", action="store_true")
+    parser.add_argument("--reason")
     args = parser.parse_args(argv)
     if args.process_id <= 0:
         raise ValueError(f"--process-id must be a positive integer (got {args.process_id})")
@@ -162,11 +165,12 @@ def build_create_table_sql(target: str, columns: list[tuple[str, str]]) -> str:
     validate_target_table(target)
     rendered: list[str] = []
     for name, ddl_type in columns:
-        if name in (METADATA_DTTM, METADATA_PID):
+        if name in (METADATA_DTTM, METADATA_PID, METADATA_BATCH, "__extract_position"):
             raise ValueError(f"source column {name!r} collides with a metadata column")
         rendered.append(f"{quote_identifier(name)} {ddl_type}")
     rendered.append(f"{quote_identifier(METADATA_DTTM)} timestamp_ltz")
     rendered.append(f"{quote_identifier(METADATA_PID)} bigint")
+    rendered.append(f"{quote_identifier(METADATA_BATCH)} bigint")
     joined = ", ".join(rendered)
     return (
         f"CREATE TABLE {target} ({joined}) USING iceberg "
@@ -184,7 +188,7 @@ def validate_incremental_column(schema, incremental_column: str) -> None:
         )
     data_type = field.dataType
     type_name = data_type.typeName()
-    if type_name not in ("byte", "short", "integer", "long") and not (
+    if type_name not in ("byte", "short", "integer", "long", "date", "timestamp", "timestamp_ntz") and not (
         type_name == "decimal" and data_type.scale == 0
     ):
         raise ValueError(
@@ -342,6 +346,7 @@ def _jdbc_reader(spark, args, read_query):
         .option("user", args.jdbc_user)
         .option("password", args.jdbc_password)
         .option("driver", resolve_driver(args.jdbc_url))
+        .option("preferTimestampNTZ", "true")
     )
 
 
@@ -378,6 +383,9 @@ def main(argv: list[str] | None = None) -> None:
     namespace, _ = validate_target_table(args.target_table)
     spark = SparkSession.builder.appName(f"ingest-{args.target_table}").getOrCreate()
     try:
+        if args.source_id:
+            managed_load(spark, args)
+            return
         spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{namespace}")
         read_query = build_read_query(
             args.source_table, args.incremental_column, args.watermark_value, args.jdbc_url
@@ -429,6 +437,235 @@ def main(argv: list[str] | None = None) -> None:
         frame.unpersist()
     finally:
         spark.stop()
+
+
+def position_expression(column, kind, jdbc_url):
+    """Render a lossless source-side temporal string before Spark timestamp conversion."""
+    if kind.startswith("timestamp"):
+        if jdbc_url.startswith("jdbc:oracle:"):
+            value = f"SYS_EXTRACT_UTC({column})" if "instant" in kind else column
+            precision = int(kind.split("(")[1].rstrip(")"))
+            fraction = f".FF{precision}" if precision else ""
+            suffix = '\"Z\"' if "instant" in kind else ""
+            return f"TO_CHAR({value}, 'YYYY-MM-DD\"T\"HH24:MI:SS{fraction}{suffix}')"
+        precision = int(kind.split("(")[1].rstrip(")"))
+        value = f"SWITCHOFFSET({column}, '+00:00')" if "instant" in kind else column
+        expression = f"CONVERT(char(19), CAST({value} AS datetime2({precision})), 126)"
+        if precision:
+            expression += f" + '.' + LEFT(RIGHT('000000000' + CAST(DATEPART(nanosecond, {value}) AS varchar(9)), 9), {precision})"
+        return expression + (
+            " + 'Z'" if "instant" in kind else ""
+        )
+    return column
+
+
+def empty_incremental_window(batch) -> bool:
+    """True when persisted bounds prove the strict window contains no rows.
+
+    Only a zero-lookback regular batch with equal typed bounds reaches this
+    state: lower = watermark - 0 and upper = source MAX = watermark.
+    """
+    return (
+        batch["mode"] == "incremental"
+        and batch["upper_bound"] is not None
+        and batch["lower_bound"] == batch["upper_bound"]
+    )
+
+
+def source_position(spark, args, inspect_only=False):
+    """Inspect original JDBC type and obtain exact MAX plus NULL/empty diagnostics."""
+    import extraction
+
+    connection = spark._jvm.java.sql.DriverManager.getConnection(
+        args.jdbc_url, args.jdbc_user, args.jdbc_password
+    )
+    try:
+        statement = connection.createStatement()
+        try:
+            column = sql_reference(args.jdbc_url, args.incremental_column)
+            result = statement.executeQuery(f"SELECT {column} FROM {args.source_table} WHERE 1=0")
+            try:
+                metadata = result.getMetaData()
+                kind = extraction.jdbc_kind(metadata.getColumnTypeName(1), metadata.getPrecision(1),
+                                            metadata.getScale(1), args.jdbc_url)
+            finally:
+                result.close()
+            expression = "NULL" if inspect_only else position_expression(f"MAX({column})", kind, args.jdbc_url)
+            result = statement.executeQuery(
+                f"SELECT {expression}, COUNT(*), COUNT({column}) FROM {args.source_table}"
+            )
+            try:
+                result.next()
+                upper = extraction.canonical(result.getString(1), kind)
+                count = int(result.getString(2))
+                nonnull = int(result.getString(3))
+            finally:
+                result.close()
+            return kind, upper, count == 0, count != nonnull
+        finally:
+            statement.close()
+    finally:
+        connection.close()
+
+
+def oracle_utc_projection(spark, args):
+    """Rewrite Oracle timezone columns, unmappable by Spark JDBC, into UTC instants.
+
+    Spark cannot resolve Oracle TIMESTAMP ... WITH [LOCAL] TIME ZONE columns at
+    all (JDBC type -101/-102), regardless of the incremental contract. Such
+    columns are projected as SYS_EXTRACT_UTC(...): session-timezone independent
+    normalization to UTC required by the position contract. Returns None when
+    the source has no timezone columns, leaving extract_source.* untouched.
+    """
+    if not args.jdbc_url.startswith("jdbc:oracle:"):
+        return None
+    connection = spark._jvm.java.sql.DriverManager.getConnection(
+        args.jdbc_url, args.jdbc_user, args.jdbc_password
+    )
+    try:
+        statement = connection.createStatement()
+        try:
+            result = statement.executeQuery(f"SELECT * FROM {args.source_table} WHERE 1=0")
+            try:
+                metadata = result.getMetaData()
+                projected = []
+                for index in range(1, metadata.getColumnCount() + 1):
+                    name = str(metadata.getColumnLabel(index))
+                    type_name = " ".join(str(metadata.getColumnTypeName(index)).upper().split())
+                    reference = '"%s"' % name.replace('"', '""') if (
+                        name != name.upper() or name.startswith("_")) else name
+                    if "TIME ZONE" in type_name:
+                        projected.append(f"SYS_EXTRACT_UTC(extract_source.{reference}) AS {reference}")
+                    else:
+                        projected.append(f"extract_source.{reference}")
+                return projected if any("SYS_EXTRACT_UTC" in item for item in projected) else None
+            finally:
+                result.close()
+        finally:
+            statement.close()
+    finally:
+        connection.close()
+
+
+def managed_load(spark, args):
+    """Execute a persisted batch with at-least-once append and atomic pg-meta finalization."""
+    import extraction
+    import pyspark.sql.functions as F
+    import psycopg2
+
+    sys.path.insert(0, "/opt/airflow/plugins")
+    from ingestion import registry
+
+    connect = lambda: psycopg2.connect("")
+    batch = registry.get_batch(dag_id=args.dag_id, run_id=args.run_id, source_id=args.source_id,
+                               entity_fqn=args.source_table, db_connect=connect)
+    if batch and (batch["process_id"] != args.process_id or batch["target_table"] != args.target_table
+                  or batch["incremental_column"] != args.incremental_column):
+        raise ValueError("Persisted batch identity or extraction contract changed")
+    if batch and batch["status"] == "SUCCEEDED":
+        return
+    kind = batch["incremental_type"] if batch else None
+    upper = None
+    empty = False
+    if args.incremental_column:
+        detected, detected_upper, detected_empty, has_null = source_position(spark, args, inspect_only=batch is not None)
+        if batch is None:
+            kind, upper, empty = detected, detected_upper, detected_empty
+        elif detected != kind:
+            raise ValueError("Incremental source type changed; migrate pg-meta")
+        if has_null and not args.force_full:
+            raise ValueError("NULL incremental value in source")
+        extraction.lower_bound(upper, kind, args.lookback_size, args.lookback_unit,
+                               specified=args.lookback_given)
+    if batch is None:
+        def calculate_lower(value):
+            """Reject source resets before persisting an incremental window."""
+            if value is not None and not args.force_full:
+                if empty or extraction.maximum(value, upper, kind) != upper:
+                    raise ValueError("SOURCE_POSITION_REGRESSION: explicit reset/bootstrap required")
+            return extraction.lower_bound(value, kind, args.lookback_size, args.lookback_unit,
+                                          specified=args.lookback_given)
+
+        batch = registry.plan_batch(
+            process_id=args.process_id, dag_id=args.dag_id, run_id=args.run_id,
+            source_id=args.source_id, entity_fqn=args.source_table, target_table=args.target_table,
+            incremental_column=args.incremental_column, incremental_type=kind,
+            upper_bound=upper, empty_at_plan=empty, force_full=args.force_full,
+            lookback_size=args.lookback_size, lookback_unit=args.lookback_unit,
+            reason_text=args.reason, db_connect=connect,
+            calculate_lower=calculate_lower,
+            compare_positions=lambda left, right: (
+                0 if extraction.canonical(left, kind) == extraction.canonical(right, kind)
+                else 1 if extraction.maximum(left, right, kind) == extraction.canonical(left, kind) else -1
+            ),
+        )
+    elif batch["incremental_column"] != args.incremental_column or batch["incremental_type"] != kind:
+        raise ValueError("Extraction contract changed; migrate pg-meta and start a new DagRun")
+    batch_id = batch["batch_id"]
+    if empty_incremental_window(batch):
+        registry.finalize_batch(batch_id=batch_id, row_count=0, observed_max=None,
+                                db_connect=connect)
+        return
+    registry.start_batch(batch_id=batch_id, db_connect=connect)
+    try:
+        filters = []
+        column = sql_reference(args.jdbc_url, args.incremental_column) if args.incremental_column else None
+        for key, op in (("lower_bound", ">"), ("upper_bound", "<=")):
+            if batch[key] is not None:
+                filters.append(f"{column} {op} {extraction.literal(batch[key], kind, args.jdbc_url)}")
+        if batch["empty_at_plan"]:
+            filters.append("1=0")
+        select = "extract_source.*"
+        projection = oracle_utc_projection(spark, args)
+        if projection is not None:
+            select = ", ".join(projection)
+        if column:
+            select += f', {position_expression(column, kind, args.jdbc_url)} AS "__extract_position"'
+        query = f"(SELECT {select} FROM (SELECT * FROM {args.source_table}) extract_source" + (
+            " WHERE " + " AND ".join(filters) if filters else ""
+        ) + ") extract_batch"
+        reader = _jdbc_reader(spark, args, query)
+        if not args.no_parallelism and (not kind or not kind.startswith("timestamp")):
+            partition_column = args.incremental_column or pick_partition_column(detect_key_columns(
+                spark, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table))
+            if partition_column:
+                low, high = _read_bounds(spark, args, query, partition_column)
+                if low is not None and high is not None and low != high:
+                    reader = reader.option("partitionColumn", partition_column).option(
+                        "lowerBound", _bound_literal(low)).option("upperBound", _bound_literal(high)).option(
+                        "numPartitions", args.num_partitions)
+        source = reader.load().cache()
+        try:
+            summary = source.agg(F.count("*").alias("n"), *(
+                [F.max("__extract_position").alias("position")] if column else []
+            )).first()
+            rows = int(summary["n"])
+            observed = extraction.canonical(summary["position"], kind) if column else None
+            clean = source.drop("__extract_position") if column else source
+            if any(field.name in (METADATA_BATCH, METADATA_PID, METADATA_DTTM) for field in clean.schema.fields):
+                raise ValueError("Source column collides with ingestion metadata")
+            namespace, _ = validate_target_table(args.target_table)
+            spark.sql(f"CREATE NAMESPACE IF NOT EXISTS raw.{namespace}")
+            if not spark.catalog.tableExists(args.target_table):
+                spark.sql(build_create_table_sql(args.target_table, _schema_columns(clean.schema)))
+            if rows:
+                frame = clean.withColumn(METADATA_DTTM, F.current_timestamp()).withColumn(
+                    METADATA_PID, F.lit(args.process_id).cast("long")).withColumn(
+                    METADATA_BATCH, F.lit(batch_id).cast("long"))
+                frame.writeTo(args.target_table).option("mergeSchema", "true").option("check-ordering", "false").append()
+            watermark = batch["watermark_before"]
+            if args.incremental_column and batch["reason"] != "manual_full":
+                watermark = extraction.maximum(watermark, observed, kind)
+            registry.finalize_batch(batch_id=batch_id, row_count=rows, observed_max=observed,
+                                    watermark_after=watermark, db_connect=connect)
+        finally:
+            source.unpersist()
+    except Exception:
+        try:
+            registry.fail_batch(batch_id=batch_id, error="Extraction execution failed; see task logs", db_connect=connect)
+        except Exception:
+            logging.getLogger(__name__).warning("Unable to persist batch failure")
+        raise
 
 
 if __name__ == "__main__":

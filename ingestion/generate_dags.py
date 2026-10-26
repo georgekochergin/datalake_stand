@@ -81,9 +81,11 @@ def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str
     ]
     if incremental_line:
         lines.append(f"                {incremental_line}")
+        lines.append(f"                lookback_size={entity.lookback_size},")
+        lines.append(f"                lookback_unit={entity.lookback_unit!r},")
+        lines.append(f"                lookback_specified={entity.lookback_specified!r},")
     lines.extend(
         [
-            f'                outlets=[Asset("{asset_uri(source.source_id, entity.fqn)}")],',
             '            )',
             '            log_end = TableLogOperator(',
             '                task_id="log_end",',
@@ -91,6 +93,7 @@ def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str
             f'                entity_fqn={json.dumps(entity.fqn)},',
             f'                datalake_table="{target}",',
             '                status="END",',
+            f'                outlets=[Asset("{asset_uri(source.source_id, entity.fqn)}")],',
         ]
     )
     if incremental_line:
@@ -113,7 +116,7 @@ def generate_dag_source(
         "from datetime import datetime",
         "",
         "from airflow import DAG",
-        "from airflow.sdk import Asset",
+        "from airflow.sdk import Asset, Param",
         "from airflow.utils.task_group import TaskGroup",
         "from sydafa_airflow.operators import SydafaActivateOperator",
         "",
@@ -133,6 +136,10 @@ def generate_dag_source(
         f"    catchup={pipeline.catchup!r},",
         "    max_active_runs=1,",
         f"    tags={list(pipeline.tags)!r},",
+        "    params={",
+        "        'force_full_snapshot_fqns': Param([], type='array', uniqueItems=True, items={'type': 'string', 'enum': " + repr([entity.fqn for entity in pipeline.entities]) + "}),",
+        "        'reason': Param('', type='string'),",
+        "    },",
         "    on_success_callback=dagrun_success_callback,",
         "    on_failure_callback=dagrun_failure_callback,",
         ") as dag:",
@@ -142,14 +149,14 @@ def generate_dag_source(
         f'        source="{source.source_id}",',
         f"        ttl_minutes={ACTIVATE_TTL_MINUTES},",
         "    )",
-        '    generate_process_id = GenerateProcessIdOperator(task_id="generate_process_id")',
+        '    generate_process_id = GenerateProcessIdOperator(task_id="generate_process_id", entities=' + repr([entity.fqn for entity in pipeline.entities]) + ')',
         '    with TaskGroup(group_id="ingest_group") as ingest_group:',
     ]
     for entity in pipeline.entities:
         lines.extend(_entity_block(source, entity, num_partitions))
     lines.extend(
         [
-            "    activate_source >> generate_process_id >> ingest_group",
+            "    generate_process_id >> activate_source >> ingest_group",
             "",
         ]
     )

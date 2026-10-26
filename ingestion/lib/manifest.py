@@ -7,7 +7,7 @@ from ingestion.lib import naming
 
 _ALLOWED_SOURCE_KEYS = frozenset({"type", "airflow_conn_id"})
 _ALLOWED_PIPELINE_KEYS = frozenset({"source_id", "schedule", "catchup", "tags", "entities"})
-_ALLOWED_ENTITY_KEYS = frozenset({"fqn", "incremental_column", "spark", "airflow"})
+_ALLOWED_ENTITY_KEYS = frozenset({"fqn", "incremental", "spark", "airflow"})
 _COLUMN_PATTERN = re.compile(r"^[a-z_][a-z0-9_]*$")
 
 
@@ -30,6 +30,9 @@ class EntityConfig:
     parallelism: bool = True
     pool: str = "default_pool"
     pool_slots: int = 1
+    lookback_size: int = 0
+    lookback_unit: str | None = None
+    lookback_specified: bool = False
 
 
 @dataclass(frozen=True)
@@ -149,11 +152,24 @@ def load_pipeline(path) -> PipelineManifest:
         if fqn in seen_fqns:
             raise ValueError(f"duplicate entity FQN: {fqn!r}")
         seen_fqns.add(fqn)
-        incremental_column = entity.get("incremental_column")
-        if incremental_column is not None and (
-            not isinstance(incremental_column, str) or not _COLUMN_PATTERN.match(incremental_column)
-        ):
-            raise ValueError(f"entity {fqn!r}: incremental_column must be a lowercase identifier")
+        incremental_column = None
+        lookback_size = 0
+        lookback_unit = None
+        lookback_specified = False
+        if "incremental" in entity:
+            incremental = _mapping(entity["incremental"], {"source_column", "lookback"}, "incremental")
+            incremental_column = incremental.get("source_column")
+            if not isinstance(incremental_column, str) or not _COLUMN_PATTERN.fullmatch(incremental_column):
+                raise ValueError("incremental.source_column must be a lowercase identifier")
+            if "lookback" in incremental:
+                lookback = _mapping(incremental["lookback"], {"size", "unit"}, "incremental.lookback")
+                lookback_size = lookback.get("size")
+                if type(lookback_size) is not int or not 0 <= lookback_size < 10 ** 38:
+                    raise ValueError("lookback.size must be a non-negative integer below 10^38")
+                lookback_unit = lookback.get("unit")
+                if "unit" in lookback and lookback_unit not in ("h", "d"):
+                    raise ValueError("lookback.unit must be h or d")
+                lookback_specified = True
         spark = _mapping(entity.get("spark", {}), {"parallelism"}, f"entity {fqn!r}.spark")
         parallelism = spark.get("parallelism", True)
         if type(parallelism) is not bool:
@@ -172,6 +188,9 @@ def load_pipeline(path) -> PipelineManifest:
                 parallelism=parallelism,
                 pool=pool_name,
                 pool_slots=slots,
+                lookback_size=lookback_size,
+                lookback_unit=lookback_unit,
+                lookback_specified=lookback_specified,
             )
         )
     naming.assert_unique_targets([entity.fqn for entity in entities])
