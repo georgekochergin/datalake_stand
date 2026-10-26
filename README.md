@@ -265,8 +265,8 @@ REST-интерфейс: `http://localhost:8090`, интерактивная д�
 (`schedule=None`, ручной запуск). Структура:
 
 ```
-activate_source (SydafaActivateOperator, TTL 15 мин)
-  → generate_process_id (nextval на pg-meta, лог START, XCom)
+generate_process_id (валидация conf, get-or-create в pg-meta, XCom)
+  → activate_source (SydafaActivateOperator, TTL 15 мин)
   → TaskGroup на каждую сущность: log_start → load → log_end
 ```
 
@@ -280,11 +280,11 @@ activate_source (SydafaActivateOperator, TTL 15 мин)
   автоматически, исчезнувшие — NULL, порядок не важен, история не
   перезаписывается. `check-ordering=false` отключает проверку позиции полей
   Iceberg, сохраняя сопоставление по имени и проверку типов.
-- Каждая строка получает `__load_dttm` (время загрузки, timestamptz) и
-  `__process_id` (идентификатор запуска DAG из pg-meta sequence).
-- `log_end` для инкрементальных сущностей продвигает watermark:
-  `SELECT max(<incremental_column>) WHERE __process_id = <pid>` через Trino
-  → pg-meta (только после успешной фиксации — at-least-once).
+- Каждая строка получает `__load_dttm`, `__process_id` (DagRun) и `__batch_id`
+  (логическое извлечение одной таблицы, общий для retries).
+- Spark driver сохраняет batch и границы в pg-meta до чтения. После append
+  атомарно финализирует batch и watermark с проверкой revision. `log_end`
+  пишет событие END и публикует Asset уже после финализации.
 - В демонстрации все `load`-таски разделяют пул `ingest_loads` (4 слота):
   transactions занимает 2 слота, остальные загрузки — 1. Пул ограничивает
   допуск приложений, но не выделяет им CPU/память.
@@ -292,8 +292,36 @@ activate_source (SydafaActivateOperator, TTL 15 мин)
 Режимы загрузки задаются в манифесте пайплайна:
 
 - **полный снапшот** (по умолчанию) — зеркало всей таблицы каждым запуском;
-- **инкрементальный** — `incremental_column: _batch_id` (техническая колонка
-  sydafa, растёт при append и update): читаются только строки выше watermark.
+- **инкрементальный** — вложенная настройка incremental; старый ключ
+  incremental_column в YAML не поддерживается:
+
+```yaml
+- fqn: retail_bank.transactions
+  incremental:
+    source_column: _batch_id
+    lookback:
+      size: 2
+```
+
+Поддерживаются signed integral, date, local/instant timestamp. Для temporal
+lookback обязателен `unit: h` или `unit: d`, для date только d; для integral
+unit запрещён. Без lookback отступ нулевой. Тип определяется из JDBC metadata.
+Перед чтением MAX source column фиксирует upper_bound, нижняя граница —
+watermark минус lookback. Настоящий WHERE: `lower < col AND col <= upper`.
+Для bootstrap нижнего фильтра нет. Точная temporal position сохраняется без
+округления до Spark microseconds; Oracle DATE содержит время и не считается date.
+NULL в колонке блокирует обычный incremental; manual full читает и NULL.
+
+Ручной запуск main DAG может передать:
+
+```json
+{"force_full_snapshot_fqns": ["retail_bank.transactions"], "reason": "Проверка полноты"}
+```
+
+Выбранная таблица полностью читается append-ом, watermark остаётся прежним.
+Остальные таблицы исполняются по YAML. FQN другого DAG/дубли/пустая причина
+отклоняются до активации источника. Следующий обычный run продолжает прежний
+watermark, поэтому пересечения snapshot/delta ожидаемы.
 
 Манифесты (`ingestion/`):
 
@@ -326,14 +354,41 @@ activate_source (SydafaActivateOperator, TTL 15 мин)
 таблиц, кроме transactions: пропускаются поиск ключа и запрос MIN/MAX,
 чтение идёт одной JDBC-партицией. Это не отключает все внутренние потоки Spark.
 Settings инлайнятся в DAG при генерации, YAML не читается при парсинге Airflow.
+Timestamp incremental читает одну JDBC partition для сохранения точной source-position;
+это не отменяет распределённую запись Spark.
 
 `__process_id` сквозной в пределах одного DAG run; retries load используют
-тот же ID, новый run получает новый. Не перезапускайте отдельно
-generate_process_id после уже выполненных загрузок: повторяйте весь DAG новым run.
+тот же ID, новый run получает новый. Clear generate_process_id возвращает тот же ID;
+повтор уже SUCCEEDED batch не делает append. Для нового чтения нужен новый run.
 Данные и watermark фиксируются в разных системах. Сбой после Iceberg commit
 до сохранения watermark или подтверждения успеха может привести к повторной
 записи порции при retry (at-least-once, не exactly-once). Process ID не является
-механизмом дедупликации. Пустой источник тоже создаёт raw-таблицу и проверяет схему.
+механизмом дедупликации. Повтор диапазона допустим без специального duplicate alert;
+следующему слою требуется идемпотентный merge по исходному ключу/версии, не `sum`
+повторных raw-строк. Пустой источник тоже создаёт raw-таблицу и проверяет схему.
+Lookback не гарантирует полноту при поздних commits за окном; см. backlog.md, задача 2.
+
+### Состояние pg-meta и миграции incremental
+
+DDL: `conf/pg-meta/init/01_ingestion.sql`. Рабочие таблицы — extraction_state
+(контракт, watermark, revision) и extraction_batches (режим, границы, результат);
+extraction_state_migrations — аудит ручных изменений. Init SQL автоматически
+выполняется только на пустом Postgres volume. При внедрении этого этапа
+используется разрешённая переинициализация pg-meta с новым bootstrap:
+остановить DAG и исполнителей, удалить только том нужной pg-meta и запустить
+Postgres с новым DDL. Старые table_watermarks не переносим автоматически:
+они не содержат доказанного имени/типа колонки. Отдельного скрипта обновления
+старой схемы и пользовательских триггеров нет. Не выполнять широкую очистку Docker.
+
+Смена/удаление/возврат incremental.source_column либо смена типа/precision требует:
+остановить DAG и Spark, проверить новую колонку и downstream, под `BEGIN` и
+`SELECT ... FOR UPDATE` проверить старый контракт, записать old/new значения в
+extraction_state_migrations, обновить режим/колонку/тип, очистить watermark,
+увеличить revision и COMMIT. Неверное ожидаемое состояние — ROLLBACK.
+Затем изменить YAML, регенерировать DAG и выполнить bootstrap. Историю raw
+не очищать; несовместимый raw schema type требует отдельной schema migration.
+Изменение только lookback не требует сброса state. Не уменьшать watermark
+автоматически при reset источника.
 
 Именование таблиц (библиотека `ingestion/lib/`): каждая точка в полном имени
 сущности кодируется в `__` — `retail_bank.clients` →

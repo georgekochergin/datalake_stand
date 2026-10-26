@@ -1,5 +1,29 @@
 # Raw-Layer Ingestion Framework — Implementation Plan
 
+## Stage 03 contract update (2026-10-26)
+
+This section supersedes earlier incremental/watermark details below.
+
+- YAML uses incremental.source_column and optional lookback.size/unit; unit h/d
+  applies to temporal positions, date permits d only, integral forbids unit.
+- Raw remains append-only; __batch_id identifies one entity extraction per DagRun.
+  Process and batch IDs are idempotent across retries/clear.
+- pg-meta extraction_state/batches and migration audit replace table_watermarks.
+  Registry plans fixed lower/upper SQL bounds and atomically finalizes state/batch
+  using revision CAS. Revision is internal, not a YAML counter.
+- Source MAX fixes upper before read. Bootstrap has no lower; manual full has no
+  bounds and preserves watermark. Retry reuses saved batch/window; repeated append
+  is accepted at-least-once, without a special duplicate alert/reconciliation gate.
+- Signed integral/date/local and instant timestamps require lossless source-position
+  codecs including fractional precision. SQL literals are dialect-specific.
+- Manual Airflow conf force_full_snapshot_fqns/reason is validated before activation;
+  other entities run normally. Assets are emitted after pg-meta finalization.
+- Contract changes fail before read until an audited pg-meta migration under stopped
+  execution resets position for a new bootstrap. Existing init volumes require an
+  explicit DDL/data migration, not automatic reinterpretation of old watermarks.
+- Late commits below the watermark are not solved by retry; backlog task 2 covers
+  completeness/CDC/snapshot reconciliation. Downstream merge must be idempotent.
+
 ## Stage 01 contract update (2026-10-26)
 
 This section supersedes the initial build-sheet details below where they differ.
