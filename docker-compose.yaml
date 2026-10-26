@@ -200,6 +200,7 @@ services:
       AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/simple_auth_manager_passwords.json.generated
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
       AIRFLOW__API__EXPOSE_CONFIG: auth_admin
+      AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: "10"
       AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow-webserver:8080/execution/"
       AIRFLOW__API_AUTH__JWT_SECRET: "datalake-stand-test-jwt-secret-0123456789abcdef"
       AIRFLOW_CONN_SYDAFA_DEFAULT: "http://sydafa:8000"
