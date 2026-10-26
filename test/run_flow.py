@@ -171,21 +171,21 @@ def airflow_unpause(token: str, dag_id: str) -> tuple[int, str]:
     )
 
 
-def airflow_trigger(token: str, dag_id: str, run_id: str) -> tuple[int, str]:
+def airflow_trigger(token: str, dag_id: str, run_id: str, conf: dict[str, Any] | None = None) -> tuple[int, str]:
     url = "%s/api/v2/dags/%s/dagRuns" % (AIRFLOW, dag_id)
     return http(
         "POST",
         url,
-        {"dag_run_id": run_id, "logical_date": None},
+        {"dag_run_id": run_id, "logical_date": None, "conf": conf or {}},
         {"Authorization": "Bearer " + token, "Content-Type": "application/json"},
     )
 
 
-def airflow_trigger_retry(token: str, dag_id: str, run_id: str, timeout: int = 180) -> tuple[int, str]:
+def airflow_trigger_retry(token: str, dag_id: str, run_id: str, timeout: int = 180, conf: dict[str, Any] | None = None) -> tuple[int, str]:
     deadline = time.time() + timeout
     while time.time() < deadline:
         airflow_unpause(token, dag_id)
-        code, raw = airflow_trigger(token, dag_id, run_id)
+        code, raw = airflow_trigger(token, dag_id, run_id, conf=conf)
         if code == 200:
             return code, raw
         time.sleep(5)
@@ -459,6 +459,16 @@ def validate_manifests_and_dags() -> None:
     from ingestion.generate_dags import generate_all
     from ingestion.lib.manifest import load_sources
 
+    import yaml
+
+    for source in ("bank", "broker"):
+        pipeline_path = ws / "ingestion" / "pipelines" / source / "main.yaml"
+        pipeline = yaml.safe_load(pipeline_path.read_text(encoding="utf-8"))
+        entities = pipeline.get("entities", [])
+        transactions = [entity for entity in entities if entity.get("fqn", "").endswith(".transactions")]
+        check(source + " transactions uses structured incremental config", len(transactions) == 1 and transactions[0].get("incremental", {}).get("source_column") == "_batch_id", True)
+        check(source + " main has no legacy incremental keys", all("incremental_column" not in entity and "incremental_lookback" not in entity for entity in entities), True)
+
     generated = generate_all(
         load_sources(ws / "ingestion" / "sources.yaml"),
         ws / "ingestion" / "pipelines", ws / "ingestion" / "settings.yaml",
@@ -580,6 +590,8 @@ def main() -> None:
             check("%s: rows loaded" % table, total > 0, True)
             check("%s: single process_id (one portion)" % table, distinct_pids, 1)
             max_pids[table] = max_pid
+            batch_rows = trino_query(f"SELECT count(DISTINCT __batch_id), count_if(__batch_id IS NULL), min(__batch_id) FROM {table}")
+            check(table + ": single positive batch identity", batch_rows[0][0] == 1 and batch_rows[0][1] == 0 and batch_rows[0][2] > 0, True)
         for source in ("bank", "broker"):
             prefix = "retail_bank" if source == "bank" else "trading_core"
             for pipeline, tables in (("main", ("deals", "transactions")), ("refs", ("clients", "accounts"))):
@@ -649,6 +661,48 @@ def main() -> None:
             check(table + ": history + delta count", total, first_counts[table] + delta)
     except Exception as e:
         check("raw tables query (run 3)", str(e), "ok")
+
+    print("\n==> Шаг 10: Ручной полный snapshot transactions без сброса watermark...")
+    before_manual = {table: raw_stats(table) for table in RAW_SNAPSHOT_TABLES + RAW_INCREMENTAL_TABLES}
+    for source, prefix in (("bank", "retail_bank"), ("broker", "trading_core")):
+        dag_id = f"ingest__rdbms__{source}__main"
+        run_id = f"e2e-manual-full-{dag_id}-{stamp}"
+        code, _ = airflow_trigger_retry(token, dag_id, run_id, conf={
+            "force_full_snapshot_fqns": [f"{prefix}.transactions"],
+            "reason": "e2e manual full preserves incremental watermark",
+        })
+        check(f"trigger {dag_id} manual full", code, 200)
+        if not airflow_wait_run(token, dag_id, run_id, timeout=900, name=dag_id + " manual full"):
+            return
+        table = f"raw.{source}.{prefix}__transactions"
+        total, portions, pid = raw_stats(table)
+        snapshot_rows = raw_rows_with_process(table, pid)
+        check(table + ": manual full is nonempty", snapshot_rows > 0, True)
+        check(table + ": manual full exceeds last delta", snapshot_rows > raw_rows_with_process(table, before_manual[table][2]), True)
+        check(table + ": manual full preserves history", total, before_manual[table][0] + snapshot_rows)
+        check(table + ": manual full adds one portion", portions, before_manual[table][1] + 1)
+        deals = f"raw.{source}.{prefix}__deals"
+        deals_total, deals_portions, deals_pid = raw_stats(deals)
+        check(deals + ": manual full still loads deals", deals_portions, before_manual[deals][1] + 1)
+        check(deals + ": manual full deals snapshot unchanged", raw_rows_with_process(deals, deals_pid), raw_rows_with_process(deals, before_manual[deals][2]))
+        check(deals + ": manual full appends deals", deals_total, before_manual[deals][0] + raw_rows_with_process(deals, deals_pid))
+
+    print("\n==> Шаг 11: Штатная загрузка после manual full: transactions no-op, snapshots append...")
+    after_manual = {table: raw_stats(table) for table in RAW_SNAPSHOT_TABLES + RAW_INCREMENTAL_TABLES}
+    for dag_id in INGEST_DAGS:
+        run_id = f"e2e-after-manual-{dag_id}-{stamp}"
+        code, _ = airflow_trigger_retry(token, dag_id, run_id)
+        check(f"trigger {dag_id} after manual full", code, 200)
+        if not airflow_wait_run(token, dag_id, run_id, timeout=900, name=dag_id + " after manual full"):
+            return
+    for table in RAW_INCREMENTAL_TABLES:
+        check(table + ": normal run after manual full is no-op", raw_stats(table), after_manual[table])
+    for table in RAW_SNAPSHOT_TABLES:
+        total, portions, pid = raw_stats(table)
+        snapshot_rows = raw_rows_with_process(table, after_manual[table][2])
+        check(table + ": normal snapshot appended", total, after_manual[table][0] + snapshot_rows)
+        check(table + ": normal snapshot adds one portion", portions, after_manual[table][1] + 1)
+        check(table + ": normal snapshot unchanged", raw_rows_with_process(table, pid), snapshot_rows)
 
 
 if __name__ == "__main__":

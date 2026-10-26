@@ -101,6 +101,7 @@ cleanup() {
             workspace = Path(directory)
             (workspace / "spark").mkdir()
             (workspace / "spark/e2e_schema_evolution.py").touch()
+            (workspace / "spark/e2e_temporal_extraction.py").touch()
             log = workspace / "calls"
             harness = r'''
 set -euo pipefail

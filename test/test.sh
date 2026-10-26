@@ -58,12 +58,14 @@ fi
 
 # ==================== ШАГ 2 (verify): Запуск на работающем стенде ====================
 run_runtime_checks() {
-  if [ ! -f "$TEST_WS/spark/e2e_schema_evolution.py" ]; then
-    echo "FAIL: Отсутствует workspace Spark schema-evolution app; сначала выполните полный запуск."
+  if [ ! -f "$TEST_WS/spark/e2e_schema_evolution.py" ] || [ ! -f "$TEST_WS/spark/e2e_temporal_extraction.py" ]; then
+    echo "FAIL: Отсутствуют workspace Spark e2e apps; сначала выполните полный запуск."
     return 1
   fi
   "${COMPOSE[@]}" run --rm --no-deps test-runner python -u /app/run_flow.py
+  "${COMPOSE[@]}" exec -T airflow-scheduler python /opt/airflow/plugins/e2e_check_extraction.py
   "${COMPOSE[@]}" exec -T airflow-scheduler spark-submit --master spark://spark-master:7077 --deploy-mode client /opt/spark-jobs/e2e_schema_evolution.py
+  "${COMPOSE[@]}" exec -T airflow-scheduler spark-submit --master spark://spark-master:7077 --deploy-mode client /opt/spark-jobs/e2e_temporal_extraction.py
 }
 
 if [ "$MODE" = "verify" ]; then
@@ -74,6 +76,19 @@ fi
 
 # ==================== ШАГ 2 (full): Полный сквозной e2e запуск стенда ====================
 cleanup() {
+  if [ -n "${TEST_FAILURE_LOG_DIR:-}" ]; then
+    local scheduler_id
+    scheduler_id=$("${COMPOSE[@]}" ps -q airflow-scheduler 2>/dev/null || true)
+    if [ -n "$scheduler_id" ]; then
+      mkdir -p "$TEST_FAILURE_LOG_DIR/dlh-test-airflow-logs"
+      docker cp "$scheduler_id:/opt/airflow/logs/." "$TEST_FAILURE_LOG_DIR/dlh-test-airflow-logs/" 2>/dev/null || true
+    fi
+  fi
+  if [ -n "${TEST_FAILURE_LOG_DIR:-}" ] && [ -d "$TEST_WS/airflow/logs" ]; then
+    local failure_log="${TEST_FAILURE_LOG_DIR:-${TMPDIR:-/tmp}}/dlh-test-airflow-logs"
+    mkdir -p "$failure_log"
+    cp -R "$TEST_WS/airflow/logs/." "$failure_log/" 2>/dev/null || true
+  fi
   local ids
   ids=$(docker ps -aq --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" --filter "label=com.docker.compose.service=test-runner" 2>/dev/null || true)
   if [ -n "$ids" ]; then
@@ -123,10 +138,12 @@ for source in manifest["sources"].values():
 path.write_text(json.dumps(manifest, indent=2))
 PY
 cp -R "$PROJECT_ROOT/airflow/." "$TEST_WS/airflow/"
+cp "$PROJECT_ROOT/test/check_extraction.py" "$TEST_WS/airflow/plugins/e2e_check_extraction.py"
 if [ -d "$PROJECT_ROOT/spark" ]; then
   cp -R "$PROJECT_ROOT/spark/." "$TEST_WS/spark/"
 fi
 cp "$PROJECT_ROOT/test/schema_evolution.py" "$TEST_WS/spark/e2e_schema_evolution.py"
+cp "$PROJECT_ROOT/test/temporal_extraction.py" "$TEST_WS/spark/e2e_temporal_extraction.py"
 if [ -d "$PROJECT_ROOT/trino" ]; then
   cp -R "$PROJECT_ROOT/trino/." "$TEST_WS/trino/"
 fi
