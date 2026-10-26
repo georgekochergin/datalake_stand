@@ -77,7 +77,7 @@ Airflow: IngestAppendOperator(DockerOperator)
 - Unit: настройки команды, credentials transport, Connection resolution, pool/slots, уникальные labels/сеть, resource limits, exit code и cancellation; отсутствие паролей в команде/logs/rendered fields.
 - E2E: четыре демонстрационных DAG работают из отдельных driver-контейнеров; проверены executor → driver и параллельные drivers; driver не выполняется в scheduler.
 - Проверены failure/retry со сквозным process_id, cleanup success/failure/cancel и отсутствие воздействия на чужой контур.
-- Сохранены snapshot/incremental/schema-evolution проверки. Обновлены README.md, implementation_plan.md и описание PR при наличии доступа.
+- Сохранены snapshot/incremental/schema-evolution проверки. Обновлены README.md и описание PR при наличии доступа.
 - Unit, генерация/`--check` и полный `./test/test.sh` проходят; e2e — `FAIL=0`, exit 0. Недоступные fault/cancellation проверки указывать явно.
 
 Задача отложена. Не является предварительным условием работы над инкрементом.
