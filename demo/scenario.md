@@ -369,11 +369,18 @@ FROM ingestion.extraction_batches ORDER BY batch_id DESC LIMIT 8;"
 
 ## Резервные сюжетные линии (если останется время)
 
-- **Ручной полный снимок:** запуск `ingest__rdbms__bank__main` с конфигурацией
-  (кнопка ▶ → «Configure»):
+- **Ручной полный снимок:** конфигурация передаётся REST API (в UI кнопка
+  запуска параметров не требует):
 
-```json
-{"force_full_snapshot_fqns": ["retail_bank.transactions"], "reason": "Демо: ручная сверка полноты"}
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8089/auth/token \
+  -d 'username=admin123&password=admin123' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+curl -X POST http://localhost:8089/api/v2/dags/ingest__rdbms__bank__main/dagRuns \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"dag_run_id": "manual-full-demo", "logical_date": null,
+       "conf": {"force_full_snapshot_fqns": ["retail_bank.transactions"],
+                "reason": "Демо: ручная сверка полноты"}}'
 ```
 
   В pg-meta появится партия `reason=manual_full` без границ и с сохранённым

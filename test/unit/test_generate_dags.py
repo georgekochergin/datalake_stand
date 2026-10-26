@@ -51,10 +51,10 @@ class TestGenerateDagSource(unittest.TestCase):
         self.assertIn('GenerateProcessIdOperator(task_id="generate_process_id", entities=', self.source)
         self.assertIn("generate_process_id >> activate_source >> ingest_group", self.source)
 
-    def test_manual_snapshot_params_restrict_entities(self):
-        self.assertIn("uniqueItems=True", self.source)
-        self.assertIn("'enum': ['retail_bank.clients', 'retail_bank.transactions']", self.source)
-        self.assertIn("'reason': Param('', type='string')", self.source)
+    def test_no_dag_params(self):
+        """The trigger dialog must open with an active button, without required fields."""
+        self.assertNotIn("Param(", self.source)
+        self.assertNotIn("params={", self.source)
 
     def test_entity_groups_and_assets(self):
         self.assertIn('group_id="load_retail_bank__clients"', self.source)

@@ -479,7 +479,6 @@ JDBC-параллелизм отключён).
 ```text
 DAG ingest__rdbms__bank__main
 │  schedule=None, catchup=False, max_active_runs=1, tags из YAML,
-│  params: force_full_snapshot_fqns (список FQN этого DAG), reason (строка),
 │  колбэки успеха/провала → события END/FAILED в pg-meta
 │
 ├── generate_process_id   валидация conf запуска; выделение process_id (XCom)
@@ -524,11 +523,20 @@ DAG ingest__rdbms__bank__main
 Spark-приложений (каждое — отдельный driver + executors, что дорого для
 Docker-машины), но не выделяет им CPU/память.
 
-**Ручной полный снимок.** Запуск main-DAG-а можно параметризовать
-(кнопка запуска с конфигурацией или REST API):
+**Ручной полный снимок.** У сгенерированных DAG-ов нет объявленных параметров
+запуска — в UI кнопка запуска открывает диалог с сразу активной кнопкой
+Trigger, без обязательных полей. Конфигурация полного снимка передаётся
+конфигом запуска через REST API:
 
-```json
-{"force_full_snapshot_fqns": ["retail_bank.transactions"], "reason": "Проверка полноты"}
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8089/auth/token \
+  -d 'username=admin123&password=admin123' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+curl -X POST http://localhost:8089/api/v2/dags/ingest__rdbms__bank__main/dagRuns \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"dag_run_id": "manual-full", "logical_date": null,
+       "conf": {"force_full_snapshot_fqns": ["retail_bank.transactions"],
+                "reason": "Проверка полноты"}}'
 ```
 
 Выбранная таблица читается целиком (водяной знак сохраняется), остальные — по
