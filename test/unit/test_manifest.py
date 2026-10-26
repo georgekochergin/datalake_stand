@@ -260,7 +260,9 @@ class TestValidatePipeline(unittest.TestCase):
     def test_real_repo_manifests_are_valid(self):
         repo_root = Path(__file__).resolve().parents[2]
         sources = manifest.load_sources(repo_root / "ingestion" / "sources.yaml")
-        for pipeline_path in sorted((repo_root / "ingestion" / "pipelines").glob("*.yaml")):
+        paths = sorted((repo_root / "ingestion" / "pipelines").rglob("*.yaml"))
+        self.assertEqual(len(paths), 4)
+        for pipeline_path in paths:
             pipeline = manifest.load_pipeline(pipeline_path)
             manifest.validate_pipeline(sources, pipeline)
             self.assertTrue(pipeline.entities)

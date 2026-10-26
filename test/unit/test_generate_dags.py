@@ -36,7 +36,7 @@ class TestGenerateDagSource(unittest.TestCase):
         self.source = generate_dag_source(BANK, PIPELINE)
 
     def test_dag_header(self):
-        self.assertIn('dag_id="ingest_bank"', self.source)
+        self.assertIn('dag_id="ingest__rdbms__bank"', self.source)
         self.assertIn("schedule=None", self.source)
         self.assertIn("catchup=False", self.source)
         self.assertIn("max_active_runs=1", self.source)
@@ -57,8 +57,8 @@ class TestGenerateDagSource(unittest.TestCase):
         self.assertIn('datalake_table="raw.bank.retail_bank__transactions"', self.source)
 
     def test_load_tasks_share_pool(self):
-        self.assertIn('pool="ingest_loads"', self.source)
-        self.assertEqual(self.source.count('pool="ingest_loads"'), 2)
+        self.assertIn('pool="default_pool"', self.source)
+        self.assertEqual(self.source.count('pool_slots=1'), 2)
 
     def test_incremental_column_only_where_configured(self):
         self.assertEqual(self.source.count('incremental_column="_batch_id"'), 2)
@@ -104,17 +104,26 @@ class TestGenerateAll(unittest.TestCase):
         cls.generated = generate_all(cls.sources, repo_root / "ingestion" / "pipelines")
 
     def test_covers_both_pipelines(self):
-        self.assertEqual(set(self.generated), {"ingest__bank.py", "ingest__broker.py"})
+        self.assertEqual(set(self.generated), {
+            f"ingest__rdbms__{source}__{pipeline}.py"
+            for source in ("bank", "broker") for pipeline in ("main", "refs")
+        })
 
     def test_broker_is_incremental(self):
-        broker = self.generated["ingest__broker.py"]
+        broker = self.generated["ingest__rdbms__broker__main.py"]
         self.assertIn('incremental_column="_batch_id"', broker)
         self.assertIn('entity_fqn="trading_core.transactions"', broker)
-        self.assertIn('Asset("raw://broker/trading_core.clients")', broker)
+        self.assertIn('Asset("raw://broker/trading_core.deals")', broker)
 
     def test_bank_mixed_modes(self):
-        bank = self.generated["ingest__bank.py"]
+        bank = self.generated["ingest__rdbms__bank__main.py"]
         self.assertEqual(bank.count('incremental_column="_batch_id"'), 2)
+
+    def test_demonstration_weights_and_parallelism(self):
+        for name, content in self.generated.items():
+            self.assertEqual(content.count('pool="ingest_loads"'), 2)
+            self.assertEqual(content.count("parallelism=False"), 1 if "__main" in name else 2)
+            self.assertEqual(content.count("pool_slots=2"), 1 if "__main" in name else 0)
 
     def test_generated_modules_parse(self):
         import ast

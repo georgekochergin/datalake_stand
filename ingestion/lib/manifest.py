@@ -7,7 +7,7 @@ from ingestion.lib import naming
 
 _ALLOWED_SOURCE_KEYS = frozenset({"type", "airflow_conn_id"})
 _ALLOWED_PIPELINE_KEYS = frozenset({"source_id", "schedule", "catchup", "tags", "entities"})
-_ALLOWED_ENTITY_KEYS = frozenset({"fqn", "incremental_column"})
+_ALLOWED_ENTITY_KEYS = frozenset({"fqn", "incremental_column", "spark", "airflow"})
 _COLUMN_PATTERN = re.compile(r"^[a-z_][a-z0-9_]*$")
 
 
@@ -27,6 +27,16 @@ class EntityConfig:
     fqn: str
     target_table: str
     incremental_column: str | None
+    parallelism: bool = True
+    pool: str = "default_pool"
+    pool_slots: int = 1
+
+
+@dataclass(frozen=True)
+class IngestionSettings:
+    """Technical defaults shared by all generated pipelines."""
+
+    num_partitions: int
 
 
 @dataclass(frozen=True)
@@ -46,6 +56,31 @@ def _read_yaml(path) -> object:
 
     with open(path, encoding="utf-8") as stream:
         return yaml.safe_load(stream)
+
+
+def _mapping(value, allowed: set[str], label: str) -> dict:
+    """Validate a nested configuration mapping and reject unknown keys."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{label}: must be a mapping")
+    unknown = set(value) - allowed
+    if unknown:
+        raise ValueError(f"{label}: unknown keys {sorted(map(str, unknown))}")
+    return value
+
+
+def _positive_integer(value, label: str) -> int:
+    """Reject booleans and non-positive integers."""
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{label}: must be a positive integer")
+    return value
+
+
+def load_settings(path) -> IngestionSettings:
+    """Load strict, explicit JDBC execution defaults."""
+    raw = _mapping(_read_yaml(path), {"spark"}, "settings")
+    spark = _mapping(raw.get("spark"), {"jdbc"}, "settings.spark")
+    jdbc = _mapping(spark.get("jdbc"), {"num_partitions"}, "settings.spark.jdbc")
+    return IngestionSettings(_positive_integer(jdbc.get("num_partitions"), "num_partitions"))
 
 
 def load_sources(path) -> dict[str, SourceConfig]:
@@ -78,7 +113,7 @@ def load_sources(path) -> dict[str, SourceConfig]:
 
 
 def load_pipeline(path) -> PipelineManifest:
-    """Load and validate a pipeline manifest (ingestion/pipelines/<source_id>.yaml)."""
+    """Load and validate one pipeline from the recursive ingestion/pipelines tree."""
     raw = _read_yaml(path)
     if not isinstance(raw, dict):
         raise ValueError("pipeline manifest must be a mapping")
@@ -119,11 +154,24 @@ def load_pipeline(path) -> PipelineManifest:
             not isinstance(incremental_column, str) or not _COLUMN_PATTERN.match(incremental_column)
         ):
             raise ValueError(f"entity {fqn!r}: incremental_column must be a lowercase identifier")
+        spark = _mapping(entity.get("spark", {}), {"parallelism"}, f"entity {fqn!r}.spark")
+        parallelism = spark.get("parallelism", True)
+        if type(parallelism) is not bool:
+            raise ValueError(f"entity {fqn!r}: spark.parallelism must be a boolean")
+        airflow = _mapping(entity.get("airflow", {}), {"pool"}, f"entity {fqn!r}.airflow")
+        pool = _mapping(airflow.get("pool", {}), {"name", "slots"}, f"entity {fqn!r}.airflow.pool")
+        pool_name = pool.get("name", "default_pool")
+        if not isinstance(pool_name, str) or not pool_name.strip():
+            raise ValueError(f"entity {fqn!r}: pool.name must be a non-empty string")
+        slots = _positive_integer(pool.get("slots", 1), "pool.slots")
         entities.append(
             EntityConfig(
                 fqn=fqn,
                 target_table=naming.resolve_target_table_name(fqn),
                 incremental_column=incremental_column,
+                parallelism=parallelism,
+                pool=pool_name,
+                pool_slots=slots,
             )
         )
     naming.assert_unique_targets([entity.fqn for entity in entities])

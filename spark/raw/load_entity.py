@@ -14,6 +14,7 @@ helpers stay testable without a Spark installation.
 """
 
 import argparse
+import logging
 import re
 from decimal import Decimal
 
@@ -23,7 +24,7 @@ METADATA_PID = "__process_id"
 
 IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 COLUMN_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-SOURCE_TABLE_PATTERN = re.compile(r'^[A-Za-z0-9_".]+$')
+SOURCE_PART_PATTERN = re.compile(r'"((?:[A-Za-z0-9_.]|"")+)"|([A-Za-z0-9_]+)')
 WATERMARK_PATTERN = re.compile(r"^[0-9]+$")
 
 PARTITION_TYPES = frozenset(
@@ -65,6 +66,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--watermark-value")
     parser.add_argument("--partition-column")
     parser.add_argument("--num-partitions", type=int, default=4)
+    parser.add_argument("--no-parallelism", action="store_true")
     args = parser.parse_args(argv)
     if args.process_id <= 0:
         raise ValueError(f"--process-id must be a positive integer (got {args.process_id})")
@@ -120,8 +122,7 @@ def build_read_query(
     jdbc_url: str = "",
 ) -> str:
     """Build the JDBC dbtable expression: bare table, or an incremental subquery."""
-    if not SOURCE_TABLE_PATTERN.match(source_table):
-        raise ValueError(f"invalid source table reference: {source_table!r}")
+    parse_source_table(source_table)
     if incremental_column is None:
         return source_table
     if not COLUMN_NAME_PATTERN.match(incremental_column):
@@ -242,28 +243,53 @@ def _schema_columns(schema) -> list[tuple[str, str]]:
     return [(field.name, ddl_type(field.dataType)) for field in schema.fields]
 
 
+def parse_source_table(source_table: str) -> list[tuple[str, bool]]:
+    """Parse schema.table, retaining quoted case and embedded dots for JDBC metadata."""
+    parts = []
+    offset = 0
+    while offset < len(source_table):
+        match = SOURCE_PART_PATTERN.match(source_table, offset)
+        if match is None:
+            raise ValueError(f"invalid source table reference: {source_table!r}")
+        quoted, unquoted = match.groups()
+        parts.append((quoted.replace('""', '"') if quoted is not None else unquoted, quoted is not None))
+        offset = match.end()
+        if offset == len(source_table):
+            break
+        if source_table[offset] != "." or offset + 1 == len(source_table):
+            raise ValueError(f"invalid source table reference: {source_table!r}")
+        offset += 1
+    if len(parts) != 2:
+        raise ValueError(f"source table must contain schema.table: {source_table!r}")
+    return parts
+
+
 def detect_key_columns(spark, jdbc_url, user, password, source_table) -> list[tuple[str, str]]:
     """Best-effort ordered (column, JDBC type) candidates from PK and unique indexes."""
     try:
+        parts = parse_source_table(source_table)
         connection = spark._jvm.java.sql.DriverManager.getConnection(jdbc_url, user, password)
         try:
             metadata = connection.getMetaData()
-            parts = source_table.split(".")
-            if len(parts) != 2:
-                return []
-            schema, table = parts
-            for candidate_schema, candidate_table in (
-                (schema, table),
-                (schema.upper(), table.upper()),
-            ):
+            original = tuple(name for name, _ in parts)
+            folded = tuple(name if quoted else name.upper() for name, quoted in parts)
+            for candidate_schema, candidate_table in dict.fromkeys((original, folded)):
                 ordered = _ordered_key_columns(metadata, candidate_schema, candidate_table)
                 if ordered:
                     types = _column_types(metadata, candidate_schema, candidate_table)
                     return [(name, types.get(name.lower(), "")) for name in ordered]
         finally:
             connection.close()
-    except Exception:
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "JDBC metadata unavailable for %s; falling back to an unpartitioned read: %s",
+            source_table, exc,
+        )
         return []
+    logging.getLogger(__name__).warning(
+        "No JDBC key metadata found for %s; falling back to an unpartitioned read",
+        source_table,
+    )
     return []
 
 
@@ -360,8 +386,8 @@ def main(argv: list[str] | None = None) -> None:
             f"load started table={args.source_table} target={args.target_table} "
             f"process_id={args.process_id}"
         )
-        partition_column = args.partition_column or args.incremental_column
-        if partition_column is None:
+        partition_column = None if args.no_parallelism else args.partition_column or args.incremental_column
+        if not args.no_parallelism and partition_column is None:
             partition_column = pick_partition_column(
                 detect_key_columns(
                     spark, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table
@@ -370,13 +396,7 @@ def main(argv: list[str] | None = None) -> None:
         reader = _jdbc_reader(spark, args, read_query)
         if partition_column is not None:
             lower_bound, upper_bound = _read_bounds(spark, args, read_query, partition_column)
-            if lower_bound is None:
-                print(
-                    f"load finished table={args.source_table} target={args.target_table} "
-                    f"process_id={args.process_id} rows_appended=0"
-                )
-                return
-            if lower_bound != upper_bound:
+            if lower_bound is not None and upper_bound is not None and lower_bound != upper_bound:
                 reader = (
                     reader.option("partitionColumn", partition_column)
                     .option("lowerBound", _bound_literal(lower_bound))
@@ -394,7 +414,9 @@ def main(argv: list[str] | None = None) -> None:
         )
         if not spark.catalog.tableExists(args.target_table):
             spark.sql(create_sql)
-        frame.writeTo(args.target_table).option("mergeSchema", "true").append()
+        frame.writeTo(args.target_table).option("mergeSchema", "true").option(
+            "check-ordering", "false"
+        ).append()
         rows = frame.count()
         message = (
             f"load finished table={args.source_table} target={args.target_table} "

@@ -1,5 +1,43 @@
 # Raw-Layer Ingestion Framework — Implementation Plan
 
+## Stage 01 contract update (2026-10-26)
+
+This section supersedes the initial build-sheet details below where they differ.
+DockerOperator isolation and incremental lookback/state-versioning are separate later stages.
+
+- Credentials: `.env` has only `STAND_USER` and `STAND_PASSWORD`, both `admin123`.
+  Source reader credentials remain sydafa-owned `sydafa/sydafa`. Existing authentication
+  mechanisms receive stand credentials at runtime; technical crypto keys remain separate.
+- Pipelines are discovered recursively, deterministically. The supplied four manifests are
+  `pipelines/{bank,broker}/{main,refs}.yaml`: main owns transactions (incremental `_batch_id`)
+  and deals (snapshot), refs owns clients/accounts (snapshot).
+- DAG IDs and flat output stems are `ingest__<type>__<source_id>[__<file_stem>]`;
+  omit the suffix when stem equals source_id. Both ID collisions and cross-pipeline
+  normalized target collisions fail before writing output, with both input paths.
+- `ingestion/settings.yaml`: `spark.jdbc.num_partitions: 4`, strict positive integer.
+  Entity `spark.parallelism` defaults true. False bypasses metadata discovery and bounds
+  queries, reading a single JDBC partition. All demo non-transactions set false.
+- Entity `airflow.pool.name` defaults `default_pool`, `airflow.pool.slots` defaults 1;
+  fields are independent. Demo loads explicitly use ingest_loads (capacity 4), with
+  transactions weight 2, others 1. Only load tasks receive these settings.
+- Runtime stays SparkSubmitOperator/client mode. Source type is passed and validated;
+  quoted identifiers are supported in metadata discovery; empty tables still create
+  targets and validate incremental schema. END follows successful watermark persistence.
+- Iceberg appends use mergeSchema=true and check-ordering=false: newly merged source
+  columns may follow technical fields in the stored schema; alignment remains by name.
+- A process ID belongs to a DAG run, not all tables of a source. Load retries reuse it;
+  a new DAG run gets a new ID. Selectively clearing generate_process_id after successful
+  loads is not a supported way to rerun ingestion.
+- At-least-once remains: Iceberg and pg-meta are not a single transaction. A crash after
+  data commit may duplicate a portion on retry; process ID alone does not prevent this.
+- Test cleanup is scoped by project/source ownership, never broad container name filters.
+  Static validation generates in memory; e2e exercises four DAGs, both source dialects,
+  pool weights, repeat snapshots, incremental no-op/delta and Iceberg schema evolution.
+
+Standalone CLI does not retrieve pg-meta state. To test an incremental no-op manually,
+pass the previously committed integral maximum with `--watermark-value`; repeating
+`--incremental-column` alone is another bootstrap read, not a watermark-gated retry.
+
 - **Provenance**: `__process_id`/logging pattern from the local clone `~/git/dbt_dag_generator` (`python/rnd/libs/logging.py`, `python/rnd/dbt_utils/dbt_dag_generator.py`); stand layout facts from the repo itself.
 - **Repo constraints (AGENTS.md)**: no `#` comments in Python (docstrings only); branches `kodik/*`; PR mandatory; agent never merges; every change ships with unit or e2e tests; `./test/test.sh` must end with `FAIL=0`.
 

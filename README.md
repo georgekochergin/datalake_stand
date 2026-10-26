@@ -157,9 +157,9 @@ docker compose up -d --build
 |---|---|---|
 | Spark Master UI | http://localhost:8080 | без авторизации |
 | Spark Worker UI | http://localhost:8081 | без авторизации |
-| SILO (консоль, MinIO-совместимая) | http://localhost:9001 | `admin` / `admin123` (`SILO_ROOT_USER`/`SILO_ROOT_PASSWORD`) |
+| SILO (консоль, MinIO-совместимая) | http://localhost:9001 | `admin123` / `admin123` (`STAND_USER`/`STAND_PASSWORD`) |
 | sydafa (Swagger UI) | http://localhost:8090/docs | без авторизации (эмулятор источников СУБД) |
-| Airflow | http://localhost:8089 | `admin` / `admin` (`AIRFLOW_UI_USER`/`AIRFLOW_UI_PASSWORD`) |
+| Airflow | http://localhost:8089 | `admin123` / `admin123` (`STAND_USER`/`STAND_PASSWORD`) |
 
 ### Подключение из DBeaver (на машине, где запущен docker)
 
@@ -167,7 +167,7 @@ docker compose up -d --build
 - Host: `localhost`, Port: `8443`
 - Use SSL: да (Trino работает по HTTPS с самоподписанным сертификатом)
 - Catalog/Database: `raw`
-- Username: `admin`, Password: `admin`
+- Username: `admin123`, Password: `admin123`
   (password-authenticator — `conf/trino/`)
 - Driver properties: `SSL=true;SSLVerification=NONE`
 - JDBC URL: `jdbc:trino://localhost:8443/raw?SSL=true&SSLVerification=NONE`
@@ -261,7 +261,7 @@ REST-интерфейс: `http://localhost:8090`, интерактивная д�
 
 ### DAG-и загрузки raw-слоя (генерируются из манифестов)
 
-`ingest_bank` / `ingest_broker` — статически сгенерированные DAG-и
+`ingest__rdbms__{bank,broker}__{main,refs}` — четыре статически сгенерированных DAG-а
 (`schedule=None`, ручной запуск). Структура:
 
 ```
@@ -272,20 +272,22 @@ activate_source (SydafaActivateOperator, TTL 15 мин)
 
 - `load` — `IngestAppendOperator` (подкласс `SparkSubmitOperator`, client-mode):
   spark-job `spark/raw/load_entity.py` читает источник по JDBC
-  (параллелизм по PK/уникальному индексу вычисляется автоматически) и
+  (столбец параллельного чтения выбирается автоматически) и
   **append-only** дописывает в `raw.<source_id>.<schema>__<table>`.
   Первый запуск создаёт таблицу DDL-ом по фактической схеме источника
   (партиционирование `days(__load_dttm)`, свойство `accept-any-schema`);
   далее — appends c `mergeSchema`: новые колонки источника добавляются
   автоматически, исчезнувшие — NULL, порядок не важен, история не
-  перезаписывается.
+  перезаписывается. `check-ordering=false` отключает проверку позиции полей
+  Iceberg, сохраняя сопоставление по имени и проверку типов.
 - Каждая строка получает `__load_dttm` (время загрузки, timestamptz) и
   `__process_id` (идентификатор запуска DAG из pg-meta sequence).
 - `log_end` для инкрементальных сущностей продвигает watermark:
   `SELECT max(<incremental_column>) WHERE __process_id = <pid>` через Trino
   → pg-meta (только после успешной фиксации — at-least-once).
-- Все `load`-таски всех загрузочных DAG-ов разделяют пул `ingest_loads`
-  (4 слота) — параллельные Spark-приложения не исчерпывают память стенда.
+- В демонстрации все `load`-таски разделяют пул `ingest_loads` (4 слота):
+  transactions занимает 2 слота, остальные загрузки — 1. Пул ограничивает
+  допуск приложений, но не выделяет им CPU/память.
 
 Режимы загрузки задаются в манифесте пайплайна:
 
@@ -296,14 +298,48 @@ activate_source (SydafaActivateOperator, TTL 15 мин)
 Манифесты (`ingestion/`):
 
 - `sources.yaml` — реестр источников (`type: rdbms` + Airflow connection);
-- `pipelines/<source_id>.yaml` — сущности DAG-а (список FQN, инкрементальные
-  колонки, теги).
+- `pipelines/{bank,broker}/main.yaml` — transactions (incremental) и deals (snapshot);
+- `pipelines/{bank,broker}/refs.yaml` — clients и accounts (snapshot);
+- `settings.yaml` — общие технические настройки, сейчас `spark.jdbc.num_partitions: 4`.
+
+Обход pipelines рекурсивный. Источник определяется `source_id` внутри YAML,
+а не папкой. DAG ID и имя Python-файла без расширения:
+`ingest__<source.type>__<source_id>[__<yaml_file_stem>]`; постфикс опускается,
+если stem совпадает с source_id. Коллизии DAG ID и владение одной целевой
+таблицей несколькими pipelines запрещены, ошибки указывают оба файла.
+
+Пример настройки entity:
+
+```yaml
+- fqn: retail_bank.clients
+  spark:
+    parallelism: false
+  airflow:
+    pool:
+      name: ingest_loads
+      slots: 1
+```
+
+Без `airflow.pool` используются `default_pool` и один слот; name и slots
+независимы. Пользовательские пулы необходимо заранее создать в Airflow.
+По умолчанию JDBC-параллелизм разрешён. В демонстрации он отключён у всех
+таблиц, кроме transactions: пропускаются поиск ключа и запрос MIN/MAX,
+чтение идёт одной JDBC-партицией. Это не отключает все внутренние потоки Spark.
+Settings инлайнятся в DAG при генерации, YAML не читается при парсинге Airflow.
+
+`__process_id` сквозной в пределах одного DAG run; retries load используют
+тот же ID, новый run получает новый. Не перезапускайте отдельно
+generate_process_id после уже выполненных загрузок: повторяйте весь DAG новым run.
+Данные и watermark фиксируются в разных системах. Сбой после Iceberg commit
+до сохранения watermark или подтверждения успеха может привести к повторной
+записи порции при retry (at-least-once, не exactly-once). Process ID не является
+механизмом дедупликации. Пустой источник тоже создаёт raw-таблицу и проверяет схему.
 
 Именование таблиц (библиотека `ingestion/lib/`): каждая точка в полном имени
 сущности кодируется в `__` — `retail_bank.clients` →
 `raw.bank.retail_bank__clients` (каталог — слой, схема — источник).
 Валидация манифестов строгая: неизвестные ключи, дубликаты FQN и коллизии
-целевых имён отвергаются ещё на генерации DAG-ов.
+целевых имён отвергаются ещё на генерации DAG-ов, включая всё дерево pipelines.
 
 Генерация и проверка дрейфа:
 
@@ -326,10 +362,20 @@ python3 ingestion/generate_dags.py --check    # расхождение с ман
   источников и **три раунда загрузки** с проверками в Trino (append-only
   семантика, один `__process_id` на запуск DAG-а, удвоение снапшотов,
   инкрементальный watermark-гейт — повторная загрузка без изменений источника
-  не пишет ни одной строки), затем гасит окружение с удалением томов.
+  не пишет ни одной строки). Отдельное Spark-приложение проверяет add/drop/rename
+  колонок Iceberg и отказ при несовместимом изменении типа. Затем окружение
+  гасится с удалением только принадлежащих ему контейнеров и томов.
 - **Быстрая проверка запущенного стенда** (`./test/test.sh --verify`).
 
 Критерий успешности: `FAIL=0`, exit-code `0`.
+
+Если актуальные образы уже собраны, `TEST_SKIP_BUILD=1 ./test/test.sh`
+запускает полный сценарий без повторной сборки и pull. Используйте только
+после сборки текущих Dockerfile/config: этот режим не проверяет изменения образов.
+
+Текущий client-driver в Airflow использует Python 3.11, Spark worker image —
+Python 3.10. JDBC/DataFrame SQL-загрузки не запускают Python worker; Python
+UDF/RDD потребуют предварительного выравнивания minor-версий Python.
 
 Предусловия: Docker + Docker Compose, **≥16 ГБ RAM для Docker** (см. выше),
 склонированный репозиторий, `.env` (уже закоммичен). Интернет нужен только
@@ -341,24 +387,32 @@ python3 ingestion/generate_dags.py --check    # расхождение с ман
 
 Реквизиты доступа к сервисам стенда для пользователей и инструментов разработки:
 
+В `.env` только `STAND_USER` и `STAND_PASSWORD`, по умолчанию оба `admin123`.
+SILO требует пароль длиной не менее 8 символов; цифры сами по себе не обязательны.
+Файлы паролей Airflow/Trino создаются внутри контейнеров/служебного тома при
+инициализации, S3 credentials передаются через environment. JWT/TLS и другие
+технические ключи не заменяются универсальным паролем. Изменение env не меняет
+роли в уже инициализированных Postgres volumes: для этого тестового стенда
+допустима их переинициализация с потерей данных, но не широкая очистка Docker.
+
 * **Источники СУБД (MSSQL, Oracle)**:
   * Пользователь: `sydafa`
   * Пароль: `sydafa`
   * Назначение: чтение данных (`SELECT`) для Spark, Airflow, Trino и подключений из DBeaver.
 * **Trino** (`https://localhost:8443`):
-  * Пользователь: `admin`
-  * Пароль: `admin`
+  * Пользователь: `admin123`
+  * Пароль: `admin123`
   * Назначение: выполнение SQL-запросов через CLI или DBeaver.
 * **Airflow UI** (`http://localhost:8089`):
-  * Пользователь: `admin`
-  * Пароль: `admin`
+  * Пользователь: `admin123`
+  * Пароль: `admin123`
   * Назначение: веб-интерфейс оркестрации пайплайнов.
 * **SILO (S3-хранилище)**:
-  * Веб-консоль (`http://localhost:9001`): `admin` / `admin123`
-  * S3 API (`http://localhost:9000`): `admin` / `admin123`
+  * Веб-консоль (`http://localhost:9001`): `admin123` / `admin123`
+  * S3 API (`http://localhost:9000`): `admin123` / `admin123`
 * **Базы метаданных (pg-catalog, airflow-postgres, pg-meta)**:
-  * Пользователь: `admin`
-  * Пароль: `admin` (настраиваются в файле `.env`; для pg-meta — `PG_META_USER`/`PG_META_PASSWORD`).
+  * Пользователь: `admin123`
+  * Пароль: `admin123` (единые `STAND_USER` и `STAND_PASSWORD` в `.env`).
 * **Сервисы без авторизации**:
   * Spark Master UI: `http://localhost:8080`
   * Spark Worker UI: `http://localhost:8081`

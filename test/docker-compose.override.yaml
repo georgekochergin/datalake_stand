@@ -1,8 +1,13 @@
+x-test-source-connections: &test-source-connections
+  AIRFLOW_CONN_BANK_SOURCE: "mssql://sydafa:sydafa@${SYDAFA_CONTAINER_PREFIX:-sydafa-dlh-test}-src-mssql-bank:1433/sydafa"
+  AIRFLOW_CONN_BROKER_SOURCE: "oracle://sydafa:sydafa@${SYDAFA_CONTAINER_PREFIX:-sydafa-dlh-test}-src-oracle-broker:1521/sydafa"
+
 services:
   sydafa:
     environment:
       - SYDAFA_MAX_TTL_MINUTES=30
       - SYDAFA_TTL_MINUTES=15
+      - SYDAFA_CONTAINER_PREFIX=${SYDAFA_CONTAINER_PREFIX:-sydafa-dlh-test}
     volumes: !override
       - /var/run/docker.sock:/var/run/docker.sock
       - ./test/.workspace/conf/sydafa/sources.json:/app/config/sources.json:ro
@@ -36,22 +41,29 @@ services:
       - ./test/.workspace/spark:/opt/spark-jobs:ro
     ports: !override []
 
+  trino-init:
+    volumes: !override
+      - ./test/.workspace/conf/trino/init-auth.sh:/init-auth.sh:ro
+      - trino_auth:/auth
+
   trino:
     volumes: !override
-      - ./conf/trino/catalog:/etc/trino/catalog:ro
-      - ./conf/trino/config.properties:/etc/trino/config.properties:ro
-      - ./conf/trino/password-authenticator.properties:/etc/trino/password-authenticator.properties:ro
-      - ./conf/trino/password.db:/etc/trino/password.db:ro
-      - ./conf/trino/keystore.p12:/etc/trino/keystore.p12:ro
+      - ./test/.workspace/conf/trino/catalog:/etc/trino/catalog:ro
+      - ./test/.workspace/conf/trino/config.properties:/etc/trino/config.properties:ro
+      - ./test/.workspace/conf/trino/password-authenticator.properties:/etc/trino/password-authenticator.properties:ro
+      - trino_auth:/auth:ro
+      - ./test/.workspace/conf/trino/keystore.p12:/etc/trino/keystore.p12:ro
       - ./test/.workspace/trino:/opt/trino-sql:ro
     ports: !override []
 
   airflow-init:
+    environment: *test-source-connections
     volumes: !override
       - ./test/.workspace/airflow/dags:/opt/airflow/dags
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
 
   airflow-scheduler:
+    environment: *test-source-connections
     volumes: !override
       - ./test/.workspace/airflow/dags:/opt/airflow/dags
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
@@ -59,11 +71,13 @@ services:
       - ./test/.workspace/trino:/opt/airflow/sql:ro
 
   airflow-dag-processor:
+    environment: *test-source-connections
     volumes: !override
       - ./test/.workspace/airflow/dags:/opt/airflow/dags
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
 
   airflow-webserver:
+    environment: *test-source-connections
     volumes: !override
       - ./test/.workspace/airflow/dags:/opt/airflow/dags
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro

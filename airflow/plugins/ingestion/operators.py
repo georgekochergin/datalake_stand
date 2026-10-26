@@ -34,7 +34,16 @@ def _resolve_jdbc(connection) -> tuple[str, str, str]:
 def _pull_process_id(context) -> int | None:
     """Pull the run's process_id from the generate_process_id task, if present."""
     value = context["ti"].xcom_pull(task_ids="generate_process_id")
-    return int(value) if value is not None else None
+    return _validate_process_id(value) if value is not None else None
+
+
+def _validate_process_id(value) -> int:
+    """Require a positive integral process ID, including rendered XCom strings."""
+    if type(value) is int and value > 0:
+        return value
+    if isinstance(value, str) and value.isascii() and value.isdecimal() and int(value) > 0:
+        return int(value)
+    raise ValueError("process_id must be a positive integer from generate_process_id")
 
 
 def log_task_failed(
@@ -133,15 +142,7 @@ class TableLogOperator(BaseOperator):
         self.process_id = process_id
 
     def execute(self, context):
-        process_id = int(self.process_id)
-        registry.log_task(
-            pg_conn_id=self.pg_conn_id,
-            process_id=process_id,
-            source_id=self.source_id,
-            entity_fqn=self.entity_fqn,
-            datalake_table=self.datalake_table,
-            status=self.status,
-        )
+        process_id = _validate_process_id(self.process_id)
         if self.status == "END" and self.incremental_column:
             watermark = TrinoHook(trino_conn_id=self.trino_conn_id).get_first(
                 f"SELECT max({self.incremental_column}) FROM {self.datalake_table} "
@@ -155,6 +156,14 @@ class TableLogOperator(BaseOperator):
                     watermark_value=watermark,
                     process_id=process_id,
                 )
+        registry.log_task(
+            pg_conn_id=self.pg_conn_id,
+            process_id=process_id,
+            source_id=self.source_id,
+            entity_fqn=self.entity_fqn,
+            datalake_table=self.datalake_table,
+            status=self.status,
+        )
 
 
 class IngestAppendOperator(SparkSubmitOperator):
@@ -168,8 +177,17 @@ class IngestAppendOperator(SparkSubmitOperator):
         target_table: str,
         incremental_column: str | None = None,
         pg_conn_id: str = "ingestion_meta",
+        source_type: str = "rdbms",
+        parallelism: bool = True,
+        num_partitions: int = 4,
         **kwargs,
     ):
+        if not isinstance(source_type, str):
+            raise ValueError("source_type must be a string")
+        if type(parallelism) is not bool:
+            raise ValueError("parallelism must be a boolean")
+        if type(num_partitions) is not int or num_partitions <= 0:
+            raise ValueError("num_partitions must be a positive integer")
         super().__init__(
             application="/opt/spark-jobs/raw/load_entity.py",
             conn_id="spark_default",
@@ -182,6 +200,9 @@ class IngestAppendOperator(SparkSubmitOperator):
         self.target_table = target_table
         self.incremental_column = incremental_column
         self.pg_conn_id = pg_conn_id
+        self.source_type = source_type
+        self.parallelism = parallelism
+        self.num_partitions = num_partitions
         if self.on_failure_callback is None:
             self.on_failure_callback = partial(
                 log_task_failed,
@@ -192,9 +213,13 @@ class IngestAppendOperator(SparkSubmitOperator):
             )
 
     def execute(self, context):
+        if self.source_type != "rdbms":
+            raise ValueError(f"source_type {self.source_type!r} is not supported by JDBC ingestion")
         connection = BaseHook.get_connection(self.airflow_conn_id)
         jdbc_url, jdbc_user, jdbc_password = _resolve_jdbc(connection)
         process_id = _pull_process_id(context)
+        if process_id is None:
+            raise ValueError("missing process_id from generate_process_id")
         application_args = [
             "--jdbc-url",
             jdbc_url,
@@ -208,7 +233,11 @@ class IngestAppendOperator(SparkSubmitOperator):
             self.target_table,
             "--process-id",
             str(process_id),
+            "--num-partitions",
+            str(self.num_partitions),
         ]
+        if not self.parallelism:
+            application_args.append("--no-parallelism")
         if self.incremental_column:
             application_args += ["--incremental-column", self.incremental_column]
             watermark = registry.get_watermark(self.pg_conn_id, self.source_id, self.fqn)
