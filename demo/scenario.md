@@ -88,8 +88,20 @@ SELECT * FROM trading_core.clients ORDER BY client_id DESC FETCH FIRST 10 ROWS O
 
 DAG-и загрузки не пишутся руками — генерируются из YAML-манифестов
 (`ingestion/pipelines/`). В production это делает CI; здесь — одна команда.
+Чтобы показать генерацию «вживую», начните с чистого состояния.
 
-1. Терминал (из корня репозитория):
+1. Терминал (из корня репозитория) — удалить сгенерированные DAG-и:
+
+```bash
+ls airflow/dags/generated/
+rm -rf airflow/dags/generated
+```
+
+2. Airflow UI → подождать цикла парсинга (~полминуты) → четыре ingest-DAG-а
+   **исчезли** из списка: их определяют только файлы в `airflow/dags/generated/`,
+   никаких следов в базе Airflow они не оставляют (остались только
+   `update_source_*`).
+3. Сгенерировать DAG-и заново:
 
 ```bash
 python3 ingestion/generate_dags.py
@@ -97,15 +109,16 @@ ls -la airflow/dags/generated/
 python3 ingestion/generate_dags.py --check
 ```
 
-2. Показать сгенерированные файлы: `ingest__rdbms__bank__main.py`,
+4. Показать сгенерированные файлы: `ingest__rdbms__bank__main.py`,
    `ingest__rdbms__bank__refs.py` и два для broker; `--check` печатает
    `check: 0 difference(s)` — артефакты соответствуют манифестам.
-3. Airflow UI → появились четыре DAG-а `ingest__rdbms__{bank,broker}__{main,refs}`.
-   Открыть `ingest__rdbms__bank__main`: видна структура
+5. Airflow UI → после цикла парсинга четыре DAG-а
+   `ingest__rdbms__{bank,broker}__{main,refs}` **появились снова**. Открыть
+   `ingest__rdbms__bank__main`: видна структура
    `generate_process_id → activate_source → TaskGroup на каждую сущность
    (log_start → load → log_end)`.
-4. Запустить все четыре DAG-а (сначала банка, затем брокера — или все сразу).
-5. Пока идут: Spark Master UI (localhost:8080) — работающие приложения
+6. Запустить все четыре DAG-а (сначала банка, затем брокера — или все сразу).
+7. Пока идут: Spark Master UI (localhost:8080) — работающие приложения
    (Running Applications), по одному на каждую загрузку.
 
 **Что рассказать:** манифест = декларация «что грузить и как»; одна строка YAML
