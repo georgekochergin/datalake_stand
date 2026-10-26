@@ -1,0 +1,19 @@
+source_id: bank
+tags:
+  - ingestion
+  - bank
+  - main
+entities:
+  - fqn: retail_bank.transactions
+    incremental:
+      source_column: _batch_id
+    airflow:
+      pool:
+        name: ingest_loads
+        slots: 2
+  - fqn: retail_bank.deals
+    spark:
+      parallelism: false
+    airflow:
+      pool:
+        name: ingest_loads

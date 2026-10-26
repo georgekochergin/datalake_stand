@@ -27,4 +27,5 @@ ENV PATH="/opt/spark/bin:${PATH}"
 COPY conf/airflow/requirements.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
 
-COPY --chown=50000:0 conf/airflow/simple_auth_manager_passwords.json /opt/airflow/simple_auth_manager_passwords.json.generated
+COPY --chown=50000:0 conf/airflow/runtime_auth.py /opt/airflow/runtime_auth.py
+ENTRYPOINT ["/usr/bin/dumb-init", "--", "python", "/opt/airflow/runtime_auth.py"]

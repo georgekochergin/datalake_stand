@@ -1,0 +1,18 @@
+source_id: bank
+tags:
+  - ingestion
+  - bank
+  - refs
+entities:
+  - fqn: retail_bank.clients
+    spark:
+      parallelism: false
+    airflow:
+      pool:
+        name: ingest_loads
+  - fqn: retail_bank.accounts
+    spark:
+      parallelism: false
+    airflow:
+      pool:
+        name: ingest_loads

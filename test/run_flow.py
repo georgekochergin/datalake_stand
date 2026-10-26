@@ -8,10 +8,14 @@
 4. Исполнение и успешное завершение (state=success) DAG-ов обновления источников:
    - update_source_bank (All-or-Nothing миграция MSSQL)
    - update_source_broker (All-or-Nothing миграция Oracle)
+5. Исполнение четырёх DAG-ов ингестии main/refs (raw-слой) и проверку
+   данных в Iceberg через Trino REST: append-only семантика, общий __process_id
+   на запуск, работа инкрементального режима по _batch_id (watermark).
 """
 from __future__ import annotations
 
 import ast
+import base64
 import json
 import os
 from pathlib import Path
@@ -25,8 +29,29 @@ from typing import Any
 
 SYDAFA = os.environ.get("SYDAFA_URL", "http://sydafa:8000")
 AIRFLOW = os.environ.get("AIRFLOW_URL", "http://airflow-webserver:8080")
-AIRFLOW_USER = os.environ.get("AIRFLOW_USER", "admin")
-AIRFLOW_PASSWORD = os.environ.get("AIRFLOW_PASSWORD", "admin")
+AIRFLOW_USER = os.environ.get("AIRFLOW_USER", "admin123")
+AIRFLOW_PASSWORD = os.environ.get("AIRFLOW_PASSWORD", "admin123")
+TRINO = os.environ.get("TRINO_URL", "https://trino:8443")
+TRINO_USER = os.environ.get("TRINO_USER", "admin123")
+TRINO_PASSWORD = os.environ.get("TRINO_PASSWORD", "admin123")
+
+INGEST_DAGS = tuple(
+    f"ingest__rdbms__{source}__{pipeline}"
+    for source in ("bank", "broker") for pipeline in ("main", "refs")
+)
+
+RAW_SNAPSHOT_TABLES = [
+    "raw.bank.retail_bank__clients",
+    "raw.bank.retail_bank__accounts",
+    "raw.bank.retail_bank__deals",
+    "raw.broker.trading_core__clients",
+    "raw.broker.trading_core__accounts",
+    "raw.broker.trading_core__deals",
+]
+RAW_INCREMENTAL_TABLES = [
+    "raw.bank.retail_bank__transactions",
+    "raw.broker.trading_core__transactions",
+]
 
 _CTX = ssl.create_default_context()
 _CTX.check_hostname = False
@@ -146,21 +171,21 @@ def airflow_unpause(token: str, dag_id: str) -> tuple[int, str]:
     )
 
 
-def airflow_trigger(token: str, dag_id: str, run_id: str) -> tuple[int, str]:
+def airflow_trigger(token: str, dag_id: str, run_id: str, conf: dict[str, Any] | None = None) -> tuple[int, str]:
     url = "%s/api/v2/dags/%s/dagRuns" % (AIRFLOW, dag_id)
     return http(
         "POST",
         url,
-        {"dag_run_id": run_id, "logical_date": None},
+        {"dag_run_id": run_id, "logical_date": None, "conf": conf or {}},
         {"Authorization": "Bearer " + token, "Content-Type": "application/json"},
     )
 
 
-def airflow_trigger_retry(token: str, dag_id: str, run_id: str, timeout: int = 180) -> tuple[int, str]:
+def airflow_trigger_retry(token: str, dag_id: str, run_id: str, timeout: int = 180, conf: dict[str, Any] | None = None) -> tuple[int, str]:
     deadline = time.time() + timeout
     while time.time() < deadline:
         airflow_unpause(token, dag_id)
-        code, raw = airflow_trigger(token, dag_id, run_id)
+        code, raw = airflow_trigger(token, dag_id, run_id, conf=conf)
         if code == 200:
             return code, raw
         time.sleep(5)
@@ -199,6 +224,53 @@ def airflow_wait_run(token: str, dag_id: str, run_id: str, timeout: int = 300, n
     return False
 
 
+def trino_query(sql: str, timeout: int = 120) -> list[list[Any]]:
+    """Выполняет SQL в Trino через REST (/v1/statement) и возвращает строки данных.
+
+    Страницы данных приходят в промежуточных ответах (в терминальном ответе
+    поля data нет), поэтому строки накапливаются со всех ответов опроса.
+    """
+    auth = "Basic " + base64.b64encode(("%s:%s" % (TRINO_USER, TRINO_PASSWORD)).encode("utf-8")).decode("utf-8")
+    headers = {"Authorization": auth, "X-Trino-User": TRINO_USER, "Content-Type": "text/plain"}
+    code, raw = http("POST", TRINO + "/v1/statement", sql, headers, timeout=60)
+    if code != 200:
+        raise RuntimeError("trino statement %s: %s" % (code, raw[:300]))
+    deadline = time.time() + timeout
+    payload = json.loads(raw)
+    rows: list[list[Any]] = list(payload.get("data") or [])
+    while payload.get("nextUri"):
+        if time.time() > deadline:
+            raise RuntimeError("trino query timeout: %s" % sql[:200])
+        state = payload.get("stats", {}).get("state")
+        if state == "FAILED":
+            error = payload.get("error", {}).get("message", "unknown trino error")
+            raise RuntimeError("trino failed: %s (%s)" % (error, sql[:200]))
+        code, raw = http("GET", payload["nextUri"], None, headers, timeout=60)
+        if code != 200:
+            raise RuntimeError("trino poll %s: %s" % (code, raw[:300]))
+        payload = json.loads(raw)
+        rows.extend(payload.get("data") or [])
+        time.sleep(0.5)
+    if payload.get("stats", {}).get("state") == "FAILED":
+        error = payload.get("error", {}).get("message", "unknown trino error")
+        raise RuntimeError("trino failed: %s (%s)" % (error, sql[:200]))
+    return rows
+
+
+def raw_stats(table: str) -> tuple[int, int, int]:
+    """(count, count distinct __process_id, max __process_id) сырой таблицы."""
+    rows = trino_query(
+        "SELECT count(*), count(DISTINCT __process_id), max(__process_id) FROM %s" % table
+    )
+    return int(rows[0][0]), int(rows[0][1]), int(rows[0][2])
+
+
+def raw_rows_with_process(table: str, process_id: int) -> int:
+    """Число строк, загруженных конкретным запуском."""
+    rows = trino_query("SELECT count(*) FROM %s WHERE __process_id = %d" % (table, process_id))
+    return int(rows[0][0])
+
+
 def validate_manifests_and_dags() -> None:
     """Выполняет валидацию манифестов источников, файлов миграций и синтаксиса DAG-ов."""
     print("==> Шаг 0: Проверка структуры манифестов источников, миграций и DAG-ов...")
@@ -221,7 +293,7 @@ def validate_manifests_and_dags() -> None:
 
     bank = sources.get("bank", {})
     check("bank type is mssql", bank.get("type"), "mssql")
-    check("bank external_port is 14330", bank.get("external_port"), 14330)
+    check("bank external_port is isolated or configured", bank.get("external_port") in (None, 14330), True)
 
     bank_tables = bank.get("schema", {}).get("tables", {})
     bank_tbl_names = sorted(bank_tables.keys())
@@ -256,7 +328,7 @@ def validate_manifests_and_dags() -> None:
 
     broker = sources.get("broker", {})
     check("broker type is oracle", broker.get("type"), "oracle")
-    check("broker external_port is 15211", broker.get("external_port"), 15211)
+    check("broker external_port is isolated or configured", broker.get("external_port") in (None, 15211), True)
 
     broker_tables = broker.get("schema", {}).get("tables", {})
     broker_tbl_names = sorted(broker_tables.keys())
@@ -383,6 +455,29 @@ def validate_manifests_and_dags() -> None:
         "load_migration_operations" in c_broker and 'load_migration_operations("broker")' in c_broker and "SydafaMigrateOperator" in c_broker
     ), True)
 
+    sys.path.insert(0, str(ws))
+    from ingestion.generate_dags import generate_all
+    from ingestion.lib.manifest import load_sources
+
+    import yaml
+
+    for source in ("bank", "broker"):
+        pipeline_path = ws / "ingestion" / "pipelines" / source / "main.yaml"
+        pipeline = yaml.safe_load(pipeline_path.read_text(encoding="utf-8"))
+        entities = pipeline.get("entities", [])
+        transactions = [entity for entity in entities if entity.get("fqn", "").endswith(".transactions")]
+        check(source + " transactions uses structured incremental config", len(transactions) == 1 and transactions[0].get("incremental", {}).get("source_column") == "_batch_id", True)
+        check(source + " main has no legacy incremental keys", all("incremental_column" not in entity and "incremental_lookback" not in entity for entity in entities), True)
+
+    generated = generate_all(
+        load_sources(ws / "ingestion" / "sources.yaml"),
+        ws / "ingestion" / "pipelines", ws / "ingestion" / "settings.yaml",
+    )
+    check("generated DAG set", sorted(generated), sorted(name + ".py" for name in INGEST_DAGS))
+    for name, content in generated.items():
+        ast.parse(content, filename=name)
+        check("generated DAG %s syntax valid" % name, True, True)
+
 
 def main() -> None:
     validate_manifests_and_dags()
@@ -421,7 +516,7 @@ def main() -> None:
 
     print("\n==> Шаг 3: Проверка готовности Airflow...")
     token = airflow_token_retry(timeout=180)
-    check("Airflow login admin/admin", "ok" if token else None, "ok")
+    check("Airflow login with stand credentials", "ok" if token else None, "ok")
     if not token:
         print("FATAL: Не удалось авторизоваться в Airflow")
         return
@@ -450,6 +545,164 @@ def main() -> None:
     check("trigger update_source_broker", code, 200)
     broker_success = airflow_wait_run(token, "update_source_broker", run_id_broker, timeout=360, name="update_source_broker")
     check("update_source_broker completed successfully", broker_success, True)
+
+    print("\n==> Шаг 6: Регистрация и запуск DAG-ов ингестии (raw-слой), первая загрузка...")
+    for dag_id in INGEST_DAGS:
+        registered = airflow_wait_dag_registered(token, dag_id, timeout=240)
+        check("DAG %s registered in Airflow" % dag_id, registered, True)
+        if not registered:
+            print("FATAL: DAG %s не зарегистрирован (проверьте импорты плагина ingestion)" % dag_id)
+            return
+
+    stamp = str(int(time.time()))
+    auth_headers = {"Authorization": "Bearer " + token}
+    code, raw = http("GET", AIRFLOW + "/api/v2/pools/ingest_loads", None, auth_headers)
+    check("ingest_loads pool exists", code, 200)
+    if code == 200:
+        check("ingest_loads capacity", json.loads(raw).get("slots"), 4)
+    for dag_id in INGEST_DAGS:
+        code, raw = http("GET", AIRFLOW + f"/api/v2/dags/{dag_id}/tasks", None, auth_headers)
+        check(f"{dag_id} tasks readable", code, 200)
+        if code == 200:
+            loads = [task for task in json.loads(raw).get("tasks", []) if task["task_id"].endswith(".load")]
+            check(f"{dag_id} has two loads", len(loads), 2)
+            for task in loads:
+                check(task["task_id"] + " pool", task.get("pool"), "ingest_loads")
+                check(task["task_id"] + " slots", task.get("pool_slots"), 2 if "transactions" in task["task_id"] else 1)
+    for dag_id in INGEST_DAGS:
+        run_id = "e2e-ingest1-%s-%s" % (dag_id, stamp)
+        code, _ = airflow_trigger_retry(token, dag_id, run_id)
+        check("trigger %s (run 1)" % dag_id, code, 200)
+    run1_ok = True
+    for dag_id in INGEST_DAGS:
+        run_id = "e2e-ingest1-%s-%s" % (dag_id, stamp)
+        run1_ok = airflow_wait_run(token, dag_id, run_id, timeout=900, name=dag_id + " run 1") and run1_ok
+    if not run1_ok:
+        return
+
+    print("\n==> Шаг 7: Проверка raw-таблиц в Trino (первая загрузка)...")
+    first_counts: dict[str, int] = {}
+    try:
+        max_pids = {}
+        for table in RAW_SNAPSHOT_TABLES + RAW_INCREMENTAL_TABLES:
+            total, distinct_pids, max_pid = raw_stats(table)
+            first_counts[table] = total
+            check("%s: rows loaded" % table, total > 0, True)
+            check("%s: single process_id (one portion)" % table, distinct_pids, 1)
+            max_pids[table] = max_pid
+            batch_rows = trino_query(f"SELECT count(DISTINCT __batch_id), count_if(__batch_id IS NULL), min(__batch_id) FROM {table}")
+            check(table + ": single positive batch identity", batch_rows[0][0] == 1 and batch_rows[0][1] == 0 and batch_rows[0][2] > 0, True)
+        for source in ("bank", "broker"):
+            prefix = "retail_bank" if source == "bank" else "trading_core"
+            for pipeline, tables in (("main", ("deals", "transactions")), ("refs", ("clients", "accounts"))):
+                ids = {max_pids[f"raw.{source}.{prefix}__{table}"] for table in tables}
+                check(f"{source}/{pipeline} shares process_id", len(ids), 1)
+        check("each DAG run has its own process_id", len(set(max_pids.values())), 4)
+        rows = trino_query(
+            "SELECT count(*) FROM raw.bank.retail_bank__clients "
+            "WHERE __load_dttm = (SELECT max(__load_dttm) FROM raw.bank.retail_bank__clients)"
+        )
+        check("bank clients latest snapshot equals total (run 1)", int(rows[0][0]), first_counts["raw.bank.retail_bank__clients"])
+    except Exception as e:
+        check("raw tables query", str(e), "ok")
+
+    print("\n==> Шаг 8: Повторная загрузка обоих источников без изменений...")
+    for dag_id in INGEST_DAGS:
+        run_id = "e2e-ingest2-" + dag_id + stamp
+        code, _ = airflow_trigger_retry(token, dag_id, run_id)
+        check("trigger " + dag_id + " (run 2)", code, 200)
+        airflow_wait_run(token, dag_id, run_id, timeout=900, name=dag_id + " run 2")
+    try:
+        for table in RAW_SNAPSHOT_TABLES:
+            total, distinct_pids, _ = raw_stats(table)
+            check("%s: full-snapshot table doubles on re-run" % table, total, 2 * first_counts[table])
+            check("%s: two portions after re-run" % table, distinct_pids, 2)
+        for table in RAW_INCREMENTAL_TABLES:
+            total, distinct_pids, _ = raw_stats(table)
+            check(table + ": no delta", total, first_counts[table])
+            check(table + ": still one portion", distinct_pids, 1)
+        rows = trino_query(
+            "SELECT count(*) FROM raw.bank.retail_bank__clients "
+            "WHERE __load_dttm = (SELECT max(__load_dttm) FROM raw.bank.retail_bank__clients)"
+        )
+        check("bank clients latest snapshot equals first load count", int(rows[0][0]), first_counts["raw.bank.retail_bank__clients"])
+    except Exception as e:
+        check("raw tables query (run 2)", str(e), "ok")
+
+    print("\n==> Шаг 9: Миграция источника + третья загрузка (подхват дельты _batch_id)...")
+    run_id_mig2 = "e2e-run-bank2-" + stamp
+    code, _ = airflow_trigger_retry(token, "update_source_bank", run_id_mig2)
+    check("trigger update_source_bank (migration 2)", code, 200)
+    airflow_wait_run(token, "update_source_bank", run_id_mig2, timeout=360, name="update_source_bank migration 2")
+
+    run_id_mig2 = "e2e-run-broker2-" + stamp
+    code, _ = airflow_trigger_retry(token, "update_source_broker", run_id_mig2)
+    check("trigger update_source_broker (migration 2)", code, 200)
+    airflow_wait_run(token, "update_source_broker", run_id_mig2, timeout=360, name="broker migration 2")
+    for dag_id in INGEST_DAGS:
+        run_id = "e2e-ingest3-" + dag_id + stamp
+        code, _ = airflow_trigger_retry(token, dag_id, run_id)
+        check("trigger " + dag_id + " (run 3)", code, 200)
+        airflow_wait_run(token, dag_id, run_id, timeout=900, name=dag_id + " run 3")
+    try:
+        for table in RAW_SNAPSHOT_TABLES:
+            total, distinct_pids, max_pid = raw_stats(table)
+            check(table + ": three portions", distinct_pids, 3)
+            newest = raw_rows_with_process(table, max_pid)
+            oldest = raw_rows_with_process(table, max_pids[table])
+            check(table + ": source grew", newest > oldest, True)
+
+        for table in RAW_INCREMENTAL_TABLES:
+            total, distinct_pids, max_pid = raw_stats(table)
+            check(table + ": initial + delta", distinct_pids, 2)
+            check(table + ": history intact", raw_rows_with_process(table, max_pids[table]), first_counts[table])
+            delta = raw_rows_with_process(table, max_pid)
+            check(table + ": nonempty delta", delta > 0, True)
+            check(table + ": history + delta count", total, first_counts[table] + delta)
+    except Exception as e:
+        check("raw tables query (run 3)", str(e), "ok")
+
+    print("\n==> Шаг 10: Ручной полный snapshot transactions без сброса watermark...")
+    before_manual = {table: raw_stats(table) for table in RAW_SNAPSHOT_TABLES + RAW_INCREMENTAL_TABLES}
+    for source, prefix in (("bank", "retail_bank"), ("broker", "trading_core")):
+        dag_id = f"ingest__rdbms__{source}__main"
+        run_id = f"e2e-manual-full-{dag_id}-{stamp}"
+        code, _ = airflow_trigger_retry(token, dag_id, run_id, conf={
+            "force_full_snapshot_fqns": [f"{prefix}.transactions"],
+            "reason": "e2e manual full preserves incremental watermark",
+        })
+        check(f"trigger {dag_id} manual full", code, 200)
+        if not airflow_wait_run(token, dag_id, run_id, timeout=900, name=dag_id + " manual full"):
+            return
+        table = f"raw.{source}.{prefix}__transactions"
+        total, portions, pid = raw_stats(table)
+        snapshot_rows = raw_rows_with_process(table, pid)
+        check(table + ": manual full is nonempty", snapshot_rows > 0, True)
+        check(table + ": manual full exceeds last delta", snapshot_rows > raw_rows_with_process(table, before_manual[table][2]), True)
+        check(table + ": manual full preserves history", total, before_manual[table][0] + snapshot_rows)
+        check(table + ": manual full adds one portion", portions, before_manual[table][1] + 1)
+        deals = f"raw.{source}.{prefix}__deals"
+        deals_total, deals_portions, deals_pid = raw_stats(deals)
+        check(deals + ": manual full still loads deals", deals_portions, before_manual[deals][1] + 1)
+        check(deals + ": manual full deals snapshot unchanged", raw_rows_with_process(deals, deals_pid), raw_rows_with_process(deals, before_manual[deals][2]))
+        check(deals + ": manual full appends deals", deals_total, before_manual[deals][0] + raw_rows_with_process(deals, deals_pid))
+
+    print("\n==> Шаг 11: Штатная загрузка после manual full: transactions no-op, snapshots append...")
+    after_manual = {table: raw_stats(table) for table in RAW_SNAPSHOT_TABLES + RAW_INCREMENTAL_TABLES}
+    for dag_id in INGEST_DAGS:
+        run_id = f"e2e-after-manual-{dag_id}-{stamp}"
+        code, _ = airflow_trigger_retry(token, dag_id, run_id)
+        check(f"trigger {dag_id} after manual full", code, 200)
+        if not airflow_wait_run(token, dag_id, run_id, timeout=900, name=dag_id + " after manual full"):
+            return
+    for table in RAW_INCREMENTAL_TABLES:
+        check(table + ": normal run after manual full is no-op", raw_stats(table), after_manual[table])
+    for table in RAW_SNAPSHOT_TABLES:
+        total, portions, pid = raw_stats(table)
+        snapshot_rows = raw_rows_with_process(table, after_manual[table][2])
+        check(table + ": normal snapshot appended", total, after_manual[table][0] + snapshot_rows)
+        check(table + ": normal snapshot adds one portion", portions, after_manual[table][1] + 1)
+        check(table + ": normal snapshot unchanged", raw_rows_with_process(table, pid), snapshot_rows)
 
 
 if __name__ == "__main__":

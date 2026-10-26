@@ -5,9 +5,11 @@ networks:
 
 volumes:
   pg_catalog_data:
+  pg_meta_data:
   airflow_pg_data:
   silo_data:
   sydafa_state:
+  trino_auth:
 
 services:
 
@@ -31,12 +33,28 @@ services:
     image: postgres:16.15-bookworm
     environment:
       POSTGRES_DB: nessie
-      POSTGRES_USER: ${PG_CATALOG_USER}
-      POSTGRES_PASSWORD: ${PG_CATALOG_PASSWORD}
+      POSTGRES_USER: ${STAND_USER}
+      POSTGRES_PASSWORD: ${STAND_PASSWORD}
     volumes: ["pg_catalog_data:/var/lib/postgresql/data"]
     networks: [dlh-poc]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${PG_CATALOG_USER}"]
+      test: ["CMD-SHELL", "pg_isready -U ${STAND_USER} -d nessie"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  pg-meta:
+    image: postgres:16.15-bookworm
+    environment:
+      POSTGRES_DB: meta
+      POSTGRES_USER: ${STAND_USER}
+      POSTGRES_PASSWORD: ${STAND_PASSWORD}
+    volumes:
+      - "pg_meta_data:/var/lib/postgresql/data"
+      - ./conf/pg-meta/init:/docker-entrypoint-initdb.d:ro
+    networks: [dlh-poc]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${STAND_USER} -d meta"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -47,18 +65,18 @@ services:
       nessie.version.store.type: JDBC
       quarkus.datasource.db-kind: postgresql
       quarkus.datasource.jdbc.url: jdbc:postgresql://pg-catalog:5432/nessie
-      quarkus.datasource.username: ${PG_CATALOG_USER}
-      quarkus.datasource.password: ${PG_CATALOG_PASSWORD}
-      # Iceberg REST-каталог: объектное хранилище SILO + warehouse
-      nessie.catalog.default-warehouse: warehouse
-      nessie.catalog.warehouses.warehouse.location: s3://warehouse/
+      quarkus.datasource.username: ${STAND_USER}
+      quarkus.datasource.password: ${STAND_PASSWORD}
+      # Iceberg REST-каталог: объектное хранилище SILO + warehouse "raw" (layer = catalog)
+      nessie.catalog.default-warehouse: raw
+      nessie.catalog.warehouses.raw.location: s3://datalake/raw/
       nessie.catalog.service.s3.default-options.endpoint: http://silo:9000
       nessie.catalog.service.s3.default-options.path-style-access: "true"
       nessie.catalog.service.s3.default-options.auth-type: STATIC
       nessie.catalog.service.s3.default-options.region: us-east-1
       nessie.catalog.service.s3.default-options.access-key: urn:nessie-secret:quarkus:nessie.catalog.secrets.access-key
-      nessie.catalog.secrets.access-key.name: ${SILO_ROOT_USER}
-      nessie.catalog.secrets.access-key.secret: ${SILO_ROOT_PASSWORD}
+      nessie.catalog.secrets.access-key.name: ${STAND_USER}
+      nessie.catalog.secrets.access-key.secret: ${STAND_PASSWORD}
       nessie.server.authentication.enabled: "false"
     ports: ["19120:19120"]
     depends_on: {pg-catalog: {condition: service_healthy}}
@@ -70,8 +88,8 @@ services:
     image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${SILO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${SILO_ROOT_PASSWORD}
+      MINIO_ROOT_USER: ${STAND_USER}
+      MINIO_ROOT_PASSWORD: ${STAND_PASSWORD}
     ports: ["9000:9000", "9001:9001"]
     volumes: ["silo_data:/data"]
     networks: [dlh-poc]
@@ -85,8 +103,8 @@ services:
     image: amazon/aws-cli:2.17.0
     entrypoint: ["/bin/sh", "/init-bucket.sh"]
     environment:
-      AWS_ACCESS_KEY_ID: ${SILO_ROOT_USER}
-      AWS_SECRET_ACCESS_KEY: ${SILO_ROOT_PASSWORD}
+      AWS_ACCESS_KEY_ID: ${STAND_USER}
+      AWS_SECRET_ACCESS_KEY: ${STAND_PASSWORD}
       AWS_DEFAULT_REGION: us-east-1
     volumes: ["./conf/silo/init-bucket.sh:/init-bucket.sh:ro"]
     depends_on: {silo: {condition: service_healthy}}
@@ -99,7 +117,10 @@ services:
     entrypoint: ["/bin/bash", "-c"]
     command: ["exec /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master --host spark-master --port 7077 --webui-port 8080"]
     ports: ["7077:7077", "8080:8080"]
-    environment:
+    environment: &spark-env
+      AWS_ACCESS_KEY_ID: ${STAND_USER}
+      AWS_SECRET_ACCESS_KEY: ${STAND_PASSWORD}
+      AWS_REGION: us-east-1
       SYDAFA_URL: http://sydafa:8000
     volumes: ["./spark:/opt/spark-jobs:ro"]
     depends_on:
@@ -112,24 +133,39 @@ services:
     build: {context: ., dockerfile: conf/spark/Dockerfile}
     entrypoint: ["/bin/bash", "-c"]
     command: ["exec /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077 --webui-port 8081"]
-    environment:
-      SYDAFA_URL: http://sydafa:8000
+    environment: *spark-env
     volumes: ["./spark:/opt/spark-jobs:ro"]
     ports: ["8081:8081"]
     depends_on: [spark-master]
     networks: [dlh-poc]
 
+  trino-init:
+    image: httpd:2-alpine
+    entrypoint: ["/bin/sh", "/init-auth.sh"]
+    environment:
+      STAND_USER: ${STAND_USER}
+      STAND_PASSWORD: ${STAND_PASSWORD}
+    volumes:
+      - ./conf/trino/init-auth.sh:/init-auth.sh:ro
+      - trino_auth:/auth
+    networks: [dlh-poc]
+
   trino:
     image: trinodb/trino:479
+    environment:
+      AWS_ACCESS_KEY_ID: ${STAND_USER}
+      AWS_SECRET_ACCESS_KEY: ${STAND_PASSWORD}
     ports: ["8443:8443"] # HTTPS (password auth); HTTP 8080 остаётся только внутри сети для Airflow
     volumes:
       - ./conf/trino/catalog:/etc/trino/catalog:ro
       - ./conf/trino/config.properties:/etc/trino/config.properties:ro
       - ./conf/trino/password-authenticator.properties:/etc/trino/password-authenticator.properties:ro
-      - ./conf/trino/password.db:/etc/trino/password.db:ro
+      - trino_auth:/auth:ro
       - ./conf/trino/keystore.p12:/etc/trino/keystore.p12:ro
       - ./trino:/opt/trino-sql:ro
-    depends_on: {nessie: {condition: service_started}}
+    depends_on:
+      nessie: {condition: service_started}
+      trino-init: {condition: service_completed_successfully}
     networks: [dlh-poc]
 
   # ---------- Оркестрация ----------
@@ -138,12 +174,12 @@ services:
     image: postgres:16.15-bookworm
     environment:
       POSTGRES_DB: airflow
-      POSTGRES_USER: ${AIRFLOW_PG_USER}
-      POSTGRES_PASSWORD: ${AIRFLOW_PG_PASSWORD}
+      POSTGRES_USER: ${STAND_USER}
+      POSTGRES_PASSWORD: ${STAND_PASSWORD}
     volumes: ["airflow_pg_data:/var/lib/postgresql/data"]
     networks: [dlh-poc]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${AIRFLOW_PG_USER}"]
+      test: ["CMD-SHELL", "pg_isready -U ${STAND_USER} -d airflow"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -151,20 +187,28 @@ services:
   airflow-init:
     build: {context: ., dockerfile: conf/airflow/Dockerfile}
     image: dlh-poc-airflow:latest
-    entrypoint: ["/bin/bash", "-c"]
-    command: ["airflow db migrate"]
+    command: ["bash", "-c", "airflow db migrate && airflow pools set ingest_loads 4 'Raw-layer ingestion load tasks (shared across ingest DAGs)'"]
     environment: &airflow-env
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_PG_USER}:${AIRFLOW_PG_PASSWORD}@airflow-postgres:5432/airflow
+      <<: *spark-env
+      STAND_USER: ${STAND_USER}
+      STAND_PASSWORD: ${STAND_PASSWORD}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${STAND_USER}:${STAND_PASSWORD}@airflow-postgres:5432/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW_CONN_SPARK_DEFAULT: "spark://spark-master:7077?spark_binary=spark-submit"
-      AIRFLOW_CONN_TRINO_DEFAULT: "trino://admin:admin@trino:8443/iceberg?protocol=https&verify=false"
-      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "${AIRFLOW_UI_USER}:ADMIN"
+      AIRFLOW_CONN_TRINO_DEFAULT: "trino://${STAND_USER}:${STAND_PASSWORD}@trino:8443/raw?protocol=https&verify=false"
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "${STAND_USER}:ADMIN"
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/simple_auth_manager_passwords.json.generated
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
       AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow-webserver:8080/execution/"
       AIRFLOW__API_AUTH__JWT_SECRET: "datalake-stand-test-jwt-secret-0123456789abcdef"
       AIRFLOW_CONN_SYDAFA_DEFAULT: "http://sydafa:8000"
+      AIRFLOW_CONN_BANK_SOURCE: "mssql://sydafa:sydafa@sydafa-src-mssql-bank:1433/sydafa"
+      AIRFLOW_CONN_BROKER_SOURCE: "oracle://sydafa:sydafa@sydafa-src-oracle-broker:1521/sydafa"
+      AIRFLOW_CONN_INGESTION_META: "postgres://${STAND_USER}:${STAND_PASSWORD}@pg-meta:5432/meta"
       SYDAFA_URL: http://sydafa:8000
-    depends_on: {airflow-postgres: {condition: service_healthy}}
+    depends_on:
+      airflow-postgres: {condition: service_healthy}
+      pg-meta: {condition: service_healthy}
     volumes:
       - ./airflow:/opt/airflow/dags
       - ./airflow/plugins:/opt/airflow/plugins:ro
@@ -219,8 +263,10 @@ services:
     image: dlh-poc-test-runner
     profiles: ["test"]
     environment:
-      AIRFLOW_UI_USER: ${AIRFLOW_UI_USER}
-      AIRFLOW_UI_PASSWORD: ${AIRFLOW_UI_PASSWORD}
+      AIRFLOW_USER: ${STAND_USER}
+      AIRFLOW_PASSWORD: ${STAND_PASSWORD}
+      TRINO_USER: ${STAND_USER}
+      TRINO_PASSWORD: ${STAND_PASSWORD}
     depends_on:
       sydafa: {condition: service_healthy}
       nessie: {condition: service_started}

@@ -1,0 +1,18 @@
+source_id: broker
+tags:
+  - ingestion
+  - broker
+  - refs
+entities:
+  - fqn: trading_core.clients
+    spark:
+      parallelism: false
+    airflow:
+      pool:
+        name: ingest_loads
+  - fqn: trading_core.accounts
+    spark:
+      parallelism: false
+    airflow:
+      pool:
+        name: ingest_loads

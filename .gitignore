@@ -14,6 +14,10 @@ __pycache__/
 !/airflow/plugins/
 !/airflow/plugins/**
 
+# Сгенерированные DAG-и (артефакт ingestion/generate_dags.py)
+airflow/dags/generated/
+airflow/dags/generated/**
+
 # Исключаем временные файлы Python везде
 **/__pycache__/**
 **/*.pyc
@@ -24,6 +28,10 @@ test/.workspace/**
 
 /spark/*
 !/spark/.gitkeep
+!/spark/raw/
+!/spark/raw/**
+/spark/raw/**/__pycache__/
+/spark/raw/**/*.pyc
 
 /trino/*
 !/trino/.gitkeep

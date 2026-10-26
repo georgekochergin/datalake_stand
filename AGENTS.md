@@ -5,7 +5,7 @@
 - Каркас: `airflow/` `spark/` `trino/` (пользовательский код, не в git), `conf/` (как запущен стенд), `test/` (демо + e2e).
 - Конфигурация источников sydafa: через `sources.json` (`conf/sydafa/sources.json` на живом стенде, `test/sydafa/sources.json` в тестах).
 - Читатель источников: `sydafa`/`sydafa` (только SELECT). Админ снаружи недоступен.
-- Внутренние DNS-имена СУБД: `sydafa-src-mssql-mssql:1433`, `sydafa-src-oracle-oracle:1521`.
+- Внутренние DNS-имена СУБД (риг именует контейнеры `sydafa-src-<тип>-<source_id>`): `sydafa-src-mssql-bank:1433`, `sydafa-src-oracle-broker:1521`.
 - Демо-DAG-и: `test/dags/`, подключаются `test/docker-compose.override.yaml`.
 - Инспекция БД: `POST /sources/{source}/activate` → объект `connection` в ответе; внешний порт хоста задается в манифесте `sources.json` (`external_port`).
 - Интеграция с sydafa: пакет `sydafa-airflow` (`SydafaActivateOperator`) для явного пробуждения СУБД перед чтением.

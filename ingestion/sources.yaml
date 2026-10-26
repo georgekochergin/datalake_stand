@@ -1,0 +1,7 @@
+bank:
+  type: rdbms
+  airflow_conn_id: bank_source
+
+broker:
+  type: rdbms
+  airflow_conn_id: broker_source
