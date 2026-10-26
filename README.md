@@ -524,19 +524,14 @@ Spark-приложений (каждое — отдельный driver + executo
 Docker-машины), но не выделяет им CPU/память.
 
 **Ручной полный снимок.** У сгенерированных DAG-ов нет объявленных параметров
-запуска — в UI кнопка запуска открывает диалог с сразу активной кнопкой
-Trigger, без обязательных полей. Конфигурация полного снимка передаётся
-конфигом запуска через REST API:
+запуска — обычный запуск не требует ввода: диалог открывается с сразу
+активной кнопкой Trigger. Конфигурация передаётся там же, в диалоге запуска:
+разверните «Расширенные параметры» (Advanced Options) → поле
+**Configuration JSON** (предзаполнено `{}`) → вставьте конфигурацию запуска →
+Trigger:
 
-```bash
-TOKEN=$(curl -s -X POST http://localhost:8089/auth/token \
-  -d 'username=admin123&password=admin123' \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
-curl -X POST http://localhost:8089/api/v2/dags/ingest__rdbms__bank__main/dagRuns \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"dag_run_id": "manual-full", "logical_date": null,
-       "conf": {"force_full_snapshot_fqns": ["retail_bank.transactions"],
-                "reason": "Проверка полноты"}}'
+```json
+{"force_full_snapshot_fqns": ["retail_bank.transactions"], "reason": "Проверка полноты"}
 ```
 
 Выбранная таблица читается целиком (водяной знак сохраняется), остальные — по
