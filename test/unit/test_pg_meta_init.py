@@ -12,7 +12,9 @@ REQUIRED_OBJECTS = (
     "CREATE INDEX IF NOT EXISTS airflow_dagruns_log_process_id_idx",
     "CREATE TABLE IF NOT EXISTS ingestion.airflow_tasks_log",
     "CREATE INDEX IF NOT EXISTS airflow_tasks_log_run_idx",
-    "CREATE TABLE IF NOT EXISTS ingestion.table_watermarks",
+    "CREATE TABLE IF NOT EXISTS ingestion.extraction_state",
+    "CREATE TABLE IF NOT EXISTS ingestion.extraction_batches",
+    "CREATE TABLE IF NOT EXISTS ingestion.extraction_state_migrations",
 )
 
 
@@ -27,11 +29,16 @@ class TestPgMetaInitSql(unittest.TestCase):
         for statement in REQUIRED_OBJECTS:
             self.assertIn(statement, sql)
 
-    def test_tables_are_append_only(self):
+    def test_init_preserves_data(self):
         sql = INIT_SQL.read_text(encoding="utf-8")
-        self.assertNotIn("DROP ", sql.upper())
-        self.assertNotIn("UPDATE ", sql.upper())
-        self.assertNotIn("DELETE ", sql.upper())
+        self.assertNotIn("DROP TABLE", sql.upper())
+        self.assertNotIn("TRUNCATE ", sql.upper())
+        self.assertNotIn("CREATE TABLE IF NOT EXISTS ingestion.table_watermarks", sql)
+        self.assertIn("UNIQUE (dag_id, run_id, source_id, entity_fqn)", sql)
+        self.assertIn("DEFERRABLE INITIALLY DEFERRED", sql)
+        self.assertNotIn("CREATE TRIGGER", sql.upper())
+        self.assertNotIn("CREATE CONSTRAINT TRIGGER", sql.upper())
+        self.assertNotIn("RETURNS TRIGGER", sql.upper())
 
 
 if __name__ == "__main__":
