@@ -165,16 +165,35 @@ docker info | grep "Total Memory"   # должно быть ≥ 16 GiB
 ### 2.1. Запуск и остановка
 
 Предусловия: Docker + Docker Compose, ≥16 ГБ RAM для Docker (раздел 1.4),
-склонированный репозиторий с `.env`. Интернет нужен только для первой сборки
-образов — повторные запуски работают офлайн.
+склонированный репозиторий с `.env` и локальный образ эмулятора `sydafa:latest`
+(внешнего репозитория у него нет). Если образа нет — собрать из клона
+репозитория [sydafa](https://github.com/georgekochergin/sydafa), расположенного
+рядом со стендом:
 
 ```bash
-docker compose up -d --build        # сборка (первый раз) и запуск всех сервисов
+docker image inspect sydafa:latest >/dev/null 2>&1 || docker build -t sydafa:latest ../sydafa
+```
+
+Альтернатива — указать готовый образ переменной `SYDAFA_IMAGE` в окружении.
+Интернет нужен только для первой загрузки/сборки образов — повторные запуски
+работают офлайн.
+
+```bash
+docker compose up -d                # запуск стенда (используются собранные образы)
 docker compose ps                   # статус сервисов
 docker compose logs -f <сервис>     # логи конкретного сервиса
 docker compose stop                 # остановка без удаления контейнеров
 docker compose start                # повторный запуск остановленного стенда
 docker compose down                 # остановка и удаление контейнеров и сетей (тома остаются)
+```
+
+> **Не используйте `docker compose up --build`.** В этой форме Docker Compose
+> пытается скачать образы сервисов без секции `build` (например, `sydafa`) из
+> внешнего репозитория и завершается ошибкой `pull access denied`, даже когда
+> образ уже есть локально. Пересборка выполняется отдельной командой:
+
+```bash
+docker compose build && docker compose up -d   # пересборка образов и запуск
 ```
 
 Полный сброс с потерей всех данных (`down -v` удаляет тома: данные озера,
@@ -189,7 +208,7 @@ docker compose down -v --remove-orphans
 
 Изменения кода в `airflow/`, `spark/`, `trino/`, `conf/` подхватываются
 пересозданием контейнеров; изменение Dockerfile/requirements требует пересборки
-(`docker compose up -d --build`).
+(`docker compose build`, затем `docker compose up -d`).
 
 ### 2.2. Порты
 
