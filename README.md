@@ -71,7 +71,8 @@ flowchart TB
 
     API -- "Docker SDK: запуск СУБД + bootstrap" --> MSSQL
     API -- "Docker SDK: запуск СУБД + bootstrap" --> ORA
-    U1 -- "POST /sources/{source}/migrate" --> API    I1 -- "activate_source:\nPOST /activate (TTL)" --> API
+    U1 -- "POST /sources/{source}/migrate" --> API
+    I1 -- "activate_source:\nPOST /activate (TTL)" --> API
     I1 -- "generate_process_id, log_start/log_end" --> PGMETA
     I1 -- "load: spark-submit (client,\ndriver в airflow-scheduler)" --> SM
     MSSQL -- "JDBC read (user: sydafa)" --> SW
