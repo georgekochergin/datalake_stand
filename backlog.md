@@ -1,0 +1,83 @@
+# Бэклог
+
+Задачи имеют сквозные целочисленные номера внутри файла. Новым задачам назначается следующий номер; существующие номера не меняются и не переиспользуются.
+
+## 1. Изолировать Spark drivers через DockerOperator
+
+### Контекст
+
+Spark driver — управляющий процесс приложения: выполняет основной код, строит план вычислений, распределяет задачи между executors и получает результаты. Executors выполняют распределённую обработку данных на Spark workers.
+
+`deploy_mode` определяет место запуска driver, а не executors:
+
+- `client`: driver работает там, где запущен `spark-submit`.
+- `cluster`: driver размещается менеджером вычислительного кластера.
+
+Сейчас стенд использует Spark Standalone 3.5.5, Airflow LocalExecutor и `IngestAppendOperator`, унаследованный от `SparkSubmitOperator`, с `deploy_mode=client`. `spark-submit` и driver запускаются в контейнере `airflow-scheduler`, executors — на `spark-worker`. Код загрузчика: `spark/raw/load_entity.py`; оператор: `airflow/plugins/ingestion/operators.py`; конфигурация запуска: `docker-compose.yaml` и `conf/airflow/Dockerfile`.
+
+Spark Standalone 3.5.5 не поддерживает `cluster` deploy mode для Python-приложений. Поэтому одной сменой `deploy_mode` изолировать текущий PySpark driver нельзя. Production не требует именно cluster mode: важны изоляция ресурсов и управляемый жизненный цикл driver.
+
+### Проблема
+
+Driver потребляет CPU и память контейнера Airflow. Несколько параллельных загрузок создают несколько drivers/JVM рядом со scheduler и конкурируют с оркестратором за ресурсы. При остановке этого контейнера текущая загрузка теряет driver и не может нормально завершиться.
+
+Airflow pools ограничивают допуск и вес одновременно работающих загрузок, но не обеспечивают отдельные CPU/memory limits для каждого driver. Образ Airflow также содержит Spark, Java и JDBC-зависимости.
+
+### Предлагаемое решение
+
+Перевести предметный `IngestAppendOperator` на `DockerOperator`: одна задача загрузки — отдельный контейнер со `spark-submit` и driver. Сохранить Spark Standalone и `deploy_mode=client`.
+
+```text
+Airflow: IngestAppendOperator(DockerOperator)
+    → контейнер загрузки: spark-submit + driver
+        → Spark Standalone: executors на worker
+```
+
+Это отделяет ресурсы и окружение driver от scheduler, позволяет ограничивать CPU/память каждой загрузки и облегчает обновление зависимостей. Остановка scheduler не уничтожает driver-процесс непосредственно, но сохранение контейнера, мониторинг и восстановление управления зависят от реализации. Сам переход не гарантирует продолжение приложения после сбоя Airflow, автоматическое восстановление или exactly-once.
+
+#### Образ и зависимости
+
+- Адаптировать существующую Spark-сборку без необоснованного дублирования. Включить загрузчик, Spark/Python, Iceberg и MSSQL/Oracle JDBC drivers в образ, без host bind mounts кода для каждого запуска.
+- Проверить совместимость Java/Python и библиотек driver/executors; для Python workers требуется совпадение minor-версий Python.
+- Передавать конфигурацию каталога и credentials при запуске; не запекать secrets в образ.
+- Определить воспроизводимые build/tag и сборку образа до запуска DAG основного и e2e-контуров.
+- Добавить совместимый Docker provider. Убирать Spark/Java/SparkSubmit provider из Airflow image только после проверки остальных потребителей, включая пользовательские DAG.
+
+#### Контракт оператора
+
+- Сохранить runtime-разрешение Airflow Connections/source.type, получение process_id и watermark, pool/pool_slots.
+- Retry запускает новый контейнер, но сохраняет process_id своего DAG run.
+- Собирать команду без небезопасной shell interpolation; исключить пароли из командной строки, logs и rendered fields. Environment не является защищённым secret store: значения доступны привилегированному Docker API.
+- Ожидать завершения контейнера, передавать stdout/stderr в task logs, ненулевой exit code трактовать как failure.
+
+#### Сеть и ресурсы
+
+- Подключать контейнер к сети соответствующего compose-проекта; не смешивать основной и тестовый контуры.
+- Обеспечить доступ к Spark master, источникам, Nessie/SILO и обратное подключение executors к driver. Настроить уникальные имена/адреса попыток, `spark.driver.host`, bind address и отсутствие конфликтов портов параллельных drivers.
+- Расширить `ingestion/settings.yaml` настройками образа, CPU/memory limits и необходимых Spark resources. Точные ключи определить по версии DockerOperator.
+- Согласовать JVM memory с лимитом контейнера, оставив запас для Python, JVM overhead и native memory.
+- Разделять Airflow slots (admission control), Docker limits (ресурсы driver) и Spark/JDBC parallelism (распределённое выполнение).
+
+#### Жизненный цикл
+
+- Определить удаление контейнеров после success/failure и доступность логов после удаления.
+- При отмене задачи останавливать её контейнер и проверять освобождение executors.
+- Помечать контейнеры контуром, DAG run, task и попыткой; предусмотреть scoped cleanup orphan-контейнеров после аварии scheduler.
+- Проверить temporary mounts DockerOperator: пути внутри Airflow не обязательно доступны Docker daemon host.
+
+#### Риски и production-путь
+
+- Docker API/socket даёт широкие права на Docker-хост. Read-only mount socket не ограничивает операции API. Доступ предоставлять только компоненту, исполняющему задачи; не исправлять права глобальным небезопасным chmod и не требовать privileged-контейнеров.
+- Контейнеризация driver изолирует ресурсы, но сама по себе не создаёт строгую границу безопасности, не устраняет сетевые зависимости и добавляет управление образами, orphan cleanup и обработку cancellation.
+- Для production рассмотреть выделенные execution-хосты с защищённым Docker API либо KubernetesPodOperator. Другой путь — Spark на Kubernetes в cluster mode.
+- Kubernetes требует ограниченных namespace/RBAC, workload/image/network policies и управления секретами; право создавать произвольные привилегированные pods тоже опасно. Production-переход — отдельное решение, не обязательная часть этой задачи.
+
+#### Проверки и критерии готовности
+
+- Unit: настройки команды, credentials transport, Connection resolution, pool/slots, уникальные labels/сеть, resource limits, exit code и cancellation; отсутствие паролей в команде/logs/rendered fields.
+- E2E: четыре демонстрационных DAG работают из отдельных driver-контейнеров; проверены executor → driver и параллельные drivers; driver не выполняется в scheduler.
+- Проверены failure/retry со сквозным process_id, cleanup success/failure/cancel и отсутствие воздействия на чужой контур.
+- Сохранены snapshot/incremental/schema-evolution проверки. Обновлены README.md, implementation_plan.md и описание PR при наличии доступа.
+- Unit, генерация/`--check` и полный `./test/test.sh` проходят; e2e — `FAIL=0`, exit 0. Недоступные fault/cancellation проверки указывать явно.
+
+Задача отложена. Не является предварительным условием работы над инкрементом.
