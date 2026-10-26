@@ -221,11 +221,12 @@ docker compose down -v --remove-orphans
 | spark-worker UI | 8081 | |
 | trino (HTTPS) | 8443 | внутренний HTTP 8080 не опубликован — им пользуется только Airflow внутри сети |
 | airflow webserver | 8089 | |
+| pg-meta (PostgreSQL) | 55432 | операционная БД загрузок; подключение из DBeaver — раздел 2.5 |
 | bank, MSSQL (при активации) | 14330 | внешний порт источника из `sources.json` |
 | broker, Oracle (при активации) | 15211 | внешний порт источника из `sources.json` |
 
 Не опубликованы наружу (доступны только внутри сети стенда): `pg-catalog`,
-`pg-meta`, `airflow-postgres` — см. раздел 2.5 про доступ к pg-meta.
+`airflow-postgres`.
 
 ### 2.3. Веб-интерфейсы
 
@@ -264,15 +265,19 @@ docker compose down -v --remove-orphans
 
 Обзор озера и типовые запросы к raw-таблицам — в разделах 4.3 и 4.4.
 
-### 2.5. Доступ к pg-meta
+### 2.5. Подключение к pg-meta (DBeaver)
 
-`pg-meta` намеренно не опубликован на хост: это внутренняя операционная база
-фреймворка загрузки. Просмотр артефактов загрузок — через psql в контейнере:
+Операционная база фреймворка загрузки опубликована на хост портом 55432.
+В DBeaver — драйвер PostgreSQL:
+
+- Host: `localhost`, Port: `55432`, Database: `meta`;
+- Username/Password: `admin123` / `admin123`;
+- JDBC URL: `jdbc:postgresql://localhost:55432/meta`.
+
+Схема таблиц — `ingestion`. Быстрый просмотр без DBeaver — psql в контейнере:
 
 ```bash
 docker compose exec pg-meta psql -U admin123 -d meta -c '\dt ingestion.*'
-docker compose exec pg-meta psql -U admin123 -d meta -c \
-  "SELECT * FROM ingestion.extraction_batches ORDER BY batch_id DESC LIMIT 10;"
 ```
 
 Состав таблиц и смысл каждой колонки — раздел 4.6–4.7.
@@ -292,7 +297,7 @@ docker compose exec pg-meta psql -U admin123 -d meta -c \
 - **Airflow UI**: `admin123` / `admin123`.
 - **silo (консоль и S3 API)**: `admin123` / `admin123`.
 - **PostgreSQL стенда (pg-catalog, pg-meta, airflow-postgres)**: `admin123` /
-  `admin123` (наружу не опубликованы).
+  `admin123`; наружу опубликован только pg-meta (порт 55432, раздел 2.5).
 - Без авторизации: Spark Master/Worker UI, sydafa Swagger UI.
 
 ---

@@ -16,7 +16,7 @@ Trino/pg-meta → партиции в silo → устойчивость к эв�
 | Swagger UI sydafa | http://localhost:8090/docs |
 | Консоль silo | http://localhost:9001 (`admin123` / `admin123`) |
 | Spark Master UI | http://localhost:8080 |
-| DBeaver | два подключения к источникам (создаются на шаге 2) + Trino (см. README 2.4) |
+| DBeaver | два подключения к источникам (создаются на шаге 2), Trino (см. README 2.4) и pg-meta (см. README 2.5) |
 | Терминал | для генерации DAG-ов и psql к pg-meta |
 
 Реквизиты источников (одинаковые для обоих): пользователь `sydafa`, пароль
@@ -155,26 +155,22 @@ WHERE __load_dttm = (SELECT max(__load_dttm) FROM raw.bank.retail_bank__clients)
 оставил ровно одну порцию с одним `__process_id`; последний запрос — текущее
 состояние источника (актуальный снапшот).
 
-**pg-meta** (терминал; наружу база не опубликована — смотрим в контейнере):
+**pg-meta** (DBeaver, подключение — README 2.5; запросы поочерёдно):
 
-```bash
-docker compose exec pg-meta psql -U admin123 -d meta -c "
+```sql
 SELECT process_id, dag_id, run_id, status, ts
-FROM ingestion.airflow_dagruns_log ORDER BY id DESC LIMIT 10;"
+FROM ingestion.airflow_dagruns_log ORDER BY id DESC LIMIT 10;
 
-docker compose exec pg-meta psql -U admin123 -d meta -c "
 SELECT process_id, entity_fqn, status, ts
-FROM ingestion.airflow_tasks_log ORDER BY id DESC LIMIT 20;"
+FROM ingestion.airflow_tasks_log ORDER BY id DESC LIMIT 20;
 
-docker compose exec pg-meta psql -U admin123 -d meta -c "
 SELECT entity_fqn, configured_mode, incremental_column, incremental_type,
        watermark, revision, last_batch_id
-FROM ingestion.extraction_state ORDER BY source_id, entity_fqn;"
+FROM ingestion.extraction_state ORDER BY source_id, entity_fqn;
 
-docker compose exec pg-meta psql -U admin123 -d meta -c "
 SELECT batch_id, entity_fqn, mode, reason, status, attempt_count, row_count,
        watermark_before, watermark_after, lower_bound, upper_bound
-FROM ingestion.extraction_batches ORDER BY batch_id DESC LIMIT 16;"
+FROM ingestion.extraction_batches ORDER BY batch_id DESC LIMIT 16;
 ```
 
 **Что рассказать:** у `transactions` первая партия — `bootstrap` (первичное
@@ -204,13 +200,12 @@ FROM raw.bank.retail_bank__transactions GROUP BY 1, 2 ORDER BY 1;
 в порции стало больше — источник вырос); у `transactions` вторая порция —
 **только дельта** (~25 тыс. строк), история первой порции не тронута.
 
-4. pg-meta — артефакты второго раунда:
+4. pg-meta (DBeaver) — артефакты второго раунда:
 
-```bash
-docker compose exec pg-meta psql -U admin123 -d meta -c "
+```sql
 SELECT batch_id, reason, row_count, watermark_before, watermark_after, status
 FROM ingestion.extraction_batches
-WHERE entity_fqn = 'retail_bank.transactions' ORDER BY batch_id;"
+WHERE entity_fqn = 'retail_bank.transactions' ORDER BY batch_id;
 ```
 
 **Что рассказать:** у второй партии `reason=regular`: окно
@@ -354,12 +349,11 @@ GROUP BY 1 ORDER BY 1;
 - порядок колонок в таблице не важен: сопоставление по имени
   (`mergeSchema` + `accept-any-schema` + `check-ordering=false`, README 4.4).
 
-**pg-meta** — последние партии:
+**pg-meta** (DBeaver) — последние партии:
 
-```bash
-docker compose exec pg-meta psql -U admin123 -d meta -c "
+```sql
 SELECT batch_id, entity_fqn, reason, status, row_count, finished_at
-FROM ingestion.extraction_batches ORDER BY batch_id DESC LIMIT 8;"
+FROM ingestion.extraction_batches ORDER BY batch_id DESC LIMIT 8;
 ```
 
 Все партии загрузок после эволюции — `SUCCEEDED`: смена схемы источника не
