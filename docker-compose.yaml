@@ -7,6 +7,7 @@ volumes:
   pg_catalog_data:
   pg_meta_data:
   airflow_pg_data:
+  airflow_logs:
   silo_data:
   sydafa_state:
   trino_auth:
@@ -227,6 +228,7 @@ services:
       - ./airflow/plugins:/opt/airflow/plugins:ro
       - ./spark:/opt/spark-jobs:ro
       - ./trino:/opt/airflow/sql:ro
+      - airflow_logs:/opt/airflow/logs
     depends_on:
       airflow-init:
         condition: service_completed_successfully
@@ -240,6 +242,7 @@ services:
     volumes:
       - ./airflow:/opt/airflow/dags
       - ./airflow/plugins:/opt/airflow/plugins:ro
+      - airflow_logs:/opt/airflow/logs
     depends_on:
       airflow-init:
         condition: service_completed_successfully
@@ -254,6 +257,7 @@ services:
     volumes:
       - ./airflow:/opt/airflow/dags
       - ./airflow/plugins:/opt/airflow/plugins:ro
+      - airflow_logs:/opt/airflow/logs
     depends_on:
       airflow-init:
         condition: service_completed_successfully
