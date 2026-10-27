@@ -136,8 +136,6 @@ class TableLogOperator(BaseOperator):
         entity_fqn: str,
         datalake_table: str,
         status: str,
-        incremental_column: str | None = None,
-        trino_conn_id: str = "trino_default",
         pg_conn_id: str = "ingestion_meta",
         process_id: str = "{{ ti.xcom_pull(task_ids='generate_process_id') }}",
         **kwargs,
@@ -147,8 +145,6 @@ class TableLogOperator(BaseOperator):
         self.entity_fqn = entity_fqn
         self.datalake_table = datalake_table
         self.status = status
-        self.incremental_column = incremental_column
-        self.trino_conn_id = trino_conn_id
         self.pg_conn_id = pg_conn_id
         self.process_id = process_id
 

@@ -130,7 +130,6 @@ services:
       AWS_ACCESS_KEY_ID: ${STAND_USER}
       AWS_SECRET_ACCESS_KEY: ${STAND_PASSWORD}
       AWS_REGION: us-east-1
-      SYDAFA_URL: http://sydafa:8000
     volumes: ["./spark:/opt/spark-jobs:ro"]
     depends_on:
       nessie: {condition: service_started}
@@ -202,6 +201,7 @@ services:
       - |
         airflow db migrate
         python - <<'PY'
+        import os
         from airflow.models.connection import Connection
         from airflow.utils.session import create_session
 
@@ -212,6 +212,18 @@ services:
             ):
                 if session.query(Connection).filter_by(conn_id=conn_id).first() is None:
                     session.add(Connection(conn_id=conn_id, uri=uri))
+            for settings in (
+                dict(conn_id="spark_default", conn_type="spark", host="spark://spark-master", port=7077,
+                     extra={"spark_binary": "spark-submit"}),
+                dict(conn_id="trino_default", conn_type="trino", host="trino", port=8443, schema="raw",
+                     login=os.environ["STAND_USER"], password=os.environ["STAND_PASSWORD"],
+                     extra={"protocol": "https", "verify": "false"}),
+                dict(conn_id="sydafa_default", conn_type="http", host="http://sydafa", port=8000),
+                dict(conn_id="ingestion_meta", conn_type="postgres", host="pg-meta", port=5432,
+                     schema="meta", login=os.environ["STAND_USER"], password=os.environ["STAND_PASSWORD"]),
+            ):
+                if session.query(Connection).filter_by(conn_id=settings["conn_id"]).first() is None:
+                    session.add(Connection(**settings))
         PY
         airflow pools set ingest_loads 4 'Raw-layer ingestion load tasks (shared across ingest DAGs)'
     environment: &airflow-env
@@ -221,8 +233,6 @@ services:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${STAND_USER}:${STAND_PASSWORD}@airflow-postgres:5432/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:-AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=}"
-      AIRFLOW_CONN_SPARK_DEFAULT: "spark://spark-master:7077?spark_binary=spark-submit"
-      AIRFLOW_CONN_TRINO_DEFAULT: "trino://${STAND_USER}:${STAND_PASSWORD}@trino:8443/raw?protocol=https&verify=false"
       AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "${STAND_USER}:ADMIN"
       AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/simple_auth_manager_passwords.json.generated
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
@@ -231,9 +241,6 @@ services:
       AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: "10"
       AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow-webserver:8080/execution/"
       AIRFLOW__API_AUTH__JWT_SECRET: "datalake-stand-test-jwt-secret-0123456789abcdef"
-      AIRFLOW_CONN_SYDAFA_DEFAULT: "http://sydafa:8000"
-      AIRFLOW_CONN_INGESTION_META: "postgres://${STAND_USER}:${STAND_PASSWORD}@pg-meta:5432/meta"
-      SYDAFA_URL: http://sydafa:8000
     depends_on:
       airflow-postgres: {condition: service_healthy}
       pg-meta: {condition: service_healthy}

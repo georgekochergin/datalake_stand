@@ -52,7 +52,7 @@ def asset_uri(source_id: str, fqn: str) -> str:
 
 
 def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str]:
-    """Render the per-entity TaskGroup (log_start -> load -> log_end)."""
+    """Render logging, loading, and separate Asset publication for one entity."""
     target = resolve_fully_qualified(source.source_id, entity.fqn)
     group_id = f"load_{target.split('.')[-1]}"
     incremental_line = (
@@ -93,12 +93,16 @@ def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str
             f'                entity_fqn={json.dumps(entity.fqn)},',
             f'                datalake_table="{target}",',
             '                status="END",',
-            f'                outlets=[Asset("{asset_uri(source.source_id, entity.fqn)}")],',
         ]
     )
-    if incremental_line:
-        lines.append(f"                {incremental_line}")
-    lines.extend(['            )', '            log_start >> load >> log_end'])
+    lines.extend([
+        '            )',
+        '            publish_asset = EmptyOperator(',
+        '                task_id="publish_asset",',
+        f'                outlets=[Asset("{asset_uri(source.source_id, entity.fqn)}")],',
+        '            )',
+        '            log_start >> load >> log_end >> publish_asset',
+    ])
     return lines
 
 
@@ -116,6 +120,7 @@ def generate_dag_source(
         "from datetime import datetime",
         "",
         "from airflow import DAG",
+        "from airflow.providers.standard.operators.empty import EmptyOperator",
         "from airflow.sdk import Asset",
         "from airflow.utils.task_group import TaskGroup",
         "from sydafa_airflow.operators import SydafaActivateOperator",

@@ -219,8 +219,8 @@ class TestTableLogOperator(unittest.TestCase):
             process_id="42", **kwargs,
         )
 
-    def test_incremental_end_only_logs_lifecycle(self):
-        self.operator(status="END", incremental_column="_batch_id").execute({})
+    def test_end_only_logs_lifecycle(self):
+        self.operator(status="END").execute({})
         self.assertEqual(self.events, ["END"])
         self.module.registry.log_task.assert_called_once_with(
             pg_conn_id="ingestion_meta", process_id=42, source_id="bank", entity_fqn="s.t",
@@ -228,21 +228,32 @@ class TestTableLogOperator(unittest.TestCase):
         )
         self.module.registry.get_watermark.assert_not_called()
         self.module.registry.set_watermark.assert_not_called()
+        self.module.registry.plan_batch.assert_not_called()
+        self.module.registry.start_batch.assert_not_called()
+        self.module.registry.finalize_batch.assert_not_called()
+        self.module.registry.fail_batch.assert_not_called()
+
+    def test_logging_interface_has_no_extraction_parameters(self):
+        import inspect
+
+        parameters = inspect.signature(self.module.TableLogOperator.__init__).parameters
+        self.assertNotIn("incremental_column", parameters)
+        self.assertNotIn("trino_conn_id", parameters)
 
     def test_log_failure_is_propagated(self):
         self.module.registry.log_task.side_effect = RuntimeError("log failed")
         with self.assertRaisesRegex(RuntimeError, "log failed"):
-            self.operator(status="END", incremental_column="_batch_id").execute({})
+            self.operator(status="END").execute({})
 
     def test_start_and_snapshot_end_do_not_query_watermark(self):
-        self.operator(status="START", incremental_column="_batch_id").execute({})
+        self.operator(status="START").execute({})
         self.operator(status="END").execute({})
         self.module.registry.get_watermark.assert_not_called()
         self.module.registry.set_watermark.assert_not_called()
         self.assertEqual(self.events, ["START", "END"])
 
     def test_invalid_pid_fails_cleanly(self):
-        operator = self.operator(status="END", incremental_column="_batch_id")
+        operator = self.operator(status="END")
         operator.process_id = None
         with self.assertRaisesRegex(ValueError, "process_id"):
             operator.execute({})
