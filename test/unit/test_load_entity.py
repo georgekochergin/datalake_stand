@@ -286,6 +286,7 @@ class TestBuildCreateTableSql(unittest.TestCase):
             "(`client_id` bigint, `full_name` string, "
             "`__load_dttm` timestamp_ltz, `__process_id` bigint, `__batch_id` bigint) USING iceberg "
             "PARTITIONED BY (days(`__load_dttm`)) "
+            "LOCATION 's3://datalake/raw/bank/retail_bank__clients' "
             "TBLPROPERTIES ('write.spark.accept-any-schema'='true')",
         )
 
@@ -295,6 +296,17 @@ class TestBuildCreateTableSql(unittest.TestCase):
             [("a`b", "string")],
         )
         self.assertIn("`a``b` string", ddl)
+
+    def test_exact_location_for_each_namespace(self):
+        for namespace, table in (("bank", "retail_bank__accounts"), ("broker", "trading_core__transactions")):
+            with self.subTest(namespace=namespace):
+                ddl = load_entity.build_create_table_sql(f"raw.{namespace}.{table}", [("id", "bigint")])
+                self.assertIn(f"LOCATION 's3://datalake/raw/{namespace}/{table}'", ddl)
+
+    def test_unsafe_location_parts_rejected(self):
+        for target in ("raw.bank.a/b", "raw.bank.a'b", "raw../accounts", "raw.bank.a-b"):
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                load_entity.build_create_table_sql(target, [("id", "bigint")])
 
     def test_metadata_collision_rejected(self):
         with self.assertRaises(ValueError):

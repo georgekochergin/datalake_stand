@@ -75,6 +75,17 @@ cleanup() {
         self.assertNotIn("s3.secret-access-key", settings)
         self.assertIn("org.apache.iceberg.aws.s3.S3FileIO", settings)
 
+    def test_spark_native_nessie_and_trino_rest_share_warehouse(self):
+        settings = (ROOT / "conf/spark/spark-defaults.conf").read_text()
+        config = dict(line.split(None, 1) for line in settings.splitlines() if line.strip() and not line.startswith("#"))
+        self.assertEqual(config["spark.sql.catalog.raw.catalog-impl"], "org.apache.iceberg.nessie.NessieCatalog")
+        self.assertEqual(config["spark.sql.catalog.raw.uri"], "http://nessie:19120/api/v2")
+        self.assertEqual(config["spark.sql.catalog.raw.ref"], "main")
+        self.assertEqual(config["spark.sql.catalog.raw.warehouse"], "s3://datalake/raw/")
+        trino = (ROOT / "conf/trino/catalog/raw.properties").read_text()
+        self.assertIn("iceberg.catalog.type=rest", trino)
+        self.assertIn("iceberg.rest-catalog.warehouse=raw", trino)
+
     def test_non_test_project_is_rejected_before_docker(self):
         result = subprocess.run(
             ["bash", str(ROOT / "test/test.sh"), "--help"],
