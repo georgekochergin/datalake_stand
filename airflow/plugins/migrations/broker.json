@@ -3,28 +3,28 @@
     {
       "op": "append",
       "entity_fqn": "trading_core.clients",
-      "rows": 100
+      "rows": 20
     },
     {
       "op": "append",
       "entity_fqn": "trading_core.accounts",
-      "rows": 100
+      "rows": 20
     },
     {
       "op": "append",
       "entity_fqn": "trading_core.deals",
-      "rows": 1000
+      "rows": 200
     },
     {
       "op": "append",
       "entity_fqn": "trading_core.transactions",
-      "rows": 25000
+      "rows": 5000
     },
     {
       "op": "delete",
       "entity_fqn": "trading_core.deals",
       "predicate": [],
-      "limit": 50,
+      "limit": 10,
       "cascade": true
     },
     {
@@ -40,7 +40,7 @@
       "set": {
         "risk_profile": "Aggressive"
       },
-      "limit": 10
+      "limit": 2
     },
     {
       "op": "update",
@@ -55,7 +55,7 @@
       "set": {
         "status": "Closed"
       },
-      "limit": 10
+      "limit": 2
     },
     {
       "op": "update",
@@ -70,7 +70,7 @@
       "set": {
         "market": "OTC"
       },
-      "limit": 50
+      "limit": 10
     }
   ]
 }

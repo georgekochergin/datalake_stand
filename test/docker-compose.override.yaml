@@ -1,7 +1,3 @@
-x-test-source-connections: &test-source-connections
-  AIRFLOW_CONN_BANK_SOURCE: "mssql://sydafa:sydafa@${SYDAFA_CONTAINER_PREFIX:-sydafa-dlh-test}-src-mssql-bank:1433/sydafa"
-  AIRFLOW_CONN_BROKER_SOURCE: "oracle://sydafa:sydafa@${SYDAFA_CONTAINER_PREFIX:-sydafa-dlh-test}-src-oracle-broker:1521/sydafa"
-
 services:
   sydafa:
     environment:
@@ -58,13 +54,11 @@ services:
     ports: !override []
 
   airflow-init:
-    environment: *test-source-connections
     volumes: !override
       - ./test/.workspace/airflow/dags:/opt/airflow/dags
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
 
   airflow-scheduler:
-    environment: *test-source-connections
     volumes: !override
       - ./test/.workspace/airflow/dags:/opt/airflow/dags
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
@@ -73,14 +67,12 @@ services:
       - airflow_logs:/opt/airflow/logs
 
   airflow-dag-processor:
-    environment: *test-source-connections
     volumes: !override
       - ./test/.workspace/airflow/dags:/opt/airflow/dags
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
       - airflow_logs:/opt/airflow/logs
 
   airflow-webserver:
-    environment: *test-source-connections
     volumes: !override
       - ./test/.workspace/airflow/dags:/opt/airflow/dags
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro

@@ -1,5 +1,6 @@
 """Focused configuration and cleanup isolation contracts for the stand."""
 
+import base64
 import json
 import os
 from pathlib import Path
@@ -7,8 +8,9 @@ import runpy
 import shutil
 import subprocess
 import tempfile
+import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -137,12 +139,58 @@ run_runtime_checks() {
             self.assertEqual(services[name]["environment"]["AWS_SECRET_ACCESS_KEY"], "unit-password")
         for name in ("airflow-init", "airflow-scheduler", "airflow-dag-processor", "airflow-webserver"):
             environment = services[name]["environment"]
-            self.assertIn("sydafa-dlh-test-unit-src-mssql-bank", environment["AIRFLOW_CONN_BANK_SOURCE"])
-            self.assertIn("sydafa:sydafa@", environment["AIRFLOW_CONN_BROKER_SOURCE"])
+            self.assertNotIn("AIRFLOW_CONN_BANK_SOURCE", environment)
+            self.assertNotIn("AIRFLOW_CONN_BROKER_SOURCE", environment)
+            key = environment["AIRFLOW__CORE__FERNET_KEY"]
+            self.assertEqual(key, services["airflow-init"]["environment"]["AIRFLOW__CORE__FERNET_KEY"])
+            self.assertEqual(len(base64.urlsafe_b64decode(key)), 32)
+        command = services["airflow-init"]["command"]
+        self.assertEqual(command[:2], ["bash", "-ec"])
+        self.assertIn("sydafa-dlh-test-unit-src-mssql-bank", command[2])
+        self.assertIn("sydafa-dlh-test-unit-src-oracle-broker", command[2])
         for name in ("AIRFLOW_USER", "TRINO_USER"):
             self.assertEqual(services["test-runner"]["environment"][name], "unit-user")
         for service in services.values():
             self.assertFalse(service.get("ports"))
+
+    def test_source_connections_are_created_only_when_missing(self):
+        import yaml
+
+        compose = yaml.safe_load((ROOT / "docker-compose.yaml").read_text())
+        script = compose["services"]["airflow-init"]["command"][2]
+        initialization = script.split("python - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        connection = MagicMock()
+        session = MagicMock()
+        create_session = MagicMock()
+        create_session.return_value.__enter__.return_value = session
+        modules = {
+            "airflow.models.connection": types.SimpleNamespace(Connection=connection),
+            "airflow.utils.session": types.SimpleNamespace(create_session=create_session),
+        }
+        for existing, expected in (([None, None], 2), ([object(), None], 1), ([object(), object()], 0)):
+            with self.subTest(expected_created=expected):
+                session.reset_mock()
+                connection.reset_mock()
+                session.query.return_value.filter_by.return_value.first.side_effect = existing
+                with patch.dict("sys.modules", modules):
+                    exec(compile(initialization, "airflow-init", "exec"), {})
+                self.assertEqual(session.add.call_count, expected)
+                self.assertEqual(connection.call_count, expected)
+                if expected == 2:
+                    self.assertEqual(
+                        [call.kwargs["uri"] for call in connection.call_args_list],
+                        [
+                            "mssql://sydafa:sydafa@${SYDAFA_CONTAINER_PREFIX:-sydafa}-src-mssql-bank:1433/sydafa",
+                            "oracle://sydafa:sydafa@${SYDAFA_CONTAINER_PREFIX:-sydafa}-src-oracle-broker:1521/sydafa",
+                        ],
+                    )
+                self.assertEqual(
+                    [call.kwargs["conn_id"] for call in session.query.return_value.filter_by.call_args_list],
+                    ["bank_source", "broker_source"],
+                )
+        session.query.return_value.filter_by.return_value.first.side_effect = RuntimeError("database unavailable")
+        with patch.dict("sys.modules", modules), self.assertRaisesRegex(RuntimeError, "database unavailable"):
+            exec(compile(initialization, "airflow-init", "exec"), {})
 
 
 if __name__ == "__main__":

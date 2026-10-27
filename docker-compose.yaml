@@ -189,13 +189,31 @@ services:
   airflow-init:
     build: {context: ., dockerfile: conf/airflow/Dockerfile}
     image: dlh-poc-airflow:latest
-    command: ["bash", "-c", "airflow db migrate && airflow pools set ingest_loads 4 'Raw-layer ingestion load tasks (shared across ingest DAGs)'"]
+    command:
+      - bash
+      - -ec
+      - |
+        airflow db migrate
+        python - <<'PY'
+        from airflow.models.connection import Connection
+        from airflow.utils.session import create_session
+
+        with create_session() as session:
+            for conn_id, uri in (
+                ("bank_source", "mssql://sydafa:sydafa@${SYDAFA_CONTAINER_PREFIX:-sydafa}-src-mssql-bank:1433/sydafa"),
+                ("broker_source", "oracle://sydafa:sydafa@${SYDAFA_CONTAINER_PREFIX:-sydafa}-src-oracle-broker:1521/sydafa"),
+            ):
+                if session.query(Connection).filter_by(conn_id=conn_id).first() is None:
+                    session.add(Connection(conn_id=conn_id, uri=uri))
+        PY
+        airflow pools set ingest_loads 4 'Raw-layer ingestion load tasks (shared across ingest DAGs)'
     environment: &airflow-env
       <<: *spark-env
       STAND_USER: ${STAND_USER}
       STAND_PASSWORD: ${STAND_PASSWORD}
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${STAND_USER}:${STAND_PASSWORD}@airflow-postgres:5432/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:-AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=}"
       AIRFLOW_CONN_SPARK_DEFAULT: "spark://spark-master:7077?spark_binary=spark-submit"
       AIRFLOW_CONN_TRINO_DEFAULT: "trino://${STAND_USER}:${STAND_PASSWORD}@trino:8443/raw?protocol=https&verify=false"
       AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "${STAND_USER}:ADMIN"
@@ -207,8 +225,6 @@ services:
       AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow-webserver:8080/execution/"
       AIRFLOW__API_AUTH__JWT_SECRET: "datalake-stand-test-jwt-secret-0123456789abcdef"
       AIRFLOW_CONN_SYDAFA_DEFAULT: "http://sydafa:8000"
-      AIRFLOW_CONN_BANK_SOURCE: "mssql://sydafa:sydafa@sydafa-src-mssql-bank:1433/sydafa"
-      AIRFLOW_CONN_BROKER_SOURCE: "oracle://sydafa:sydafa@sydafa-src-oracle-broker:1521/sydafa"
       AIRFLOW_CONN_INGESTION_META: "postgres://${STAND_USER}:${STAND_PASSWORD}@pg-meta:5432/meta"
       SYDAFA_URL: http://sydafa:8000
     depends_on:

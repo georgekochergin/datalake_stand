@@ -363,31 +363,31 @@ def validate_manifests_and_dags() -> None:
     bank_appends = [op for op in bank_ops if op.get("op") == "append"]
     bank_updates = [op for op in bank_ops if op.get("op") == "update"]
     bank_deletes = [op for op in bank_ops if op.get("op") == "delete"]
-    check("bank migration has 4 appends (dims 100, 100, 1000 + fact 25k)", (
+    check("bank migration has 4 appends (dims 20, 20, 200 + fact 5k)", (
         len(bank_appends) == 4
-        and bank_appends[0].get("entity_fqn") == "retail_bank.clients" and bank_appends[0].get("rows") == 100
-        and bank_appends[1].get("entity_fqn") == "retail_bank.accounts" and bank_appends[1].get("rows") == 100
-        and bank_appends[2].get("entity_fqn") == "retail_bank.deals" and bank_appends[2].get("rows") == 1000
+        and bank_appends[0].get("entity_fqn") == "retail_bank.clients" and bank_appends[0].get("rows") == 20
+        and bank_appends[1].get("entity_fqn") == "retail_bank.accounts" and bank_appends[1].get("rows") == 20
+        and bank_appends[2].get("entity_fqn") == "retail_bank.deals" and bank_appends[2].get("rows") == 200
         and bank_appends[3].get("entity_fqn") == "retail_bank.transactions"
-        and bank_appends[3].get("rows") == 25000
+        and bank_appends[3].get("rows") == 5000
         and "new_key_ratio" not in bank_appends[3]
     ), True)
-    check("bank migration has 1 cascade delete of 50 deals", (
+    check("bank migration has 1 cascade delete of 10 deals", (
         len(bank_deletes) == 1
         and bank_deletes[0].get("entity_fqn") == "retail_bank.deals"
-        and bank_deletes[0].get("limit") == 50
+        and bank_deletes[0].get("limit") == 10
         and bank_deletes[0].get("cascade") is True
     ), True)
-    check("bank migration has 3 updates with predicates (limits 10, 10, 50)", (
+    check("bank migration has 3 updates with predicates (limits 2, 2, 10)", (
         len(bank_updates) == 3
         and bank_updates[0].get("entity_fqn") == "retail_bank.clients"
-        and bank_updates[0].get("limit") == 10
+        and bank_updates[0].get("limit") == 2
         and bank_updates[0].get("predicate") == [{"column": "status", "operator": "!=", "value": "VIP"}]
         and bank_updates[1].get("entity_fqn") == "retail_bank.accounts"
-        and bank_updates[1].get("limit") == 10
+        and bank_updates[1].get("limit") == 2
         and bank_updates[1].get("predicate") == [{"column": "status", "operator": "!=", "value": "Frozen"}]
         and bank_updates[2].get("entity_fqn") == "retail_bank.deals"
-        and bank_updates[2].get("limit") == 50
+        and bank_updates[2].get("limit") == 10
         and bank_updates[2].get("predicate") == [{"column": "status", "operator": "!=", "value": "Closed"}]
     ), True)
 
@@ -396,31 +396,31 @@ def validate_manifests_and_dags() -> None:
     b_appends = [op for op in broker_ops if op.get("op") == "append"]
     b_updates = [op for op in broker_ops if op.get("op") == "update"]
     b_deletes = [op for op in broker_ops if op.get("op") == "delete"]
-    check("broker migration has 4 appends (dims 100, 100, 1000 + fact 25k)", (
+    check("broker migration has 4 appends (dims 20, 20, 200 + fact 5k)", (
         len(b_appends) == 4
-        and b_appends[0].get("entity_fqn") == "trading_core.clients" and b_appends[0].get("rows") == 100
-        and b_appends[1].get("entity_fqn") == "trading_core.accounts" and b_appends[1].get("rows") == 100
-        and b_appends[2].get("entity_fqn") == "trading_core.deals" and b_appends[2].get("rows") == 1000
+        and b_appends[0].get("entity_fqn") == "trading_core.clients" and b_appends[0].get("rows") == 20
+        and b_appends[1].get("entity_fqn") == "trading_core.accounts" and b_appends[1].get("rows") == 20
+        and b_appends[2].get("entity_fqn") == "trading_core.deals" and b_appends[2].get("rows") == 200
         and b_appends[3].get("entity_fqn") == "trading_core.transactions"
-        and b_appends[3].get("rows") == 25000
+        and b_appends[3].get("rows") == 5000
         and "new_key_ratio" not in b_appends[3]
     ), True)
-    check("broker migration has 1 cascade delete of 50 deals", (
+    check("broker migration has 1 cascade delete of 10 deals", (
         len(b_deletes) == 1
         and b_deletes[0].get("entity_fqn") == "trading_core.deals"
-        and b_deletes[0].get("limit") == 50
+        and b_deletes[0].get("limit") == 10
         and b_deletes[0].get("cascade") is True
     ), True)
-    check("broker migration has 3 updates with predicates (limits 10, 10, 50)", (
+    check("broker migration has 3 updates with predicates (limits 2, 2, 10)", (
         len(b_updates) == 3
         and b_updates[0].get("entity_fqn") == "trading_core.clients"
-        and b_updates[0].get("limit") == 10
+        and b_updates[0].get("limit") == 2
         and b_updates[0].get("predicate") == [{"column": "risk_profile", "operator": "!=", "value": "Aggressive"}]
         and b_updates[1].get("entity_fqn") == "trading_core.accounts"
-        and b_updates[1].get("limit") == 10
+        and b_updates[1].get("limit") == 2
         and b_updates[1].get("predicate") == [{"column": "status", "operator": "!=", "value": "Closed"}]
         and b_updates[2].get("entity_fqn") == "trading_core.deals"
-        and b_updates[2].get("limit") == 50
+        and b_updates[2].get("limit") == 10
         and b_updates[2].get("predicate") == [{"column": "market", "operator": "!=", "value": "OTC"}]
     ), True)
 
@@ -520,6 +520,17 @@ def main() -> None:
     if not token:
         print("FATAL: Не удалось авторизоваться в Airflow")
         return
+
+    for conn_id, conn_type in (("bank_source", "mssql"), ("broker_source", "oracle")):
+        code, raw = http(
+            "GET", AIRFLOW + "/api/v2/connections/" + conn_id,
+            headers={"Authorization": "Bearer " + token},
+        )
+        check("Connection %s visible in Airflow metadata DB" % conn_id, code, 200)
+        if code == 200:
+            connection = json.loads(raw)
+            check("Connection %s type" % conn_id, connection.get("conn_type"), conn_type)
+            check("Connection %s reader" % conn_id, connection.get("login"), "sydafa")
 
     print("Ожидание регистрации DAG update_source_bank и update_source_broker в Airflow...")
     bank_dag_ok = airflow_wait_dag_registered(token, "update_source_bank", timeout=180)

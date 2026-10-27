@@ -230,7 +230,9 @@ def check_post_append_retry(spark, hook, jdbc, token):
 def main():
     """Run inside airflow-scheduler with Spark defaults and loaded source data."""
     from airflow.hooks.base import BaseHook
+    from airflow.models.connection import Connection
     from airflow.providers.postgres.hooks.postgres import PostgresHook
+    from airflow.utils.session import create_session
     from ingestion.operators import _resolve_jdbc
     from pyspark.sql import SparkSession
 
@@ -238,16 +240,21 @@ def main():
     os.environ.update(PGHOST=meta.host, PGPORT=str(meta.port or 5432),
                       PGDATABASE=meta.schema, PGUSER=meta.login, PGPASSWORD=meta.password)
     hook = PostgresHook(postgres_conn_id="ingestion_meta")
+    with create_session() as session:
+        source_jdbc = {
+            source: _resolve_jdbc(session.query(Connection).filter_by(conn_id=f"{source}_source").one())
+            for source in ("bank", "broker")
+        }
     token = "e2e-temporal-" + uuid4().hex
     spark = SparkSession.builder.appName("e2e-temporal-extraction").getOrCreate()
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     try:
-        check_post_append_retry(spark, hook, _resolve_jdbc(BaseHook.get_connection("bank_source")), token)
+        check_post_append_retry(spark, hook, source_jdbc["bank"], token)
         for source, table, kind in (
             ("bank", "retail_bank.transactions", "date"),
             ("broker", "trading_core.transactions", "timestamp_local(0)"),
         ):
-            jdbc = _resolve_jdbc(BaseHook.get_connection(f"{source}_source"))
+            jdbc = source_jdbc[source]
             exercise(spark, hook, source, jdbc, table, f"{source}_temporal", "posting_date", kind, token)
             for name, query, fixture_kind, upper in precision_fixtures(source):
                 exercise(spark, hook, source, jdbc, query, f"{source}_{name}", "position",

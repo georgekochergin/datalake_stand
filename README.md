@@ -393,10 +393,10 @@ docker compose exec pg-meta psql -U admin123 -d meta -c '\dt ingestion.*'
 пакета `sydafa-airflow`) применяет транзакционный батч операций из
 `airflow/plugins/migrations/{bank,broker}.json`:
 
-- вставки: +100 clients, +100 accounts, +1000 deals, +25000 transactions;
-- каскадное удаление 50 случайных сделок (`cascade: true` — вместе со
+- вставки: +20 clients, +20 accounts, +200 deals, +5000 transactions;
+- каскадное удаление 10 случайных сделок (`cascade: true` — вместе со
   ссылающимися транзакциями);
-- точечные обновления справочников (10 clients, 10 accounts, 50 deals — статус
+- точечные обновления справочников (2 clients, 2 accounts, 10 deals — статус
   или категория).
 
 Именно после запуска этих DAG-ов инкрементальные загрузки видят новую дельту, а
@@ -427,6 +427,23 @@ Airflow: скрипт `ingestion/generate_dags.py` статически прев
 Airflow Connections во время исполнения таска). Это заготовка будущего CI/CD:
 в CI генератор запускается автоматически, локально — вручную (имитация CI/CD на
 демо).
+
+Подключения к источникам `bank_source` и `broker_source` создаются сервисом
+`airflow-init` в metadata DB Airflow после миграции БД. Имена и начальные
+реквизиты (`sydafa/sydafa`) явно заданы в `docker-compose.yaml`; существующие
+Connections не перезаписываются при повторной инициализации. Их можно смотреть
+и редактировать в UI Airflow. Переменные `AIRFLOW_CONN_BANK_SOURCE` и
+`AIRFLOW_CONN_BROKER_SOURCE` не используются, чтобы не перекрывать настройки UI.
+В production подключения создаются вручную в UI; демо-инициализация для них
+не требуется. `ingestion/sources.yaml` только ссылается на Connections через
+`airflow_conn_id` и не управляет их созданием. Для изолированного тестового
+стенда адреса при инициализации используют `SYDAFA_CONTAINER_PREFIX`,
+который задаётся в `test/test.sh` (по умолчанию префикс источников — `sydafa`).
+Все сервисы Airflow используют общий Fernet-ключ для шифрования паролей в
+metadata DB. В Compose задан публичный демонстрационный ключ; вне демостенда
+обязательно задайте собственный `AIRFLOW_FERNET_KEY` до первой инициализации.
+Не меняйте ключ для существующей БД без штатной ротации Fernet-ключей Airflow:
+иначе сохранённые пароли станут недоступны.
 
 ```bash
 python3 ingestion/generate_dags.py            # (пере)генерация DAG-ов
