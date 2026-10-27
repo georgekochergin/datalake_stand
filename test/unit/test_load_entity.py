@@ -155,10 +155,16 @@ class TestValidateTargetTable(unittest.TestCase):
 class TestSqlReference(unittest.TestCase):
     """Dialect-aware column references for source SQL."""
 
-    def test_mssql_underscore_column_unquoted(self):
+    def test_mssql_column_bracket_quoted(self):
         self.assertEqual(
             load_entity.sql_reference("jdbc:sqlserver://host:1433", "_batch_id"),
-            "_batch_id",
+            "[_batch_id]",
+        )
+
+    def test_mssql_bracket_escaped(self):
+        self.assertEqual(
+            load_entity.sql_reference("jdbc:sqlserver://host:1433", "co]lumn"),
+            "[co]]lumn]",
         )
 
     def test_oracle_underscore_column_quoted(self):
@@ -173,17 +179,17 @@ class TestSqlReference(unittest.TestCase):
             '"updated_at"',
         )
 
-    def test_mssql_regular_column_unquoted(self):
-        self.assertEqual(load_entity.sql_reference("jdbc:sqlserver://h:1433", "updated_at"), "updated_at")
+    def test_unknown_dialect_unquoted(self):
+        self.assertEqual(load_entity.sql_reference("", "updated_at"), "updated_at")
 
 
 class TestSqlSourceTable(unittest.TestCase):
     """Dialect-aware schema.table references for source SQL."""
 
-    def test_mssql_keeps_reference_as_written(self):
+    def test_mssql_quotes_both_parts_with_brackets(self):
         self.assertEqual(
             load_entity.sql_source_table("jdbc:sqlserver://h:1433", "retail_bank.clients"),
-            "retail_bank.clients",
+            "[retail_bank].[clients]",
         )
 
     def test_oracle_quotes_both_parts(self):
@@ -222,7 +228,7 @@ class TestBuildReadQuery(unittest.TestCase):
     def test_incremental_builds_subquery_mssql(self):
         self.assertEqual(
             load_entity.build_read_query("retail_bank.clients", "_batch_id", "100", "jdbc:sqlserver://h:1433"),
-            "(SELECT * FROM retail_bank.clients WHERE _batch_id > 100) q",
+            "(SELECT * FROM [retail_bank].[clients] WHERE [_batch_id] > 100) q",
         )
 
     def test_incremental_builds_subquery_oracle_quotes_table_and_column(self):

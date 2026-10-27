@@ -106,27 +106,28 @@ def validate_target_table(target: str) -> tuple[str, str]:
 
 
 def sql_reference(jdbc_url: str, name: str) -> str:
-    """Render a column reference for source SQL.
+    """Render a column reference quoted for the source dialect.
 
-    All sydafa Oracle columns are stored lowercase (quoted identifiers), so
-    every column must be referenced quoted there; an unquoted reference would
-    fold to uppercase and miss the column. MSSQL is case-insensitive and needs
-    no quoting; an unknown dialect (empty url) is rendered unquoted.
+    Quoting is applied for every known RDBMS dialect: Oracle stores sydafa
+    identifiers lowercase and an unquoted reference would fold to uppercase
+    and miss the column, while MSSQL bracket quoting guards reserved words
+    and exact-case names. An unknown dialect (empty url) is rendered unquoted.
     """
     if jdbc_url.startswith("jdbc:oracle:"):
         return '"%s"' % name.replace('"', '""')
+    if jdbc_url.startswith("jdbc:sqlserver:"):
+        return "[%s]" % name.replace("]", "]]")
     return name
 
 
 def sql_source_table(jdbc_url: str, source_table: str, allow_expression: bool = False) -> str:
-    """Render a schema.table reference for source SQL.
+    """Render a schema.table reference quoted for the source dialect.
 
-    All sydafa Oracle objects are stored lowercase (quoted identifiers), so
-    every part must be referenced quoted there; an unquoted part would fold
-    to uppercase and miss the object. MSSQL is case-insensitive and keeps
-    the reference as written. With allow_expression a reference that is not
-    schema.table (already a subquery expression) is passed through unchanged;
-    otherwise malformed references are rejected.
+    Every part of the reference is quoted per dialect (Oracle double quotes,
+    MSSQL brackets), exactly as the object was created by sydafa. With
+    allow_expression a reference that is not schema.table (already a subquery
+    expression) is passed through unchanged; otherwise malformed references
+    are rejected.
     """
     try:
         parts = parse_source_table(source_table)
@@ -134,8 +135,8 @@ def sql_source_table(jdbc_url: str, source_table: str, allow_expression: bool = 
         if allow_expression:
             return source_table
         raise
-    if jdbc_url.startswith("jdbc:oracle:"):
-        return ".".join('"%s"' % name.replace('"', '""') for name, _ in parts)
+    if jdbc_url.startswith(("jdbc:oracle:", "jdbc:sqlserver:")):
+        return ".".join(sql_reference(jdbc_url, name) for name, _ in parts)
     return ".".join(
         ('"%s"' % name.replace('"', '""')) if quoted else name for name, quoted in parts
     )
@@ -558,8 +559,7 @@ def oracle_utc_projection(spark, args):
                 for index in range(1, metadata.getColumnCount() + 1):
                     name = str(metadata.getColumnLabel(index))
                     type_name = " ".join(str(metadata.getColumnTypeName(index)).upper().split())
-                    reference = '"%s"' % name.replace('"', '""') if (
-                        name != name.upper() or name.startswith("_")) else name
+                    reference = sql_reference(args.jdbc_url, name)
                     if "TIME ZONE" in type_name:
                         projected.append(f"SYS_EXTRACT_UTC(extract_source.{reference}) AS {reference}")
                     else:
