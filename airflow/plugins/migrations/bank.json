@@ -3,28 +3,28 @@
     {
       "op": "append",
       "entity_fqn": "retail_bank.clients",
-      "rows": 100
+      "rows": 20
     },
     {
       "op": "append",
       "entity_fqn": "retail_bank.accounts",
-      "rows": 100
+      "rows": 20
     },
     {
       "op": "append",
       "entity_fqn": "retail_bank.deals",
-      "rows": 1000
+      "rows": 200
     },
     {
       "op": "append",
       "entity_fqn": "retail_bank.transactions",
-      "rows": 25000
+      "rows": 5000
     },
     {
       "op": "delete",
       "entity_fqn": "retail_bank.deals",
       "predicate": [],
-      "limit": 50,
+      "limit": 10,
       "cascade": true
     },
     {
@@ -40,7 +40,7 @@
       "set": {
         "status": "VIP"
       },
-      "limit": 10
+      "limit": 2
     },
     {
       "op": "update",
@@ -55,7 +55,7 @@
       "set": {
         "status": "Frozen"
       },
-      "limit": 10
+      "limit": 2
     },
     {
       "op": "update",
@@ -70,7 +70,7 @@
       "set": {
         "status": "Closed"
       },
-      "limit": 50
+      "limit": 10
     }
   ]
 }
