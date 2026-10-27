@@ -7,6 +7,7 @@ __pycache__/
 # Пользовательский код стенда (каркас каталогов удерживается через .gitkeep)
 /airflow/*
 !/airflow/.gitkeep
+!/airflow/.airflowignore
 !/airflow/dags/
 !/airflow/dags/**
 !/airflow/migrations/

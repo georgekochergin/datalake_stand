@@ -24,6 +24,7 @@ services:
     volumes: !override
       - pg_meta_data:/var/lib/postgresql/data
       - ./test/.workspace/conf/pg-meta/init:/docker-entrypoint-initdb.d:ro
+    ports: !override []
 
   nessie:
     ports: !override []
@@ -69,18 +70,21 @@ services:
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
       - ./test/.workspace/spark:/opt/spark-jobs:ro
       - ./test/.workspace/trino:/opt/airflow/sql:ro
+      - airflow_logs:/opt/airflow/logs
 
   airflow-dag-processor:
     environment: *test-source-connections
     volumes: !override
       - ./test/.workspace/airflow/dags:/opt/airflow/dags
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
+      - airflow_logs:/opt/airflow/logs
 
   airflow-webserver:
     environment: *test-source-connections
     volumes: !override
       - ./test/.workspace/airflow/dags:/opt/airflow/dags
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
+      - airflow_logs:/opt/airflow/logs
     ports: !override []
 
   test-runner:

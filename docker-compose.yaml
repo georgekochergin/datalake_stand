@@ -7,6 +7,7 @@ volumes:
   pg_catalog_data:
   pg_meta_data:
   airflow_pg_data:
+  airflow_logs:
   silo_data:
   sydafa_state:
   trino_auth:
@@ -52,6 +53,7 @@ services:
     volumes:
       - "pg_meta_data:/var/lib/postgresql/data"
       - ./conf/pg-meta/init:/docker-entrypoint-initdb.d:ro
+    ports: ["55432:5432"]
     networks: [dlh-poc]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${STAND_USER} -d meta"]
@@ -199,6 +201,9 @@ services:
       AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "${STAND_USER}:ADMIN"
       AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/simple_auth_manager_passwords.json.generated
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      AIRFLOW__API__EXPOSE_CONFIG: auth_admin
+      AIRFLOW__API__SECRET_KEY: "datalake-stand-test-api-secret-f0e827fa722b305a302101d870f7d360c20573180abb40c0204c719127588b59"
+      AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: "10"
       AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow-webserver:8080/execution/"
       AIRFLOW__API_AUTH__JWT_SECRET: "datalake-stand-test-jwt-secret-0123456789abcdef"
       AIRFLOW_CONN_SYDAFA_DEFAULT: "http://sydafa:8000"
@@ -224,6 +229,7 @@ services:
       - ./airflow/plugins:/opt/airflow/plugins:ro
       - ./spark:/opt/spark-jobs:ro
       - ./trino:/opt/airflow/sql:ro
+      - airflow_logs:/opt/airflow/logs
     depends_on:
       airflow-init:
         condition: service_completed_successfully
@@ -237,6 +243,7 @@ services:
     volumes:
       - ./airflow:/opt/airflow/dags
       - ./airflow/plugins:/opt/airflow/plugins:ro
+      - airflow_logs:/opt/airflow/logs
     depends_on:
       airflow-init:
         condition: service_completed_successfully
@@ -251,6 +258,7 @@ services:
     volumes:
       - ./airflow:/opt/airflow/dags
       - ./airflow/plugins:/opt/airflow/plugins:ro
+      - airflow_logs:/opt/airflow/logs
     depends_on:
       airflow-init:
         condition: service_completed_successfully
