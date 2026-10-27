@@ -187,6 +187,14 @@ docker info | grep "Total Memory"   # должно быть ≥ 16 GiB
 если его нет локально. Для обновления уже скачанного образа выполните
 `docker compose pull sydafa` перед запуском.
 
+Образ sydafa опубликован для `linux/amd64`; Compose явно задаёт эту платформу,
+поэтому на Apple Silicon он запускается через эмуляцию Docker Desktop.
+При первом старте sydafa инициализирует СУБД и схемы до готовности HTTP API;
+healthcheck допускает стартовый период 15 минут (включая загрузку образов СУБД).
+Сервисы Airflow и test-runner с локальными Dockerfile используют
+`pull_policy: build`: Compose собирает их, а не ищет локальные имена образов
+в Docker Hub. Повторный `up` запускает сборку с использованием кеша.
+
 Другой образ можно указать через `SYDAFA_IMAGE` в `.env` или окружении.
 Для локальной разработки из соседнего клона
 [sydafa](https://github.com/georgekochergin/sydafa):

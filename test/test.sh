@@ -151,7 +151,7 @@ fi
 SYDAFA_IMG="${SYDAFA_IMAGE:-ghcr.io/georgekochergin/sydafa:latest}"
 if ! docker image inspect "$SYDAFA_IMG" >/dev/null 2>&1; then
   echo "Загрузка образа sydafa ($SYDAFA_IMG)..."
-  docker pull "$SYDAFA_IMG"
+  docker pull --platform linux/amd64 "$SYDAFA_IMG"
 fi
 
 echo "==> Подъем тестового Docker Compose стека ($COMPOSE_PROJECT_NAME)..."
