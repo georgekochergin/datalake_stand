@@ -384,6 +384,10 @@ docker compose exec pg-meta psql -U admin123 -d meta -c '\dt ingestion.*'
      database `sydafa` (схема `retail_bank`);
    - **broker, Oracle**: драйвер Oracle, host `localhost`, port `15211`,
      service name `sydafa` (схема `trading_core`), SID оставьте пустым.
+     Все объекты broker созданы в нижнем регистре (квотированные идентификаторы
+     Oracle): в SQL-запросах обращайтесь к ним в кавычках —
+     `SELECT * FROM "trading_core"."transactions"`; дерево каталога DBeaver
+     показывает их в нижнем регистре без дополнительных настроек.
 5. Ранний доступ к СУБД изнутри сети стенда (для сервисов): внутренние имена
    `sydafa-src-mssql-bank:1433`, `sydafa-src-oracle-broker:1521` — именно их
    использует Spark.

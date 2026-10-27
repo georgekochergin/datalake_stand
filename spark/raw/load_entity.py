@@ -106,16 +106,40 @@ def validate_target_table(target: str) -> tuple[str, str]:
 
 
 def sql_reference(jdbc_url: str, name: str) -> str:
-    """Render a column reference for source SQL.
+    """Render a column reference quoted for the source dialect.
 
-    '_'-prefixed columns are stored lowercase (quoted identifiers) in Oracle,
-    so they must be referenced quoted there; unquoted reference would fold to
-    uppercase and miss the column. MSSQL is case-insensitive and needs no
-    quoting; an unknown dialect (empty url) is rendered unquoted.
+    Quoting is applied for every known RDBMS dialect: Oracle stores sydafa
+    identifiers lowercase and an unquoted reference would fold to uppercase
+    and miss the column, while MSSQL bracket quoting guards reserved words
+    and exact-case names. An unknown dialect (empty url) is rendered unquoted.
     """
-    if name.startswith("_") and jdbc_url.startswith("jdbc:oracle:"):
+    if jdbc_url.startswith("jdbc:oracle:"):
         return '"%s"' % name.replace('"', '""')
+    if jdbc_url.startswith("jdbc:sqlserver:"):
+        return "[%s]" % name.replace("]", "]]")
     return name
+
+
+def sql_source_table(jdbc_url: str, source_table: str, allow_expression: bool = False) -> str:
+    """Render a schema.table reference quoted for the source dialect.
+
+    Every part of the reference is quoted per dialect (Oracle double quotes,
+    MSSQL brackets), exactly as the object was created by sydafa. With
+    allow_expression a reference that is not schema.table (already a subquery
+    expression) is passed through unchanged; otherwise malformed references
+    are rejected.
+    """
+    try:
+        parts = parse_source_table(source_table)
+    except ValueError:
+        if allow_expression:
+            return source_table
+        raise
+    if jdbc_url.startswith(("jdbc:oracle:", "jdbc:sqlserver:")):
+        return ".".join(sql_reference(jdbc_url, name) for name, _ in parts)
+    return ".".join(
+        ('"%s"' % name.replace('"', '""')) if quoted else name for name, quoted in parts
+    )
 
 
 def build_read_query(
@@ -125,20 +149,20 @@ def build_read_query(
     jdbc_url: str = "",
 ) -> str:
     """Build the JDBC dbtable expression: bare table, or an incremental subquery."""
-    parse_source_table(source_table)
+    table = sql_source_table(jdbc_url, source_table)
     if incremental_column is None:
-        return source_table
+        return table
     if not COLUMN_NAME_PATTERN.match(incremental_column):
         raise ValueError(f"invalid incremental column: {incremental_column!r}")
     if watermark_value is None:
-        return source_table
+        return table
     if not WATERMARK_PATTERN.match(watermark_value):
         raise ValueError(
             f"watermark must be a plain integer (got {watermark_value!r}); "
             "quoted/ISO watermarks are not supported"
         )
     column = sql_reference(jdbc_url, incremental_column)
-    return f"(SELECT * FROM {source_table} WHERE {column} > {watermark_value}) q"
+    return f"(SELECT * FROM {table} WHERE {column} > {watermark_value}) q"
 
 
 def _normalize_type(jdbc_type: str) -> str:
@@ -484,7 +508,8 @@ def source_position(spark, args, inspect_only=False):
         statement = connection.createStatement()
         try:
             column = sql_reference(args.jdbc_url, args.incremental_column)
-            result = statement.executeQuery(f"SELECT {column} FROM {args.source_table} WHERE 1=0")
+            table = sql_source_table(args.jdbc_url, args.source_table, allow_expression=True)
+            result = statement.executeQuery(f"SELECT {column} FROM {table} WHERE 1=0")
             try:
                 metadata = result.getMetaData()
                 kind = extraction.jdbc_kind(metadata.getColumnTypeName(1), metadata.getPrecision(1),
@@ -493,7 +518,7 @@ def source_position(spark, args, inspect_only=False):
                 result.close()
             expression = "NULL" if inspect_only else position_expression(f"MAX({column})", kind, args.jdbc_url)
             result = statement.executeQuery(
-                f"SELECT {expression}, COUNT(*), COUNT({column}) FROM {args.source_table}"
+                f"SELECT {expression}, COUNT(*), COUNT({column}) FROM {table}"
             )
             try:
                 result.next()
@@ -526,15 +551,15 @@ def oracle_utc_projection(spark, args):
     try:
         statement = connection.createStatement()
         try:
-            result = statement.executeQuery(f"SELECT * FROM {args.source_table} WHERE 1=0")
+            table = sql_source_table(args.jdbc_url, args.source_table, allow_expression=True)
+            result = statement.executeQuery(f"SELECT * FROM {table} WHERE 1=0")
             try:
                 metadata = result.getMetaData()
                 projected = []
                 for index in range(1, metadata.getColumnCount() + 1):
                     name = str(metadata.getColumnLabel(index))
                     type_name = " ".join(str(metadata.getColumnTypeName(index)).upper().split())
-                    reference = '"%s"' % name.replace('"', '""') if (
-                        name != name.upper() or name.startswith("_")) else name
+                    reference = sql_reference(args.jdbc_url, name)
                     if "TIME ZONE" in type_name:
                         projected.append(f"SYS_EXTRACT_UTC(extract_source.{reference}) AS {reference}")
                     else:
@@ -622,9 +647,12 @@ def managed_load(spark, args):
             select = ", ".join(projection)
         if column:
             select += f', {position_expression(column, kind, args.jdbc_url)} AS "__extract_position"'
-        query = f"(SELECT {select} FROM (SELECT * FROM {args.source_table}) extract_source" + (
-            " WHERE " + " AND ".join(filters) if filters else ""
-        ) + ") extract_batch"
+        query = (
+            f"(SELECT {select} FROM (SELECT * FROM "
+            f"{sql_source_table(args.jdbc_url, args.source_table, allow_expression=True)}) extract_source"
+            + (" WHERE " + " AND ".join(filters) if filters else "")
+            + ") extract_batch"
+        )
         reader = _jdbc_reader(spark, args, query)
         if not args.no_parallelism and (not kind or not kind.startswith("timestamp")):
             partition_column = args.incremental_column or pick_partition_column(detect_key_columns(

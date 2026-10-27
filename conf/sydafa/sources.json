@@ -166,8 +166,8 @@
               "kind": "sequence"
             },
             "account_number": {
-              "kind": "faker",
-              "provider": "word",
+              "kind": "pattern",
+              "template": "40817810############",
               "null_ratio": 0.05
             },
             "account_type": {
@@ -197,8 +197,8 @@
               "kind": "sequence"
             },
             "deal_number": {
-              "kind": "faker",
-              "provider": "word",
+              "kind": "pattern",
+              "template": "D-######",
               "null_ratio": 0.05
             },
             "deal_type": {
@@ -262,7 +262,7 @@
             },
             "description": {
               "kind": "faker",
-              "provider": "word",
+              "provider": "sentence",
               "null_ratio": 0.05
             }
           },
@@ -455,8 +455,8 @@
               "kind": "sequence"
             },
             "account_number": {
-              "kind": "faker",
-              "provider": "word",
+              "kind": "pattern",
+              "template": "40817810############",
               "null_ratio": 0.05
             },
             "account_type": {
@@ -485,8 +485,8 @@
               "kind": "sequence"
             },
             "deal_number": {
-              "kind": "faker",
-              "provider": "word",
+              "kind": "pattern",
+              "template": "D-######",
               "null_ratio": 0.05
             },
             "order_type": {

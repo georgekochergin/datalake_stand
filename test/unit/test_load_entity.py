@@ -155,10 +155,16 @@ class TestValidateTargetTable(unittest.TestCase):
 class TestSqlReference(unittest.TestCase):
     """Dialect-aware column references for source SQL."""
 
-    def test_mssql_underscore_column_unquoted(self):
+    def test_mssql_column_bracket_quoted(self):
         self.assertEqual(
             load_entity.sql_reference("jdbc:sqlserver://host:1433", "_batch_id"),
-            "_batch_id",
+            "[_batch_id]",
+        )
+
+    def test_mssql_bracket_escaped(self):
+        self.assertEqual(
+            load_entity.sql_reference("jdbc:sqlserver://host:1433", "co]lumn"),
+            "[co]]lumn]",
         )
 
     def test_oracle_underscore_column_quoted(self):
@@ -167,9 +173,47 @@ class TestSqlReference(unittest.TestCase):
             '"_batch_id"',
         )
 
-    def test_regular_column_unquoted_everywhere(self):
-        self.assertEqual(load_entity.sql_reference("jdbc:oracle:thin:@//h:1521/s", "updated_at"), "updated_at")
-        self.assertEqual(load_entity.sql_reference("jdbc:sqlserver://h:1433", "updated_at"), "updated_at")
+    def test_oracle_regular_column_quoted(self):
+        self.assertEqual(
+            load_entity.sql_reference("jdbc:oracle:thin:@//h:1521/s", "updated_at"),
+            '"updated_at"',
+        )
+
+    def test_unknown_dialect_unquoted(self):
+        self.assertEqual(load_entity.sql_reference("", "updated_at"), "updated_at")
+
+
+class TestSqlSourceTable(unittest.TestCase):
+    """Dialect-aware schema.table references for source SQL."""
+
+    def test_mssql_quotes_both_parts_with_brackets(self):
+        self.assertEqual(
+            load_entity.sql_source_table("jdbc:sqlserver://h:1433", "retail_bank.clients"),
+            "[retail_bank].[clients]",
+        )
+
+    def test_oracle_quotes_both_parts(self):
+        self.assertEqual(
+            load_entity.sql_source_table("jdbc:oracle:thin:@//h:1521/sydafa", "trading_core.transactions"),
+            '"trading_core"."transactions"',
+        )
+
+    def test_oracle_preserves_explicitly_quoted_parts(self):
+        self.assertEqual(
+            load_entity.sql_source_table("jdbc:oracle:thin:@//h:1521/sydafa", '"trading_core"."transactions"'),
+            '"trading_core"."transactions"',
+        )
+
+    def test_subquery_expression_passthrough(self):
+        expression = "(SELECT CAST(1 AS bigint) AS position) retry_fixture"
+        self.assertEqual(
+            load_entity.sql_source_table("jdbc:oracle:thin:@//h:1521/sydafa", expression, allow_expression=True),
+            expression,
+        )
+
+    def test_malformed_reference_rejected_without_allow_expression(self):
+        with self.assertRaises(ValueError):
+            load_entity.sql_source_table("jdbc:oracle:thin:@//h:1521/sydafa", "a..b")
 
 
 class TestBuildReadQuery(unittest.TestCase):
@@ -184,13 +228,19 @@ class TestBuildReadQuery(unittest.TestCase):
     def test_incremental_builds_subquery_mssql(self):
         self.assertEqual(
             load_entity.build_read_query("retail_bank.clients", "_batch_id", "100", "jdbc:sqlserver://h:1433"),
-            "(SELECT * FROM retail_bank.clients WHERE _batch_id > 100) q",
+            "(SELECT * FROM [retail_bank].[clients] WHERE [_batch_id] > 100) q",
         )
 
-    def test_incremental_builds_subquery_oracle_quotes_underscore(self):
+    def test_incremental_builds_subquery_oracle_quotes_table_and_column(self):
         self.assertEqual(
             load_entity.build_read_query("trading_core.transactions", "_batch_id", "100", "jdbc:oracle:thin:@//h:1521/sydafa"),
-            '(SELECT * FROM trading_core.transactions WHERE "_batch_id" > 100) q',
+            '(SELECT * FROM "trading_core"."transactions" WHERE "_batch_id" > 100) q',
+        )
+
+    def test_full_snapshot_oracle_returns_quoted_table(self):
+        self.assertEqual(
+            load_entity.build_read_query("trading_core.transactions", None, None, "jdbc:oracle:thin:@//h:1521/sydafa"),
+            '"trading_core"."transactions"',
         )
 
     def test_bootstrap_without_watermark_reads_everything(self):
