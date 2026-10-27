@@ -10,6 +10,10 @@ volumes:
   airflow_logs:
   silo_data:
   sydafa_state:
+  sydafa_bank_data:
+    name: ${SYDAFA_CONTAINER_PREFIX:-sydafa}-data-mssql-bank
+  sydafa_broker_data:
+    name: ${SYDAFA_CONTAINER_PREFIX:-sydafa}-data-oracle-broker
   trino_auth:
 
 services:
@@ -19,12 +23,15 @@ services:
   sydafa:
     image: ${SYDAFA_IMAGE:-sydafa:latest}
     environment:
+      - SYDAFA_CONTAINER_PREFIX=${SYDAFA_CONTAINER_PREFIX:-sydafa}
       - SYDAFA_MAX_TTL_MINUTES=30
       - SYDAFA_TTL_MINUTES=15
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./conf/sydafa/sources.json:/app/config/sources.json:ro
       - sydafa_state:/state
+      - sydafa_bank_data:/source-volumes/bank
+      - sydafa_broker_data:/source-volumes/broker
     ports: ["8090:8000"]
     networks: [dlh-poc]
 

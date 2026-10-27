@@ -133,7 +133,11 @@ run_runtime_checks() {
             text=True,
         )
         self.assertEqual(result.returncode, 0, "Docker Compose config failed")
-        services = json.loads(result.stdout)["services"]
+        model = json.loads(result.stdout)
+        services = model["services"]
+        self.assertEqual(model["volumes"]["sydafa_bank_data"]["name"], "sydafa-dlh-test-unit-data-mssql-bank")
+        self.assertEqual(model["volumes"]["sydafa_broker_data"]["name"], "sydafa-dlh-test-unit-data-oracle-broker")
+        self.assertEqual(services["sydafa"]["environment"]["SYDAFA_CONTAINER_PREFIX"], "sydafa-dlh-test-unit")
         for name in ("spark-master", "spark-worker", "airflow-scheduler", "trino"):
             self.assertEqual(services[name]["environment"]["AWS_ACCESS_KEY_ID"], "unit-user")
             self.assertEqual(services[name]["environment"]["AWS_SECRET_ACCESS_KEY"], "unit-password")

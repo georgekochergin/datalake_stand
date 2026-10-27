@@ -169,5 +169,22 @@ else
 fi
 echo "==> Запуск e2e тестового сценария в test-runner..."
 run_runtime_checks
+echo "==> Проверка штатной очистки Compose без ручного удаления источников..."
+"${COMPOSE[@]}" down --remove-orphans --volumes
+if [ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME")" ]; then
+  echo "FAIL: После Compose down остались контейнеры проекта."
+  exit 1
+fi
+for source_volume in "$SYDAFA_CONTAINER_PREFIX-data-mssql-bank" "$SYDAFA_CONTAINER_PREFIX-data-oracle-broker"; do
+  if docker volume inspect "$source_volume" >/dev/null 2>&1; then
+    echo "FAIL: После Compose down остался том $source_volume."
+    exit 1
+  fi
+done
+if [ -n "$(docker network ls -q --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME")" ]; then
+  echo "FAIL: После Compose down осталась сеть проекта."
+  exit 1
+fi
+echo "PASS Compose cleanup: containers, source volumes and networks; FAIL=0"
 rc=$?
 exit $rc
