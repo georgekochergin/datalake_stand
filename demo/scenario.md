@@ -34,7 +34,10 @@ Trino/pg-meta → партиции в silo → устойчивость к эв�
 
 1. Airflow UI → DAG-и `update_source_bank` и `update_source_broker`
    (расписания нет — запуск только ручной, кнопкой ▶ справа).
-2. Запустить оба (можно параллельно), открыть Grid View.
+2. Запустить оба (можно параллельно), открыть Grid View. Для демонстрации
+   параллельного JDBC-чтения (шаг 3) запустите каждый update-DAG **дважды
+   подряд**: в таблицах появятся строки с двумя разными `_batch_id`, и окно
+   чтения даст диапазон для нарезки на 4 потока.
 3. Пока идут: таск `migrate` применяет батч из
    `airflow/plugins/migrations/{bank,broker}.json`: +100 клиентов, +100 счетов,
    +1000 сделок, +25000 транзакций; каскадное удаление 50 случайных сделок;
@@ -124,6 +127,37 @@ python3 ingestion/generate_dags.py --check
 6. Запустить все четыре DAG-а (сначала банка, затем брокера — или все сразу).
 7. Пока идут: Spark Master UI (localhost:8080) — работающие приложения
    (Running Applications), по одному на каждую загрузку.
+
+**Параллелизм JDBC и пулы Airflow.** Три места, где видно «4 потока против
+одного»:
+
+1. **Конфигурация** (до запуска): `ingestion/settings.yaml` —
+   `spark.jdbc.num_partitions: 4`; `ingestion/pipelines/bank/main.yaml` — у
+   `transactions` нет `spark.parallelism: false` (параллельное чтение
+   разрешено, колонка нарезки — `_batch_id`), у `deals` и всех таблиц `refs`
+   — `spark.parallelism: false` (один поток).
+2. **Живьём на источнике**: пока идёт `ingest__rdbms__bank__main`, в DBeaver
+   (bank, MSSQL) выполнить — видны **4 одновременных соединения** чтения
+   transactions и **одно** для deals (Login `sydafa`, HostName — контейнер
+   spark-worker):
+
+```sql
+EXEC sp_who2;
+```
+
+3. **В логе load-таска** (доступно в любой момент после запуска): открыть лог
+   `ingest_group.load_retail_bank__transactions.load` и найти (Ctrl+F)
+   `numPartitions` — в плане чтения `Scan JDBCRelation(...) [numPartitions=4]`;
+   в логе deals/clients — `[numPartitions=1]`.
+
+Нарезка на 4 потока включается, только когда в окне чтения минимум ≠ максимум
+колонки нарезки — поэтому шаг 1 запускает update-DAG-и дважды: у дельты из
+одной партии `_batch_id` диапазон нулевой, и чтение честно идёт одним
+потоком.
+
+**Пул Airflow**: Admin → Pools → `ingest_loads` (4 слота; transactions
+занимает 2, остальные загрузки по 1). Во время загрузок колонки Running/Queued
+Slots оживают; на главной странице есть виджет Pool Slots.
 
 **Что рассказать:** манифест = декларация «что грузить и как»; одна строка YAML
 добавляет таблицу в озеро. Пул `ingest_loads` (Admin → Pools, 4 слота)
