@@ -59,7 +59,7 @@ SQL через Trino (DBeaver, BI) и Spark.
 | `sydafa` | `sydafa:latest` | Эмулятор источников: REST API для активации СУБД, транзакционных миграций схемы/данных и генерации синтетических данных (раздел 3) |
 | `sydafa-src-mssql-bank` | `mcr.microsoft.com/mssql/server:2022-CU27` | Источник **bank** (MSSQL 2022, база `sydafa`, схема `retail_bank`); запускается sydafa лениво, по требованию |
 | `sydafa-src-oracle-broker` | `gvenzl/oracle-free:23-slim-faststart` | Источник **broker** (Oracle Free 23, PDB `sydafa`, схема `trading_core`); запускается sydafa лениво |
-| `spark-master` / `spark-worker` | `tabulario/spark-iceberg:3.5.5_1.8.1` + JDBC-драйверы MSSQL/Oracle | Spark 3.5.5 standalone-кластер; загрузка источников в Iceberg по JDBC, каталог `raw` через REST |
+| `spark-master` / `spark-worker` | `tabulario/spark-iceberg:3.5.5_1.8.1` + JDBC-драйверы MSSQL/Oracle | Spark 3.5.5 standalone-кластер; загрузка источников в Iceberg по JDBC, каталог `raw` через нативный NessieCatalog |
 | `airflow-webserver` / `airflow-scheduler` / `airflow-dag-processor` | `apache/airflow:3.3.2-python3.11` (+ Spark, JDK 17, JDBC-jars) | Оркестрация: DAG-и обновления источников и DAG-и загрузки raw-слоя, LocalExecutor |
 | `airflow-postgres` | `postgres:16.15` | Собственная база Airflow (метаданные DAG-ов, XCom) |
 | `nessie` | `ghcr.io/projectnessie/nessie:0.99.0` | Каталог метаданных Iceberg (REST API), warehouse `raw` → `s3://datalake/raw/` |
@@ -68,6 +68,23 @@ SQL через Trino (DBeaver, BI) и Spark.
 | `trino` | `trinodb/trino:479` | SQL-движок над Iceberg: аналитика, проверка результатов загрузок; каталог `raw` |
 | `pg-meta` | `postgres:16.15` | Операционная база фреймворка загрузки: идентификаторы процессов, события DAG-ов и тасков, состояние инкрементальных извлечений (раздел 4.6–4.7) |
 | `test-runner` (профиль `test`) | `python:3.12-slim` | Одноразовый контейнер e2e-тестов; на живом стенде не запускается (раздел 5) |
+
+Spark подключается к Nessie через `NessieCatalog` (`/api/v2`, ветка `main`),
+Trino — через Iceberg REST (`/iceberg`). Оба видят одни и те же таблицы.
+Загрузчик RAW явно задаёт `LOCATION`: таблица
+`raw.bank.retail_bank__accounts` хранится под
+`s3://datalake/raw/bank/retail_bank__accounts/`, без UUID в имени директории.
+Одного переключения каталога недостаточно: без явного `LOCATION` Nessie
+по-прежнему добавляет UUID. Прямое создание таблиц через REST также не гарантирует
+этот путь в используемой версии Nessie.
+
+Существующие таблицы автоматически не переносятся. На тестовом стенде для перехода
+можно выполнить полный сброс `docker compose down --remove-orphans --volumes`,
+затем пересобрать образы через `docker compose up -d --build` и повторить загрузку.
+Нельзя независимо создавать одноимённые таблицы в разных ветках Nessie с одним
+`LOCATION`; нельзя вручную удалять или переименовывать их файлы в бакете.
+Повторное создание удалённой таблицы по прежнему пути требует учитывать данные
+и ссылки, оставшиеся в истории каталога; штатные загрузки таблицу не пересоздают.
 
 ### 1.3. Общая схема
 
@@ -144,7 +161,7 @@ docker info | grep "Total Memory"   # должно быть ≥ 16 GiB
 | `trino/` | Пользовательский SQL (каркас) |
 | `ingestion/` | Манифесты источников (`sources.yaml`), пайплайнов (`pipelines/**/*.yaml`), технические настройки (`settings.yaml`), библиотека валидации (`lib/`), генератор DAG-ов (`generate_dags.py`) |
 | `conf/airflow` | Dockerfile и requirements образа Airflow (+ Spark, JDK, JDBC-драйверы), генератор паролей |
-| `conf/spark` | Dockerfile и `spark-defaults.conf` (каталог `raw`: Nessie REST + S3FileIO в silo) |
+| `conf/spark` | Dockerfile и `spark-defaults.conf` (каталог `raw`: нативный NessieCatalog + S3FileIO в silo) |
 | `conf/trino` | Конфигурация Trino: HTTPS + password-authenticator, каталог `raw` |
 | `conf/silo` | `init-bucket.sh` — создание bucket `datalake` |
 | `conf/pg-meta` | `init/01_ingestion.sql` — DDL операционной схемы загрузки (применяется контейнером при первом старте на пустом томе) |

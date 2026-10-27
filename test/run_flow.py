@@ -259,6 +259,10 @@ def trino_query(sql: str, timeout: int = 120) -> list[list[Any]]:
 
 def raw_stats(table: str) -> tuple[int, int, int]:
     """(count, count distinct __process_id, max __process_id) сырой таблицы."""
+    namespace, name = table.split(".")[1:]
+    expected = f"s3://datalake/raw/{namespace}/{name}/"
+    paths = trino_query(f'SELECT DISTINCT "$path" FROM {table}')
+    check(f"{table}: exact storage prefix without UUID", bool(paths) and all(row[0].startswith(expected) for row in paths), True)
     rows = trino_query(
         "SELECT count(*), count(DISTINCT __process_id), max(__process_id) FROM %s" % table
     )

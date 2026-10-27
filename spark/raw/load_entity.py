@@ -162,7 +162,7 @@ def quote_identifier(name: str) -> str:
 
 def build_create_table_sql(target: str, columns: list[tuple[str, str]]) -> str:
     """Build the first-load Iceberg DDL from (column name, DDL type) pairs."""
-    validate_target_table(target)
+    namespace, table = validate_target_table(target)
     rendered: list[str] = []
     for name, ddl_type in columns:
         if name in (METADATA_DTTM, METADATA_PID, METADATA_BATCH, "__extract_position"):
@@ -175,6 +175,7 @@ def build_create_table_sql(target: str, columns: list[tuple[str, str]]) -> str:
     return (
         f"CREATE TABLE {target} ({joined}) USING iceberg "
         f"PARTITIONED BY (days({quote_identifier(METADATA_DTTM)})) "
+        f"LOCATION 's3://datalake/raw/{namespace}/{table}' "
         f"TBLPROPERTIES ('write.spark.accept-any-schema'='true')"
     )
 
