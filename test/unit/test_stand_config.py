@@ -182,8 +182,19 @@ run_runtime_checks() {
         self.assertEqual(compose["services"]["sydafa"]["image"], image)
         script = (ROOT / "test/test.sh").read_text()
         self.assertIn(f'SYDAFA_IMG="{image}"', script)
-        self.assertIn('docker pull "$SYDAFA_IMG"', script)
+        self.assertIn('docker pull --platform linux/amd64 "$SYDAFA_IMG"', script)
         self.assertNotIn('docker build -t "$SYDAFA_IMG"', script)
+
+    def test_compose_platform_and_local_build_policy(self):
+        import yaml
+
+        services = yaml.safe_load((ROOT / "docker-compose.yaml").read_text())["services"]
+        self.assertEqual(services["sydafa"]["platform"], "linux/amd64")
+        self.assertEqual(services["sydafa"]["healthcheck"]["start_period"], "15m")
+        for name, service in services.items():
+            if "build" in service and "image" in service:
+                with self.subTest(service=name):
+                    self.assertEqual(service["pull_policy"], "build")
 
     def test_source_connections_are_created_only_when_missing(self):
         import yaml

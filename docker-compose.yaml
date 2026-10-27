@@ -22,6 +22,9 @@ services:
 
   sydafa:
     image: ${SYDAFA_IMAGE:-ghcr.io/georgekochergin/sydafa:latest}
+    platform: linux/amd64
+    healthcheck:
+      start_period: 15m
     environment:
       - SYDAFA_CONTAINER_PREFIX=${SYDAFA_CONTAINER_PREFIX:-sydafa}
       - SYDAFA_MAX_TTL_MINUTES=30
@@ -195,6 +198,7 @@ services:
   airflow-init:
     build: {context: ., dockerfile: conf/airflow/Dockerfile}
     image: dlh-poc-airflow:latest
+    pull_policy: build
     command:
       - bash
       - -ec
@@ -249,6 +253,7 @@ services:
   airflow-scheduler:
     build: {context: ., dockerfile: conf/airflow/Dockerfile}
     image: dlh-poc-airflow:latest
+    pull_policy: build
     command: ["scheduler"]
     environment: *airflow-env
     volumes:
@@ -265,6 +270,7 @@ services:
   airflow-dag-processor:
     build: {context: ., dockerfile: conf/airflow/Dockerfile}
     image: dlh-poc-airflow:latest
+    pull_policy: build
     command: ["dag-processor"]
     environment: *airflow-env
     volumes:
@@ -279,6 +285,7 @@ services:
   airflow-webserver:
     build: {context: ., dockerfile: conf/airflow/Dockerfile}
     image: dlh-poc-airflow:latest
+    pull_policy: build
     command: ["api-server"] # ⚠ Airflow 3.x: проверить точное имя команды/компонента на этапе реализации (см. README.md)
     environment: *airflow-env
     ports: ["8089:8080"]
@@ -296,6 +303,7 @@ services:
   test-runner:
     build: ./test
     image: dlh-poc-test-runner
+    pull_policy: build
     profiles: ["test"]
     environment:
       AIRFLOW_USER: ${STAND_USER}
