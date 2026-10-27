@@ -136,13 +136,26 @@ python3 ingestion/generate_dags.py --check
    `transactions` нет `spark.parallelism: false` (параллельное чтение
    разрешено, колонка нарезки — `_batch_id`), у `deals` и всех таблиц `refs`
    — `spark.parallelism: false` (один поток).
-2. **Живьём на источнике**: пока идёт `ingest__rdbms__bank__main`, в DBeaver
-   (bank, MSSQL) выполнить — видны **4 одновременных соединения** чтения
+2. **Живьём на источнике (MSSQL)**: пока идёт `ingest__rdbms__bank__main`, в
+   DBeaver (bank) выполнить — видны **4 одновременных соединения** чтения
    transactions и **одно** для deals (Login `sydafa`, HostName — контейнер
    spark-worker):
 
 ```sql
 EXEC sp_who2;
+```
+
+   **Живьём на источнике (Oracle)**: пока идёт `ingest__rdbms__broker__main`,
+   в DBeaver (broker) выполнить — те же **4 параллельных сессии** чтения
+   `trading_core.transactions` (program `JDBC Thin Client`) и одна для deals.
+   Для видимости `v$session` читателю нужен `SELECT ANY DICTIONARY` — его
+   выдает provisioning sydafa (PR georgekochergin/sydafa#36; после влития
+   пересобрать образ `sydafa:latest` и перезапустить сервис):
+
+```sql
+SELECT sid, serial#, username, program, status, osuser
+FROM v$session
+WHERE username = 'SYDAFA' AND program LIKE 'JDBC%';
 ```
 
 3. **В логе load-таска** (доступно в любой момент после запуска): открыть лог
