@@ -174,6 +174,17 @@ run_runtime_checks() {
         for service in services.values():
             self.assertFalse(service.get("ports"))
 
+    def test_sydafa_registry_default_is_shared_with_test_runner(self):
+        import yaml
+
+        compose = yaml.safe_load((ROOT / "docker-compose.yaml").read_text())
+        image = "${SYDAFA_IMAGE:-ghcr.io/georgekochergin/sydafa:latest}"
+        self.assertEqual(compose["services"]["sydafa"]["image"], image)
+        script = (ROOT / "test/test.sh").read_text()
+        self.assertIn(f'SYDAFA_IMG="{image}"', script)
+        self.assertIn('docker pull "$SYDAFA_IMG"', script)
+        self.assertNotIn('docker build -t "$SYDAFA_IMG"', script)
+
     def test_source_connections_are_created_only_when_missing(self):
         import yaml
 
