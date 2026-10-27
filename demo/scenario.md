@@ -277,36 +277,36 @@ WHERE entity_fqn = 'retail_bank.transactions' ORDER BY batch_id;
 {"operations": [{"op": "add_column", "entity_fqn": "trading_core.clients", "column": {"name": "email", "type": "string"}}]}
 ```
 
-**7.4. Назначить генератор новой колонке** — `PUT /sources/bank/rules/retail_bank.clients`.
-PUT перезаписывает профиль генераторов таблицы целиком, поэтому в теле — все
-актуальные колонки (включая переименованную `client_name` и новую `email`):
+**7.4. Назначить генераторы точечно** — вложенные ручки rules-API меняют одну
+колонку за вызов, не пересылая весь профиль (полный `PUT` перезаписывает
+профиль целиком, и забытый ключ молча терял бы генератор). Для bank в
+Swagger UI, по одному вызову:
+
+`PUT /sources/bank/rules/retail_bank.clients/columns/email` — генератор новой
+колонки:
 
 ```json
-{
-  "columns": {
-    "client_id": {"kind": "sequence"},
-    "client_name": {"kind": "faker", "provider": "name", "locale": "ru_RU", "null_ratio": 0.05},
-    "status": {"kind": "choice", "values": ["Active", "Blocked", "VIP", "Archived"], "null_ratio": 0.05},
-    "email": {"kind": "faker", "provider": "email", "null_ratio": 0.05}
-  },
-  "invariants": []
-}
+{"kind": "faker", "provider": "email", "null_ratio": 0.05}
 ```
 
-`PUT /sources/broker/rules/trading_core.clients`:
+`PUT /sources/bank/rules/retail_bank.clients/columns/client_name` — перенос
+генератора на переименованную колонку:
 
 ```json
-{
-  "columns": {
-    "client_id": {"kind": "sequence"},
-    "client_name": {"kind": "faker", "provider": "name", "locale": "ru_RU", "null_ratio": 0.05},
-    "risk_profile": {"kind": "choice", "values": ["Conservative", "Moderate", "Aggressive"], "null_ratio": 0.05},
-    "status": {"kind": "choice", "values": ["Active", "Blocked"], "null_ratio": 0.05},
-    "email": {"kind": "faker", "provider": "email", "null_ratio": 0.05}
-  },
-  "invariants": []
-}
+{"kind": "faker", "provider": "name", "locale": "ru_RU", "null_ratio": 0.05}
 ```
+
+`DELETE /sources/bank/rules/retail_bank.clients/columns/full_name` — правило
+старого имени больше не нужно.
+
+Для broker то же самое на `trading_core.clients`: `PUT .../columns/email`
+(faker email), `PUT .../columns/client_name` (faker name),
+`DELETE .../columns/full_name`.
+
+В каждом ответе возвращается весь профиль таблицы — удобно показать, что
+остальные генераторы не тронуты. (Инварианты связности добавляются на таблицу
+по одному — `POST /sources/{source}/rules/{fqn}/invariants`; справочникам
+клиентов они не нужны, поэтому на демо не выполняются.)
 
 **7.5.** Показать изменения на источнике в DBeaver:
 
