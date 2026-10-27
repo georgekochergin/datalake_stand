@@ -3,7 +3,8 @@
 Пошаговая программа демонстрации: источники → загрузка в raw-слой → проверка в
 Trino/pg-meta → партиции в silo → устойчивость к эволюции схемы источника.
 Все запросы и JSON-запросы подготовлены — их можно копировать как есть.
-Продолжительность — 30–40 минут. Теория к каждому шагу — в `README.md`.
+Продолжительность — 30–40 минут. Параметры подключений и пояснения к шагам
+приведены ниже.
 
 ## Подготовка (до демонстрации)
 
@@ -16,11 +17,32 @@ Trino/pg-meta → партиции в silo → устойчивость к эв�
 | Swagger UI sydafa | http://localhost:8090/docs |
 | Консоль silo | http://localhost:9001 (`admin123` / `admin123`) |
 | Spark Master UI | http://localhost:8080 |
-| DBeaver | два подключения к источникам (создаются на шаге 2), Trino (см. README 2.4) и pg-meta (см. README 2.5) |
+| DBeaver | два подключения к источникам (создаются на шаге 2), Trino и pg-meta (параметры ниже) |
 | Терминал | для генерации DAG-ов и psql к pg-meta |
 
 Реквизиты источников (одинаковые для обоих): пользователь `sydafa`, пароль
 `sydafa`. Порт bank (MSSQL) — `14330`, broker (Oracle) — `15211`.
+
+Подключения DBeaver, которые нужно подготовить заранее:
+
+- **Trino**: драйвер Trino, host `localhost`, port `8443`, catalog/database
+  `raw`, SSL включён; свойства драйвера `SSL=true`, `SSLVerification=NONE`
+  (сертификат стенда самоподписанный). JDBC URL:
+  `jdbc:trino://localhost:8443/raw?SSL=true&SSLVerification=NONE`.
+- **pg-meta**: драйвер PostgreSQL, host `localhost`, port `55432`, database
+  `meta`, схема `ingestion`. JDBC URL: `jdbc:postgresql://localhost:55432/meta`.
+
+Для обоих подключений пользователь и пароль по умолчанию — `admin123` /
+`admin123`. Если в `.env` переопределены `STAND_USER` и `STAND_PASSWORD`,
+используйте их также для Airflow UI и консоли silo.
+
+До демонстрации дождитесь готовности sydafa: `GET /health` на
+http://localhost:8090/health должен вернуть HTTP 200. При первом старте сервис
+инициализирует СУБД и схемы; последующие обращения активируют источники по TTL.
+Сценарий рассчитан на исходную схему источников и отсутствие предыдущих
+загрузок в raw/pg-meta. На уже использованном стенде номера партий, количество
+порций и наличие колонок могут отличаться; удаление файлов DAG-ов данные не
+сбрасывает. Не выполняйте общий сброс томов ради демонстрации.
 
 Красный Triggerer на странице Health — норма: триггерер на стенде не развёрнут,
 отложенных (deferrable) операторов нет, он и не нужен.
@@ -37,13 +59,18 @@ Trino/pg-meta → партиции в silo → устойчивость к эв�
 2. Запустить оба (можно параллельно), открыть Grid View. Для демонстрации
    параллельного JDBC-чтения (шаг 3) запустите каждый update-DAG **дважды
    подряд**: в таблицах появятся строки с двумя разными `_batch_id`, и окно
-   чтения даст диапазон для нарезки на 4 потока.
-3. Пока идут: таск `migrate` применяет батч из
-   `airflow/plugins/migrations/{bank,broker}.json`: +100 клиентов, +100 счетов,
-   +1000 сделок, +25000 транзакций; каскадное удаление 50 случайных сделок;
-   точечные обновления статусов справочников.
-4. Дождаться зелёного статуса обоих DAG-ов. В логе таска `migrate` виден список
-   применённых операций.
+   чтения даст ненулевой диапазон для параллельной нарезки.
+3. Пока идут: таски `migrate_bank` и `migrate_broker` применяют батчи из
+   `airflow/plugins/migrations/{bank,broker}.json`. На каждый запуск каждого
+   источника: +20 клиентов, +20 счетов, +200 сделок, +5000 транзакций;
+   каскадное удаление 10 сделок и связанных с ними строк. Поэтому итоговый
+   прирост сделок — 190, а транзакций — не обязательно ровно 5000.
+   В bank обновляются до 2 статусов клиентов на `VIP`, до 2 статусов счетов
+   на `Frozen` и до 10 статусов сделок на `Closed`; в broker — до 2 профилей
+   риска клиентов на `Aggressive`, до 2 статусов счетов на `Closed` и до 10
+   значений рынка сделок на `OTC`.
+4. Дождаться зелёного статуса обоих DAG-ов. В логе соответствующего таска
+   виден результат применения операций.
 
 **Что рассказать:** это имитация «живого» production-источника — между раундами
 загрузки данные в нём меняются; именно эту дельту потом увидит инкрементальная
@@ -61,7 +88,11 @@ Trino/pg-meta → партиции в silo → устойчивость к эв�
    database `sydafa`, пользователь `sydafa` / `sydafa`. Схема — `retail_bank`.
 3. То же для Oracle: `POST /sources/broker/activate?ttl_minutes=20` → DBeaver →
    Oracle: host `localhost`, port `15211`, service name `sydafa`,
-   `sydafa` / `sydafa`. Схема — `trading_core`.
+   `sydafa` / `sydafa`, SID оставить пустым. Схема — `trading_core`.
+
+Активацию можно повторить, если TTL истёк во время демонстрации (максимум —
+30 минут). Для Oracle имена схем, таблиц и колонок созданы в нижнем регистре:
+в SQL заключайте их в двойные кавычки.
 
 Запросы к **bank (MSSQL)**:
 
@@ -75,15 +106,14 @@ FROM retail_bank.transactions;
 SELECT TOP 10 * FROM retail_bank.clients ORDER BY client_id DESC;
 ```
 
-Запросы к **broker (Oracle)** (колонка `_batch_id` в Oracle хранится в нижнем
-регистре и требует кавычек):
+Запросы к **broker (Oracle)**:
 
 ```sql
-SELECT count(*) FROM trading_core.clients;
+SELECT count(*) FROM "trading_core"."clients";
 SELECT count(*) AS rows_total, max("_batch_id") AS last_batch
-FROM trading_core.transactions;
+FROM "trading_core"."transactions";
 
-SELECT * FROM trading_core.clients ORDER BY client_id DESC FETCH FIRST 10 ROWS ONLY;
+SELECT * FROM "trading_core"."clients" ORDER BY "client_id" DESC FETCH FIRST 10 ROWS ONLY;
 ```
 
 **Что рассказать:** в каждой таблице видна служебная колонка `_batch_id` — номер
@@ -100,14 +130,16 @@ DAG-и загрузки не пишутся руками — генерирую�
 
 ```bash
 ls airflow/dags/generated/
-rm -rf airflow/dags/generated
+rm airflow/dags/generated/ingest__*.py
 ```
 
+Если каталог или файлы ещё не созданы, пропустить удаление и перейти к генерации.
+
 2. Airflow UI → подождать цикла парсинга (каталог пересканируется за 10 секунд,
-   исчезновение DAG-ов занимает до минуты) → четыре ingest-DAG-а
-   **исчезли** из списка: их определяют только файлы в `airflow/dags/generated/`,
-   никаких следов в базе Airflow они не оставляют (остались только
-   `update_source_*`).
+   обновление списка может занять больше одного цикла) → четыре ingest-DAG-а
+   становятся неактивными или скрываются фильтром активных DAG-ов: их
+   определяют файлы в `airflow/dags/generated/`. История запусков в базе
+   Airflow сохраняется; `update_source_*` остаются активными.
 3. Сгенерировать DAG-и заново:
 
 ```bash
@@ -123,13 +155,14 @@ python3 ingestion/generate_dags.py --check
    `ingest__rdbms__{bank,broker}__{main,refs}` **появились снова**. Открыть
    `ingest__rdbms__bank__main`: видна структура
    `generate_process_id → activate_source → TaskGroup на каждую сущность
-   (log_start → load → log_end)`.
+   (log_start → load → log_end → publish_asset)`.
+   `publish_asset` публикует событие готовности таблицы после успешной загрузки.
 6. Запустить все четыре DAG-а (сначала банка, затем брокера — или все сразу).
 7. Пока идут: Spark Master UI (localhost:8080) — работающие приложения
    (Running Applications), по одному на каждую загрузку.
 
-**Параллелизм JDBC и пулы Airflow.** Три места, где видно «4 потока против
-одного»:
+**Параллелизм JDBC и пулы Airflow.** Где показать настройку четырёх
+JDBC-партиций для transactions и отключение параллельного чтения для остальных:
 
 1. **Конфигурация** (до запуска): `ingestion/settings.yaml` —
    `spark.jdbc.num_partitions: 4`; `ingestion/pipelines/bank/main.yaml` — у
@@ -137,20 +170,18 @@ python3 ingestion/generate_dags.py --check
    разрешено, колонка нарезки — `_batch_id`), у `deals` и всех таблиц `refs`
    — `spark.parallelism: false` (один поток).
 2. **Живьём на источнике (MSSQL)**: пока идёт `ingest__rdbms__bank__main`, в
-   DBeaver (bank) выполнить — видны **4 одновременных соединения** чтения
-   transactions и **одно** для deals (Login `sydafa`, HostName — контейнер
-   spark-worker):
+   DBeaver (bank) выполнить — можно увидеть соединения чтения transactions
+   и deals (Login `sydafa`, HostName — контейнер spark-worker):
 
 ```sql
 EXEC sp_who2;
 ```
 
    **Живьём на источнике (Oracle)**: пока идёт `ingest__rdbms__broker__main`,
-   в DBeaver (broker) выполнить — те же **4 параллельных сессии** чтения
-   `trading_core.transactions` (program `JDBC Thin Client`) и одна для deals.
+   в DBeaver (broker) выполнить — сессии чтения
+   `trading_core.transactions` (program `JDBC Thin Client`).
    Для видимости `v$session` читателю нужен `SELECT ANY DICTIONARY` — его
-   выдает provisioning sydafa (PR georgekochergin/sydafa#36; после влития
-   пересобрать образ `sydafa:latest` и перезапустить сервис):
+   выдаёт provisioning sydafa:
 
 ```sql
 SELECT sid, serial#, username, program, status, osuser
@@ -158,12 +189,19 @@ FROM v$session
 WHERE username = 'SYDAFA' AND program LIKE 'JDBC%';
 ```
 
-3. **В логе load-таска** (доступно в любой момент после запуска): открыть лог
-   `ingest_group.load_retail_bank__transactions.load` и найти (Ctrl+F)
-   `numPartitions` — в плане чтения `Scan JDBCRelation(...) [numPartitions=4]`;
-   в логе deals/clients — `[numPartitions=1]`.
+   Четыре JDBC-партиции — это настройка разбиения, а не гарантия четырёх
+   одновременно видимых сессий: Spark может уменьшить число партиций при
+   узком диапазоне, а выполнение зависит от доступных ядер и длительности
+   чтения. На небольшом объёме сессии можно не успеть увидеть.
 
-Нарезка на 4 потока включается, только когда в окне чтения минимум ≠ максимум
+3. **В логе load-таска**: открыть лог
+   `ingest_group.load_retail_bank__transactions.load` и показать команду
+   Spark с `--num-partitions 4` и `--incremental-column _batch_id`;
+   у deals/clients передаётся `--no-parallelism`. Это параметры запуска,
+   а не подтверждение фактического числа соединений. Загрузчик не печатает
+   физический план чтения отдельным вызовом `explain`.
+
+Параллельная нарезка включается, только когда в окне чтения минимум ≠ максимум
 колонки нарезки — поэтому шаг 1 запускает update-DAG-и дважды: у дельты из
 одной партии `_batch_id` диапазон нулевой, и чтение честно идёт одним
 потоком.
@@ -179,7 +217,7 @@ Slots оживают; на главной странице есть виджет
 
 ## Шаг 4. Результат в Trino (DBeaver) и артефакты в pg-meta
 
-**Trino** (подключение — README 2.4):
+**Trino** (DBeaver, подключение из раздела подготовки):
 
 ```sql
 SHOW TABLES FROM raw.bank;
@@ -202,7 +240,7 @@ WHERE __load_dttm = (SELECT max(__load_dttm) FROM raw.bank.retail_bank__clients)
 оставил ровно одну порцию с одним `__process_id`; последний запрос — текущее
 состояние источника (актуальный снапшот).
 
-**pg-meta** (DBeaver, подключение — README 2.5; запросы поочерёдно):
+**pg-meta** (DBeaver, подключение из раздела подготовки; запросы поочерёдно):
 
 ```sql
 SELECT process_id, dag_id, run_id, status, ts
@@ -222,7 +260,7 @@ FROM ingestion.extraction_batches ORDER BY batch_id DESC LIMIT 16;
 
 **Что рассказать:** у `transactions` первая партия — `bootstrap` (первичное
 наполнение, без нижней границы) с зафиксированным `watermark_after`; у
-снапшотных сущностей — партии `reason=bootstrap` в режиме `full_snapshot` без
+снапшотных сущностей — партии `reason=regular` в режиме `full_snapshot` без
 водяного знака. Границы окна заморозились **до** чтения источника.
 
 ## Шаг 5. Повторный раунд: полный снапшот против инкремента
@@ -245,7 +283,10 @@ FROM raw.bank.retail_bank__transactions GROUP BY 1, 2 ORDER BY 1;
 
 **Что показать:** снапшотные таблицы получили **вторую полную порцию** (строк
 в порции стало больше — источник вырос); у `transactions` вторая порция —
-**только дельта** (~25 тыс. строк), история первой порции не тронута.
+**только дельта** (не более 5000 новых транзакций после одного update-батча,
+с учётом каскадного удаления), история первой порции не тронута. Изменения и
+удаления старых транзакций не переносятся этим append-инкрементом по `_batch_id`:
+это не CDC.
 
 4. pg-meta (DBeaver) — артефакты второго раунда:
 
@@ -284,7 +325,7 @@ WHERE entity_fqn = 'retail_bank.transactions' ORDER BY batch_id;
 автоматически.
 
 Все запросы — Swagger UI, по одному «Try it out» на операцию (migrate сам
-будит базу; активация из шага 2 ещё действует). Каждая операция — отдельная
+будит базу, даже если TTL активации из шага 2 истёк). Каждая операция — отдельная
 транзакция; при желании три операции одного источника можно отправить и одним
 батчем.
 
@@ -346,9 +387,21 @@ Swagger UI, по одному вызову:
 `DELETE /sources/bank/rules/retail_bank.clients/columns/full_name` — правило
 старого имени больше не нужно.
 
-Для broker то же самое на `trading_core.clients`: `PUT .../columns/email`
-(faker email), `PUT .../columns/client_name` (faker name),
-`DELETE .../columns/full_name`.
+Для broker — отдельные вызовы:
+
+`PUT /sources/broker/rules/trading_core.clients/columns/email`:
+
+```json
+{"kind": "faker", "provider": "email", "null_ratio": 0.05}
+```
+
+`PUT /sources/broker/rules/trading_core.clients/columns/client_name`:
+
+```json
+{"kind": "faker", "provider": "name", "locale": "ru_RU", "null_ratio": 0.05}
+```
+
+`DELETE /sources/broker/rules/trading_core.clients/columns/full_name`.
 
 В каждом ответе возвращается весь профиль таблицы — удобно показать, что
 остальные генераторы не тронуты. (Инварианты связности добавляются на таблицу
@@ -357,9 +410,16 @@ Swagger UI, по одному вызову:
 
 **7.5.** Показать изменения на источнике в DBeaver:
 
+Для bank:
+
 ```sql
 SELECT TOP 10 * FROM retail_bank.clients ORDER BY client_id DESC;
-SELECT * FROM trading_core.clients ORDER BY client_id DESC FETCH FIRST 10 ROWS ONLY;
+```
+
+Для broker:
+
+```sql
+SELECT * FROM "trading_core"."clients" ORDER BY "client_id" DESC FETCH FIRST 10 ROWS ONLY;
 ```
 
 Видно: `client_type`/`is_qualified` исчезли, `client_name` хранит прежние
@@ -394,7 +454,9 @@ GROUP BY 1 ORDER BY 1;
 - `email` добавлен автоматически: старые порции NULL, новая порция — со
   значениями (после назначения генератора и обновления источника);
 - порядок колонок в таблице не важен: сопоставление по имени
-  (`mergeSchema` + `accept-any-schema` + `check-ordering=false`, README 4.4).
+  (`mergeSchema=true`, свойство таблицы `write.spark.accept-any-schema=true`
+  и опция записи `check-ordering=false`). Новые колонки добавляются при записи,
+  отсутствующие в источнике сохраняются в raw с NULL в новых порциях.
 
 **pg-meta** (DBeaver) — последние партии:
 
@@ -405,22 +467,3 @@ FROM ingestion.extraction_batches ORDER BY batch_id DESC LIMIT 8;
 
 Все партии загрузок после эволюции — `SUCCEEDED`: смена схемы источника не
 требует правок манифестов и не трогает контракты инкремента.
-
----
-
-## Резервные сюжетные линии (если останется время)
-
-- **Ручной полный снимок:** кнопка запуска `ingest__rdbms__bank__main` → в
-  диалоге развернуть «Расширенные параметры» → в поле **Configuration JSON**
-  (предзаполнено `{}`) вставить конфигурацию → Trigger:
-
-```json
-{"force_full_snapshot_fqns": ["retail_bank.transactions"], "reason": "Демо: ручная сверка полноты"}
-```
-
-  В pg-meta появится партия `reason=manual_full` без границ и с сохранённым
-  водяным знаком; в Trino — полная порция transactions поверх истории.
-
-- **No-op инкремента:** повторный запуск `ingest__rdbms__bank__main` без
-  обновления источника — у `transactions` нет новой порции, в pg-meta партия с
-  `row_count=0`, `attempt_count=0` (пустое окно закрывается без чтения).
