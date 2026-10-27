@@ -8,6 +8,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./test/.workspace/conf/sydafa/sources.json:/app/config/sources.json:ro
       - sydafa_state:/state
+      - sydafa_bank_data:/source-volumes/bank
+      - sydafa_broker_data:/source-volumes/broker
     ports: !override []
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').getcode() == 200 else 1)"]
