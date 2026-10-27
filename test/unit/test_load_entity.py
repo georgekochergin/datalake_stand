@@ -167,9 +167,47 @@ class TestSqlReference(unittest.TestCase):
             '"_batch_id"',
         )
 
-    def test_regular_column_unquoted_everywhere(self):
-        self.assertEqual(load_entity.sql_reference("jdbc:oracle:thin:@//h:1521/s", "updated_at"), "updated_at")
+    def test_oracle_regular_column_quoted(self):
+        self.assertEqual(
+            load_entity.sql_reference("jdbc:oracle:thin:@//h:1521/s", "updated_at"),
+            '"updated_at"',
+        )
+
+    def test_mssql_regular_column_unquoted(self):
         self.assertEqual(load_entity.sql_reference("jdbc:sqlserver://h:1433", "updated_at"), "updated_at")
+
+
+class TestSqlSourceTable(unittest.TestCase):
+    """Dialect-aware schema.table references for source SQL."""
+
+    def test_mssql_keeps_reference_as_written(self):
+        self.assertEqual(
+            load_entity.sql_source_table("jdbc:sqlserver://h:1433", "retail_bank.clients"),
+            "retail_bank.clients",
+        )
+
+    def test_oracle_quotes_both_parts(self):
+        self.assertEqual(
+            load_entity.sql_source_table("jdbc:oracle:thin:@//h:1521/sydafa", "trading_core.transactions"),
+            '"trading_core"."transactions"',
+        )
+
+    def test_oracle_preserves_explicitly_quoted_parts(self):
+        self.assertEqual(
+            load_entity.sql_source_table("jdbc:oracle:thin:@//h:1521/sydafa", '"trading_core"."transactions"'),
+            '"trading_core"."transactions"',
+        )
+
+    def test_subquery_expression_passthrough(self):
+        expression = "(SELECT CAST(1 AS bigint) AS position) retry_fixture"
+        self.assertEqual(
+            load_entity.sql_source_table("jdbc:oracle:thin:@//h:1521/sydafa", expression, allow_expression=True),
+            expression,
+        )
+
+    def test_malformed_reference_rejected_without_allow_expression(self):
+        with self.assertRaises(ValueError):
+            load_entity.sql_source_table("jdbc:oracle:thin:@//h:1521/sydafa", "a..b")
 
 
 class TestBuildReadQuery(unittest.TestCase):
@@ -187,10 +225,16 @@ class TestBuildReadQuery(unittest.TestCase):
             "(SELECT * FROM retail_bank.clients WHERE _batch_id > 100) q",
         )
 
-    def test_incremental_builds_subquery_oracle_quotes_underscore(self):
+    def test_incremental_builds_subquery_oracle_quotes_table_and_column(self):
         self.assertEqual(
             load_entity.build_read_query("trading_core.transactions", "_batch_id", "100", "jdbc:oracle:thin:@//h:1521/sydafa"),
-            '(SELECT * FROM trading_core.transactions WHERE "_batch_id" > 100) q',
+            '(SELECT * FROM "trading_core"."transactions" WHERE "_batch_id" > 100) q',
+        )
+
+    def test_full_snapshot_oracle_returns_quoted_table(self):
+        self.assertEqual(
+            load_entity.build_read_query("trading_core.transactions", None, None, "jdbc:oracle:thin:@//h:1521/sydafa"),
+            '"trading_core"."transactions"',
         )
 
     def test_bootstrap_without_watermark_reads_everything(self):

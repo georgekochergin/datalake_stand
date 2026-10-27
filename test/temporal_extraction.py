@@ -43,7 +43,7 @@ def source_count(spark, args, lower, upper, kind):
     for value, operator in ((lower, ">"), (upper, "<=")):
         if value is not None:
             predicates.append(f"{column} {operator} {extraction.literal(value, kind, args.jdbc_url)}")
-    query = f"SELECT COUNT(*) FROM {args.source_table}"
+    query = f"SELECT COUNT(*) FROM {load_entity.sql_source_table(args.jdbc_url, args.source_table, allow_expression=True)}"
     if predicates:
         query += " WHERE " + " AND ".join(predicates)
     connection = spark._jvm.java.sql.DriverManager.getConnection(
@@ -182,7 +182,7 @@ def precision_fixtures(source):
         ):
             mask = 'YYYY-MM-DD"T"HH24:MI:SS.FF9' + ("TZH:TZM" if suffix else "")
             query = " UNION ALL ".join(
-                f"SELECT {index} AS id, CAST({function}('2024-06-15T12:34:56.12345678{index}{suffix}', '{mask}') AS {sql_type}) AS position FROM dual"
+                f'SELECT {index} AS id, CAST({function}(\'2024-06-15T12:34:56.12345678{index}{suffix}\', \'{mask}\') AS {sql_type}) AS "position" FROM dual'
                 for index in (1, 2)
             )
             upper = "2024-06-15T" + ("10" if suffix else "12") + ":34:56.123456782" + ("Z" if suffix else "")
