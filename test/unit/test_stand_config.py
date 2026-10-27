@@ -179,51 +179,11 @@ run_runtime_checks() {
 
         compose = yaml.safe_load((ROOT / "docker-compose.yaml").read_text())
         script = compose["services"]["airflow-init"]["command"][2]
-        initialization = script.split("python - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
-        connection = MagicMock()
-        session = MagicMock()
-        create_session = MagicMock()
-        create_session.return_value.__enter__.return_value = session
-        modules = {
-            "airflow.models.connection": types.SimpleNamespace(Connection=connection),
-            "airflow.utils.session": types.SimpleNamespace(create_session=create_session),
-        }
-        for existing, expected in (([None] * 6, 6), ([object(), None] * 3, 3), ([object()] * 6, 0)):
-            with self.subTest(expected_created=expected):
-                session.reset_mock()
-                connection.reset_mock()
-                session.query.return_value.filter_by.return_value.first.side_effect = existing
-                with patch.dict("sys.modules", modules), patch.dict(os.environ, STAND_USER="unit-user", STAND_PASSWORD='quoted"password'):
-                    exec(compile(initialization, "airflow-init", "exec"), {})
-                self.assertEqual(session.add.call_count, expected)
-                self.assertEqual(connection.call_count, expected)
-                if expected == 6:
-                    self.assertEqual(
-                        [call.kwargs["uri"] for call in connection.call_args_list[:2]],
-                        [
-                            "mssql://sydafa:sydafa@${SYDAFA_CONTAINER_PREFIX:-sydafa}-src-mssql-bank:1433/sydafa",
-                            "oracle://sydafa:sydafa@${SYDAFA_CONTAINER_PREFIX:-sydafa}-src-oracle-broker:1521/sydafa",
-                        ],
-                    )
-                    self.assertEqual(connection.call_args_list[2].kwargs,
-                                     dict(conn_id="spark_default", conn_type="spark", host="spark://spark-master", port=7077,
-                                          extra={"spark_binary": "spark-submit"}))
-                    self.assertEqual(connection.call_args_list[3].kwargs,
-                                     dict(conn_id="trino_default", conn_type="trino", host="trino", port=8443, schema="raw",
-                                          login="unit-user", password='quoted"password',
-                                          extra={"protocol": "https", "verify": "false"}))
-                    self.assertEqual(connection.call_args_list[4].kwargs,
-                                     dict(conn_id="sydafa_default", conn_type="http", host="http://sydafa", port=8000))
-                    self.assertEqual(connection.call_args_list[5].kwargs,
-                                     dict(conn_id="ingestion_meta", conn_type="postgres", host="pg-meta", port=5432,
-                                          schema="meta", login="unit-user", password='quoted"password'))
-                self.assertEqual(
-                    [call.kwargs["conn_id"] for call in session.query.return_value.filter_by.call_args_list],
-                    ["bank_source", "broker_source", "spark_default", "trino_default", "sydafa_default", "ingestion_meta"],
-                )
-        session.query.return_value.filter_by.return_value.first.side_effect = RuntimeError("database unavailable")
-        with patch.dict("sys.modules", modules), self.assertRaisesRegex(RuntimeError, "database unavailable"):
-            exec(compile(initialization, "airflow-init", "exec"), {})
+        self.assertNotIn("python -", script)
+        self.assertNotIn("|| true", script)
+        for conn_id in ("bank_source", "broker_source", "spark_default", "trino_default", "sydafa_default", "ingestion_meta"):
+            self.assertIn(f"airflow connections get {conn_id} >/dev/null 2>&1 ||", script)
+            self.assertIn(f"airflow connections add {conn_id}", script)
 
 
 if __name__ == "__main__":

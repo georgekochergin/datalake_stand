@@ -200,31 +200,28 @@ services:
       - -ec
       - |
         airflow db migrate
-        python - <<'PY'
-        import os
-        from airflow.models.connection import Connection
-        from airflow.utils.session import create_session
-
-        with create_session() as session:
-            for conn_id, uri in (
-                ("bank_source", "mssql://sydafa:sydafa@${SYDAFA_CONTAINER_PREFIX:-sydafa}-src-mssql-bank:1433/sydafa"),
-                ("broker_source", "oracle://sydafa:sydafa@${SYDAFA_CONTAINER_PREFIX:-sydafa}-src-oracle-broker:1521/sydafa"),
-            ):
-                if session.query(Connection).filter_by(conn_id=conn_id).first() is None:
-                    session.add(Connection(conn_id=conn_id, uri=uri))
-            for settings in (
-                dict(conn_id="spark_default", conn_type="spark", host="spark://spark-master", port=7077,
-                     extra={"spark_binary": "spark-submit"}),
-                dict(conn_id="trino_default", conn_type="trino", host="trino", port=8443, schema="raw",
-                     login=os.environ["STAND_USER"], password=os.environ["STAND_PASSWORD"],
-                     extra={"protocol": "https", "verify": "false"}),
-                dict(conn_id="sydafa_default", conn_type="http", host="http://sydafa", port=8000),
-                dict(conn_id="ingestion_meta", conn_type="postgres", host="pg-meta", port=5432,
-                     schema="meta", login=os.environ["STAND_USER"], password=os.environ["STAND_PASSWORD"]),
-            ):
-                if session.query(Connection).filter_by(conn_id=settings["conn_id"]).first() is None:
-                    session.add(Connection(**settings))
-        PY
+        airflow connections get bank_source >/dev/null 2>&1 ||
+          airflow connections add bank_source \
+            --conn-uri 'mssql://sydafa:sydafa@${SYDAFA_CONTAINER_PREFIX:-sydafa}-src-mssql-bank:1433/sydafa'
+        airflow connections get broker_source >/dev/null 2>&1 ||
+          airflow connections add broker_source \
+            --conn-uri 'oracle://sydafa:sydafa@${SYDAFA_CONTAINER_PREFIX:-sydafa}-src-oracle-broker:1521/sydafa'
+        airflow connections get spark_default >/dev/null 2>&1 ||
+          airflow connections add spark_default \
+            --conn-type spark --conn-host 'spark://spark-master' --conn-port 7077 \
+            --conn-extra '{"spark_binary": "spark-submit"}'
+        airflow connections get trino_default >/dev/null 2>&1 ||
+          airflow connections add trino_default \
+            --conn-type trino --conn-host trino --conn-port 8443 --conn-schema raw \
+            --conn-login "$${STAND_USER}" --conn-password "$${STAND_PASSWORD}" \
+            --conn-extra '{"protocol": "https", "verify": "false"}'
+        airflow connections get sydafa_default >/dev/null 2>&1 ||
+          airflow connections add sydafa_default \
+            --conn-type http --conn-host 'http://sydafa' --conn-port 8000
+        airflow connections get ingestion_meta >/dev/null 2>&1 ||
+          airflow connections add ingestion_meta \
+            --conn-type postgres --conn-host pg-meta --conn-port 5432 --conn-schema meta \
+            --conn-login "$${STAND_USER}" --conn-password "$${STAND_PASSWORD}"
         airflow pools set ingest_loads 4 'Raw-layer ingestion load tasks (shared across ingest DAGs)'
     environment: &airflow-env
       <<: *spark-env
