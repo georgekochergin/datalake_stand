@@ -63,24 +63,27 @@ class TestGenerateDagSource(unittest.TestCase):
         self.assertIn('Asset("raw://bank/retail_bank.transactions")', self.source)
         self.assertIn('datalake_table="raw.bank.retail_bank__transactions"', self.source)
 
-    def test_assets_are_published_only_by_end_logging(self):
+    def test_assets_are_published_only_by_separate_task(self):
         import ast
 
         calls = [node for node in ast.walk(ast.parse(self.source)) if isinstance(node, ast.Call)]
         publishers = [node for node in calls if any(keyword.arg == "outlets" for keyword in node.keywords)]
         self.assertEqual(len(publishers), 2)
         for node in publishers:
-            self.assertEqual(node.func.id, "TableLogOperator")
+            self.assertEqual(node.func.id, "EmptyOperator")
             keywords = {keyword.arg: keyword.value for keyword in node.keywords}
-            self.assertEqual(ast.literal_eval(keywords["task_id"]), "log_end")
-            self.assertEqual(ast.literal_eval(keywords["status"]), "END")
+            self.assertEqual(ast.literal_eval(keywords["task_id"]), "publish_asset")
+            self.assertNotIn("trigger_rule", keywords)
+
+    def test_publication_requires_successful_end_logging(self):
+        self.assertEqual(self.source.count("log_start >> load >> log_end >> publish_asset"), 2)
 
     def test_load_tasks_share_pool(self):
         self.assertIn('pool="default_pool"', self.source)
         self.assertEqual(self.source.count('pool_slots=1'), 2)
 
     def test_incremental_column_only_where_configured(self):
-        self.assertEqual(self.source.count('incremental_column="_batch_id"'), 2)
+        self.assertEqual(self.source.count('incremental_column="_batch_id"'), 1)
         self.assertIn('entity_fqn="retail_bank.clients"', self.source)
         self.assertEqual(self.source.count("lookback_size=12"), 1)
         self.assertEqual(self.source.count("lookback_unit='h'"), 1)
@@ -140,7 +143,7 @@ class TestGenerateAll(unittest.TestCase):
 
     def test_bank_mixed_modes(self):
         bank = self.generated["ingest__rdbms__bank__main.py"]
-        self.assertEqual(bank.count('incremental_column="_batch_id"'), 2)
+        self.assertEqual(bank.count('incremental_column="_batch_id"'), 1)
 
     def test_demonstration_weights_and_parallelism(self):
         for name, content in self.generated.items():

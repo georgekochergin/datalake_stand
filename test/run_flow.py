@@ -203,6 +203,8 @@ def airflow_wait_run(token: str, dag_id: str, run_id: str, timeout: int = 300, n
             last = d.get("state", "unknown")
             if last == "success":
                 check((name or dag_id) + " -> success", "success", "success")
+                if dag_id.startswith("ingest__"):
+                    airflow_check_asset_publication(token, dag_id, run_id)
                 return True
             if last == "failed":
                 check((name or dag_id) + " -> success", "failed", "success")
@@ -222,6 +224,30 @@ def airflow_wait_run(token: str, dag_id: str, run_id: str, timeout: int = 300, n
         time.sleep(5)
     check((name or dag_id) + " -> success", "timeout:" + str(last), "success")
     return False
+
+
+def airflow_check_asset_publication(token: str, dag_id: str, run_id: str) -> None:
+    """Verify each entity publishes only after its END logging task succeeds."""
+    url = "%s/api/v2/dags/%s/dagRuns/%s/taskInstances?limit=100" % (AIRFLOW, dag_id, run_id)
+    code, raw = http("GET", url, None, {"Authorization": "Bearer " + token})
+    if not check(dag_id + ": publication task instances available", code, 200):
+        return
+    payload = json.loads(raw)
+    instances = {item["task_id"]: item for item in payload["task_instances"]}
+    check(dag_id + ": all task instances retrieved", len(instances), payload["total_entries"])
+    end_tasks = [task_id for task_id in instances if task_id.endswith(".log_end")]
+    publishers = [task_id for task_id in instances if task_id.endswith(".publish_asset")]
+    check(dag_id + ": one publisher per entity", len(publishers), len(end_tasks))
+    check(dag_id + ": entity logging tasks present", bool(end_tasks), True)
+    for task_id in end_tasks:
+        end = instances[task_id]
+        publisher = instances.get(task_id.removesuffix("log_end") + "publish_asset", {})
+        check(task_id + ": END logging succeeded", end["state"], "success")
+        check(task_id + ": separate publication succeeded", publisher.get("state"), "success")
+        end_date = end.get("end_date")
+        start_date = publisher.get("start_date")
+        check(task_id + ": publication follows END logging",
+              bool(end_date and start_date and start_date >= end_date), True)
 
 
 def trino_query(sql: str, timeout: int = 120) -> list[list[Any]]:
@@ -525,7 +551,9 @@ def main() -> None:
         print("FATAL: Не удалось авторизоваться в Airflow")
         return
 
-    for conn_id, conn_type in (("bank_source", "mssql"), ("broker_source", "oracle")):
+    for conn_id, conn_type in (("bank_source", "mssql"), ("broker_source", "oracle"),
+                               ("sydafa_default", "http"), ("ingestion_meta", "postgres"),
+                               ("spark_default", "spark"), ("trino_default", "trino")):
         code, raw = http(
             "GET", AIRFLOW + "/api/v2/connections/" + conn_id,
             headers={"Authorization": "Bearer " + token},
@@ -534,7 +562,29 @@ def main() -> None:
         if code == 200:
             connection = json.loads(raw)
             check("Connection %s type" % conn_id, connection.get("conn_type"), conn_type)
-            check("Connection %s reader" % conn_id, connection.get("login"), "sydafa")
+            if conn_id in ("bank_source", "broker_source"):
+                check("Connection %s reader" % conn_id, connection.get("login"), "sydafa")
+            elif conn_id == "sydafa_default":
+                check("Connection sydafa_default host", connection.get("host"), "http://sydafa")
+                check("Connection sydafa_default port", connection.get("port"), 8000)
+            elif conn_id == "ingestion_meta":
+                check("Connection ingestion_meta host", connection.get("host"), "pg-meta")
+                check("Connection ingestion_meta port", connection.get("port"), 5432)
+                check("Connection ingestion_meta database", connection.get("schema"), "meta")
+                check("Connection ingestion_meta user", connection.get("login"), AIRFLOW_USER)
+            elif conn_id == "spark_default":
+                check("Connection spark_default host", connection.get("host"), "spark://spark-master")
+                check("Connection spark_default port", connection.get("port"), 7077)
+                extra = json.loads(connection.get("extra") or "{}")
+                check("Connection spark_default binary", extra.get("spark_binary"), "spark-submit")
+            elif conn_id == "trino_default":
+                check("Connection trino_default host", connection.get("host"), "trino")
+                check("Connection trino_default port", connection.get("port"), 8443)
+                check("Connection trino_default schema", connection.get("schema"), "raw")
+                check("Connection trino_default user", connection.get("login"), TRINO_USER)
+                extra = json.loads(connection.get("extra") or "{}")
+                check("Connection trino_default protocol", extra.get("protocol"), "https")
+                check("Connection trino_default certificate verification", extra.get("verify"), "false")
 
     print("Ожидание регистрации DAG update_source_bank и update_source_broker в Airflow...")
     bank_dag_ok = airflow_wait_dag_registered(token, "update_source_bank", timeout=180)

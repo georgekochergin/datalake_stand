@@ -63,9 +63,9 @@ run_runtime_checks() {
     return 1
   fi
   "${COMPOSE[@]}" run --rm --no-deps test-runner python -u /app/run_flow.py
-  "${COMPOSE[@]}" exec -T airflow-scheduler python /opt/airflow/plugins/e2e_check_extraction.py
-  "${COMPOSE[@]}" exec -T airflow-scheduler spark-submit --master spark://spark-master:7077 --deploy-mode client /opt/spark-jobs/e2e_schema_evolution.py
-  "${COMPOSE[@]}" exec -T airflow-scheduler spark-submit --master spark://spark-master:7077 --deploy-mode client /opt/spark-jobs/e2e_temporal_extraction.py
+  "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler python /opt/airflow/plugins/e2e_check_extraction.py
+  "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler spark-submit --master spark://spark-master:7077 --deploy-mode client /opt/spark-jobs/e2e_schema_evolution.py
+  "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler spark-submit --master spark://spark-master:7077 --deploy-mode client /opt/spark-jobs/e2e_temporal_extraction.py
 }
 
 if [ "$MODE" = "verify" ]; then

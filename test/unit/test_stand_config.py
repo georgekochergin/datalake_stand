@@ -150,12 +150,18 @@ run_runtime_checks() {
         self.assertEqual(model["volumes"]["sydafa_broker_data"]["name"], "sydafa-dlh-test-unit-data-oracle-broker")
         self.assertEqual(services["sydafa"]["environment"]["SYDAFA_CONTAINER_PREFIX"], "sydafa-dlh-test-unit")
         for name in ("spark-master", "spark-worker", "airflow-scheduler", "trino"):
+            self.assertNotIn("SYDAFA_URL", services[name]["environment"])
             self.assertEqual(services[name]["environment"]["AWS_ACCESS_KEY_ID"], "unit-user")
             self.assertEqual(services[name]["environment"]["AWS_SECRET_ACCESS_KEY"], "unit-password")
         for name in ("airflow-init", "airflow-scheduler", "airflow-dag-processor", "airflow-webserver"):
             environment = services[name]["environment"]
+            self.assertNotIn("SYDAFA_URL", environment)
             self.assertNotIn("AIRFLOW_CONN_BANK_SOURCE", environment)
             self.assertNotIn("AIRFLOW_CONN_BROKER_SOURCE", environment)
+            self.assertNotIn("AIRFLOW_CONN_SYDAFA_DEFAULT", environment)
+            self.assertNotIn("AIRFLOW_CONN_INGESTION_META", environment)
+            self.assertNotIn("AIRFLOW_CONN_SPARK_DEFAULT", environment)
+            self.assertNotIn("AIRFLOW_CONN_TRINO_DEFAULT", environment)
             key = environment["AIRFLOW__CORE__FERNET_KEY"]
             self.assertEqual(key, services["airflow-init"]["environment"]["AIRFLOW__CORE__FERNET_KEY"])
             self.assertEqual(len(base64.urlsafe_b64decode(key)), 32)
@@ -182,26 +188,38 @@ run_runtime_checks() {
             "airflow.models.connection": types.SimpleNamespace(Connection=connection),
             "airflow.utils.session": types.SimpleNamespace(create_session=create_session),
         }
-        for existing, expected in (([None, None], 2), ([object(), None], 1), ([object(), object()], 0)):
+        for existing, expected in (([None] * 6, 6), ([object(), None] * 3, 3), ([object()] * 6, 0)):
             with self.subTest(expected_created=expected):
                 session.reset_mock()
                 connection.reset_mock()
                 session.query.return_value.filter_by.return_value.first.side_effect = existing
-                with patch.dict("sys.modules", modules):
+                with patch.dict("sys.modules", modules), patch.dict(os.environ, STAND_USER="unit-user", STAND_PASSWORD='quoted"password'):
                     exec(compile(initialization, "airflow-init", "exec"), {})
                 self.assertEqual(session.add.call_count, expected)
                 self.assertEqual(connection.call_count, expected)
-                if expected == 2:
+                if expected == 6:
                     self.assertEqual(
-                        [call.kwargs["uri"] for call in connection.call_args_list],
+                        [call.kwargs["uri"] for call in connection.call_args_list[:2]],
                         [
                             "mssql://sydafa:sydafa@${SYDAFA_CONTAINER_PREFIX:-sydafa}-src-mssql-bank:1433/sydafa",
                             "oracle://sydafa:sydafa@${SYDAFA_CONTAINER_PREFIX:-sydafa}-src-oracle-broker:1521/sydafa",
                         ],
                     )
+                    self.assertEqual(connection.call_args_list[2].kwargs,
+                                     dict(conn_id="spark_default", conn_type="spark", host="spark://spark-master", port=7077,
+                                          extra={"spark_binary": "spark-submit"}))
+                    self.assertEqual(connection.call_args_list[3].kwargs,
+                                     dict(conn_id="trino_default", conn_type="trino", host="trino", port=8443, schema="raw",
+                                          login="unit-user", password='quoted"password',
+                                          extra={"protocol": "https", "verify": "false"}))
+                    self.assertEqual(connection.call_args_list[4].kwargs,
+                                     dict(conn_id="sydafa_default", conn_type="http", host="http://sydafa", port=8000))
+                    self.assertEqual(connection.call_args_list[5].kwargs,
+                                     dict(conn_id="ingestion_meta", conn_type="postgres", host="pg-meta", port=5432,
+                                          schema="meta", login="unit-user", password='quoted"password'))
                 self.assertEqual(
                     [call.kwargs["conn_id"] for call in session.query.return_value.filter_by.call_args_list],
-                    ["bank_source", "broker_source"],
+                    ["bank_source", "broker_source", "spark_default", "trino_default", "sydafa_default", "ingestion_meta"],
                 )
         session.query.return_value.filter_by.return_value.first.side_effect = RuntimeError("database unavailable")
         with patch.dict("sys.modules", modules), self.assertRaisesRegex(RuntimeError, "database unavailable"):

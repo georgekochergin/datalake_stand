@@ -488,12 +488,23 @@ Airflow Connections во время исполнения таска). Это з�
 в CI генератор запускается автоматически, локально — вручную (имитация CI/CD на
 демо).
 
-Подключения к источникам `bank_source` и `broker_source` создаются сервисом
+Все подключения стенда — `bank_source`, `broker_source`, `spark_default`,
+`trino_default`, `sydafa_default` (HTTP API sydafa) и `ingestion_meta`
+(Postgres pg-meta, база `meta`) — создаются сервисом
 `airflow-init` в metadata DB Airflow после миграции БД. Имена и начальные
 реквизиты (`sydafa/sydafa`) явно заданы в `docker-compose.yaml`; существующие
 Connections не перезаписываются при повторной инициализации. Их можно смотреть
 и редактировать в UI Airflow. Переменные `AIRFLOW_CONN_BANK_SOURCE` и
-`AIRFLOW_CONN_BROKER_SOURCE` не используются, чтобы не перекрывать настройки UI.
+`AIRFLOW_CONN_BROKER_SOURCE`, `AIRFLOW_CONN_SYDAFA_DEFAULT` и
+`AIRFLOW_CONN_INGESTION_META`, `AIRFLOW_CONN_SPARK_DEFAULT` и
+`AIRFLOW_CONN_TRINO_DEFAULT` не используются, чтобы не перекрывать настройки UI.
+Операторы sydafa используют `sydafa_default`; переменная `SYDAFA_URL` в окружении
+Airflow и Spark не задаётся. Одноимённая настройка в e2e HTTP-клиенте не относится
+к Airflow Connections.
+Реквизиты начальных подключений `ingestion_meta` и `trino_default` берутся из `STAND_USER` и
+`STAND_PASSWORD`. После обновления существующего стенда нужно повторно выполнить
+`airflow-init` и пересоздать сервисы Airflow, чтобы убрать старые переменные
+окружения; существующие записи Connections сохраняются.
 В production подключения создаются вручную в UI; демо-инициализация для них
 не требуется. `ingestion/sources.yaml` только ссылается на Connections через
 `airflow_conn_id` и не управляет их созданием. Для изолированного тестового
@@ -569,12 +580,14 @@ DAG ingest__rdbms__bank__main
         ├── TaskGroup "load_retail_bank__transactions" (одна сущность)
         │   ├── log_start   событие START в pg-meta
         │   ├── load        IngestAppendOperator → spark/raw/load_entity.py
-        │   └── log_end     событие END + публикация Asset
+        │   ├── log_end     событие END в pg-meta
+        │   └── publish_asset  публикация Asset после успешного log_end
         └── TaskGroup "load_retail_bank__deals" ...
 ```
 
 Зависимости: `generate_process_id >> activate_source >> ingest_group`; внутри
-группы сущности независимы, внутри сущности — `log_start >> load >> log_end`.
+группы сущности независимы, внутри сущности —
+`log_start >> load >> log_end >> publish_asset`.
 `max_active_runs=1` сериализует запуски одного DAG-а — «последний снапшот» и
 водяные знаки однозначны.
 
@@ -589,9 +602,15 @@ DAG ingest__rdbms__bank__main
   будит СУБД источника через REST sydafa с TTL 15 минут, чтобы последующий
   JDBC-читатель не упёрся в спящий контейнер.
 - **`log_start` / `log_end`** (`TableLogOperator`) — события жизненного цикла
-  сущности в `airflow_tasks_log`; `log_end` публикует Asset
-  `raw://<source_id>/<fqn>` — на них смогут подписываться DAG-и следующих
-  слоёв.
+  сущности в `airflow_tasks_log`, без публикации Asset и управления состоянием
+  извлечения. Таблицы `ingestion.extraction_batches` и `ingestion.extraction_state`
+  обслуживает Spark-функция `managed_load()` через `ingestion.registry`;
+  `incremental_column` передаётся только задаче `load`.
+- **`publish_asset`** (`EmptyOperator` с `outlets`) — отдельная задача публикации
+  события обновления Asset `raw://<source_id>/<fqn>`, на который смогут
+  подписываться DAG-и следующих слоёв. Выполняется только после успешного
+  `log_end`: загрузка завершилась и её успех записан в pg-meta. Ошибка или
+  пропуск `log_end` не допускает публикацию.
 - **`load`** (`IngestAppendOperator`, наследник `SparkSubmitOperator`,
   client-mode, job `spark/raw/load_entity.py`) — исполнитель загрузки. Во время
   исполнения: разрешает Airflow Connection источника в JDBC URL (проверяя схему
