@@ -56,7 +56,7 @@ SQL через Trino (DBeaver, BI) и Spark.
 
 | Инстанс | Образ/версия | Назначение |
 |---|---|---|
-| `sydafa` | `sydafa:latest` | Эмулятор источников: REST API для активации СУБД, транзакционных миграций схемы/данных и генерации синтетических данных (раздел 3) |
+| `sydafa` | `ghcr.io/georgekochergin/sydafa:latest` | Эмулятор источников: REST API для активации СУБД, транзакционных миграций схемы/данных и генерации синтетических данных (раздел 3) |
 | `sydafa-src-mssql-bank` | `mcr.microsoft.com/mssql/server:2022-CU27` | Источник **bank** (MSSQL 2022, база `sydafa`, схема `retail_bank`); запускается sydafa лениво, по требованию |
 | `sydafa-src-oracle-broker` | `gvenzl/oracle-free:23-slim-faststart` | Источник **broker** (Oracle Free 23, PDB `sydafa`, схема `trading_core`); запускается sydafa лениво |
 | `spark-master` / `spark-worker` | `tabulario/spark-iceberg:3.5.5_1.8.1` + JDBC-драйверы MSSQL/Oracle | Spark 3.5.5 standalone-кластер; загрузка источников в Iceberg по JDBC, каталог `raw` через нативный NessieCatalog |
@@ -182,16 +182,20 @@ docker info | grep "Total Memory"   # должно быть ≥ 16 GiB
 ### 2.1. Запуск и остановка
 
 Предусловия: Docker + Docker Compose, ≥16 ГБ RAM для Docker (раздел 1.4),
-склонированный репозиторий с `.env` и локальный образ эмулятора `sydafa:latest`
-(внешнего репозитория у него нет). Если образа нет — собрать из клона
-репозитория [sydafa](https://github.com/georgekochergin/sydafa), расположенного
-рядом со стендом:
+склонированный репозиторий с `.env`. Образ эмулятора
+`ghcr.io/georgekochergin/sydafa:latest` загружается из GHCR автоматически,
+если его нет локально. Для обновления уже скачанного образа выполните
+`docker compose pull sydafa` перед запуском.
+
+Другой образ можно указать через `SYDAFA_IMAGE` в `.env` или окружении.
+Для локальной разработки из соседнего клона
+[sydafa](https://github.com/georgekochergin/sydafa):
 
 ```bash
-docker image inspect sydafa:latest >/dev/null 2>&1 || docker build -t sydafa:latest ../sydafa
+docker build -t sydafa:latest ../sydafa
+SYDAFA_IMAGE=sydafa:latest docker compose up -d
 ```
 
-Альтернатива — указать готовый образ переменной `SYDAFA_IMAGE` в окружении.
 Интернет нужен только для первой загрузки/сборки образов — повторные запуски
 работают офлайн.
 

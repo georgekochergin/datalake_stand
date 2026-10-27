@@ -21,7 +21,7 @@ services:
   # ---------- Сервис sydafa (эмулятор и оркестратор СУБД-источников) ----------
 
   sydafa:
-    image: ${SYDAFA_IMAGE:-sydafa:latest}
+    image: ${SYDAFA_IMAGE:-ghcr.io/georgekochergin/sydafa:latest}
     environment:
       - SYDAFA_CONTAINER_PREFIX=${SYDAFA_CONTAINER_PREFIX:-sydafa}
       - SYDAFA_MAX_TTL_MINUTES=30
