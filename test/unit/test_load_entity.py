@@ -8,14 +8,19 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 MODULE_PATH = Path(__file__).resolve().parents[2] / "spark" / "raw" / "load_entity.py"
 _SPEC = importlib.util.spec_from_file_location("load_entity", MODULE_PATH)
 load_entity = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(load_entity)
 
+MSSQL_URL = "jdbc:sqlserver://host:1433;databaseName=retail_bank"
+ORACLE_URL = "jdbc:oracle:thin:@//host:1521/sydafa"
+
 BASE_ARGS = [
     "--jdbc-url",
-    "jdbc:sqlserver://host:1433;databaseName=retail_bank",
+    MSSQL_URL,
     "--jdbc-user",
     "sydafa",
     "--jdbc-password",
@@ -102,25 +107,6 @@ class TestParseArgs(unittest.TestCase):
             load_entity.parse_args(build_argv("--incremental-column", "Client-Id"))
 
 
-class TestResolveDriver(unittest.TestCase):
-    """JDBC driver resolution by URL prefix."""
-
-    def test_sqlserver(self):
-        self.assertEqual(
-            load_entity.resolve_driver("jdbc:sqlserver://host:1433"),
-            "com.microsoft.sqlserver.jdbc.SQLServerDriver",
-        )
-
-    def test_oracle(self):
-        self.assertEqual(
-            load_entity.resolve_driver("jdbc:oracle:thin:@//host:1521/svc"),
-            "oracle.jdbc.OracleDriver",
-        )
-
-    def test_unknown(self):
-        with self.assertRaises(ValueError):
-            load_entity.resolve_driver("jdbc:postgresql://host:5432/db")
-
 
 class TestValidateTargetTable(unittest.TestCase):
     """Target table identifier validation."""
@@ -152,116 +138,58 @@ class TestValidateTargetTable(unittest.TestCase):
             load_entity.validate_target_table("raw..clients")
 
 
-class TestSqlReference(unittest.TestCase):
-    """Dialect-aware column references for source SQL."""
-
-    def test_mssql_column_bracket_quoted(self):
-        self.assertEqual(
-            load_entity.sql_reference("jdbc:sqlserver://host:1433", "_batch_id"),
-            "[_batch_id]",
-        )
-
-    def test_mssql_bracket_escaped(self):
-        self.assertEqual(
-            load_entity.sql_reference("jdbc:sqlserver://host:1433", "co]lumn"),
-            "[co]]lumn]",
-        )
-
-    def test_oracle_underscore_column_quoted(self):
-        self.assertEqual(
-            load_entity.sql_reference("jdbc:oracle:thin:@//host:1521/sydafa", "_batch_id"),
-            '"_batch_id"',
-        )
-
-    def test_oracle_regular_column_quoted(self):
-        self.assertEqual(
-            load_entity.sql_reference("jdbc:oracle:thin:@//h:1521/s", "updated_at"),
-            '"updated_at"',
-        )
-
-    def test_unknown_dialect_unquoted(self):
-        self.assertEqual(load_entity.sql_reference("", "updated_at"), "updated_at")
-
-
-class TestSqlSourceTable(unittest.TestCase):
-    """Dialect-aware schema.table references for source SQL."""
-
-    def test_mssql_quotes_both_parts_with_brackets(self):
-        self.assertEqual(
-            load_entity.sql_source_table("jdbc:sqlserver://h:1433", "retail_bank.clients"),
-            "[retail_bank].[clients]",
-        )
-
-    def test_oracle_quotes_both_parts(self):
-        self.assertEqual(
-            load_entity.sql_source_table("jdbc:oracle:thin:@//h:1521/sydafa", "trading_core.transactions"),
-            '"trading_core"."transactions"',
-        )
-
-    def test_oracle_preserves_explicitly_quoted_parts(self):
-        self.assertEqual(
-            load_entity.sql_source_table("jdbc:oracle:thin:@//h:1521/sydafa", '"trading_core"."transactions"'),
-            '"trading_core"."transactions"',
-        )
-
-    def test_subquery_expression_passthrough(self):
-        expression = "(SELECT CAST(1 AS bigint) AS position) retry_fixture"
-        self.assertEqual(
-            load_entity.sql_source_table("jdbc:oracle:thin:@//h:1521/sydafa", expression, allow_expression=True),
-            expression,
-        )
-
-    def test_malformed_reference_rejected_without_allow_expression(self):
-        with self.assertRaises(ValueError):
-            load_entity.sql_source_table("jdbc:oracle:thin:@//h:1521/sydafa", "a..b")
 
 
 class TestBuildReadQuery(unittest.TestCase):
     """JDBC dbtable expression construction."""
 
-    def test_full_snapshot_returns_bare_table(self):
+    def test_full_snapshot_returns_quoted_table(self):
         self.assertEqual(
-            load_entity.build_read_query("retail_bank.clients", None, None),
-            "retail_bank.clients",
+            load_entity.build_read_query("retail_bank.clients", None, None, MSSQL_URL),
+            "[retail_bank].[clients]",
+        )
+        self.assertEqual(
+            load_entity.build_read_query("trading_core.transactions", None, None, ORACLE_URL),
+            '"trading_core"."transactions"',
         )
 
     def test_incremental_builds_subquery_mssql(self):
         self.assertEqual(
-            load_entity.build_read_query("retail_bank.clients", "_batch_id", "100", "jdbc:sqlserver://h:1433"),
+            load_entity.build_read_query("retail_bank.clients", "_batch_id", "100", MSSQL_URL),
             "(SELECT * FROM [retail_bank].[clients] WHERE [_batch_id] > 100) q",
         )
 
     def test_incremental_builds_subquery_oracle_quotes_table_and_column(self):
         self.assertEqual(
-            load_entity.build_read_query("trading_core.transactions", "_batch_id", "100", "jdbc:oracle:thin:@//h:1521/sydafa"),
+            load_entity.build_read_query("trading_core.transactions", "_batch_id", "100", ORACLE_URL),
             '(SELECT * FROM "trading_core"."transactions" WHERE "_batch_id" > 100) q',
-        )
-
-    def test_full_snapshot_oracle_returns_quoted_table(self):
-        self.assertEqual(
-            load_entity.build_read_query("trading_core.transactions", None, None, "jdbc:oracle:thin:@//h:1521/sydafa"),
-            '"trading_core"."transactions"',
         )
 
     def test_bootstrap_without_watermark_reads_everything(self):
         self.assertEqual(
-            load_entity.build_read_query("retail_bank.clients", "_batch_id", None),
-            "retail_bank.clients",
+            load_entity.build_read_query("retail_bank.clients", "_batch_id", None, MSSQL_URL),
+            "[retail_bank].[clients]",
         )
 
     def test_non_numeric_watermark_rejected(self):
         with self.assertRaises(ValueError):
-            load_entity.build_read_query("retail_bank.clients", "_batch_id", "1; DROP TABLE x")
+            load_entity.build_read_query("retail_bank.clients", "_batch_id", "1; DROP TABLE x", MSSQL_URL)
 
     def test_injection_in_source_table_rejected(self):
         with self.assertRaises(ValueError):
-            load_entity.build_read_query("retail_bank.clients; DROP TABLE x", None, None)
+            load_entity.build_read_query("retail_bank.clients; DROP TABLE x", None, None, MSSQL_URL)
 
     def test_quoted_fragment_allowed(self):
         self.assertEqual(
-            load_entity.build_read_query('retail_bank."sub.clients"', None, None),
-            'retail_bank."sub.clients"',
+            load_entity.build_read_query('retail_bank."sub.clients"', None, None, MSSQL_URL),
+            "[retail_bank].[sub.clients]",
         )
+
+    def test_unknown_dialect_rejected(self):
+        with self.assertRaises(ValueError):
+            load_entity.build_read_query("retail_bank.clients", None, None, "")
+        with self.assertRaises(ValueError):
+            load_entity.build_read_query("retail_bank.clients", None, None, "jdbc:postgresql://h/db")
 
 
 class TestPickPartitionColumn(unittest.TestCase):
@@ -408,7 +336,7 @@ class TestMetadata(unittest.TestCase):
     def test_invalid_fqn(self):
         for value in ('a."b', "a..b", "a.b.", 'a."b"x', "a.b.c", ""):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                load_entity.build_read_query(value, None, None)
+                load_entity.build_read_query(value, None, None, MSSQL_URL)
 
     def test_only_unquoted_fragments_fold(self):
         spark = MagicMock()
@@ -522,49 +450,6 @@ class TestOracleUtcProjection(unittest.TestCase):
         with self.assertRaises(Exception):
             load_entity.oracle_utc_projection(None, args)
 
-
-class TestPositionExpression(unittest.TestCase):
-    """Lossless source-side temporal string rendering per dialect."""
-
-    def test_mssql_local_precision(self):
-        self.assertEqual(
-            load_entity.position_expression("updated_at", "timestamp_local(0)", "jdbc:sqlserver://h"),
-            "CONVERT(char(19), CAST(updated_at AS datetime2(0)), 126)",
-        )
-        self.assertEqual(
-            load_entity.position_expression("updated_at", "timestamp_local(3)", "jdbc:sqlserver://h"),
-            "CONVERT(char(19), CAST(updated_at AS datetime2(3)), 126) "
-            "+ '.' + LEFT(RIGHT('000000000' + CAST(DATEPART(nanosecond, updated_at) AS varchar(9)), 9), 3)",
-        )
-
-    def test_mssql_instant_uses_switchoffset_and_z_suffix(self):
-        offset = "SWITCHOFFSET(updated_at, '+00:00')"
-        self.assertEqual(
-            load_entity.position_expression("updated_at", "timestamp_instant(7)", "jdbc:sqlserver://h"),
-            f"CONVERT(char(19), CAST({offset} AS datetime2(7)), 126) "
-            f"+ '.' + LEFT(RIGHT('000000000' + CAST(DATEPART(nanosecond, {offset}) AS varchar(9)), 9), 7) + 'Z'",
-        )
-
-    def test_oracle_local_and_instant_precision(self):
-        self.assertEqual(
-            load_entity.position_expression('"updated_at"', "timestamp_local(0)", "jdbc:oracle:thin:@//h/s"),
-            "TO_CHAR(\"updated_at\", 'YYYY-MM-DD\"T\"HH24:MI:SS')",
-        )
-        self.assertEqual(
-            load_entity.position_expression('"updated_at"', "timestamp_local(9)", "jdbc:oracle:thin:@//h/s"),
-            "TO_CHAR(\"updated_at\", 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9')",
-        )
-        self.assertEqual(
-            load_entity.position_expression('"updated_at"', "timestamp_instant(9)", "jdbc:oracle:thin:@//h/s"),
-            "TO_CHAR(SYS_EXTRACT_UTC(\"updated_at\"), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9\"Z\"')",
-        )
-
-    def test_non_temporal_kinds_pass_column_through(self):
-        for kind in ("bigint", "integer", "decimal(38,0)", "date"):
-            self.assertEqual(
-                load_entity.position_expression("[_batch_id]", kind, "jdbc:sqlserver://h"),
-                "[_batch_id]",
-            )
 
 
 class TestEmptyIncrementalWindow(unittest.TestCase):

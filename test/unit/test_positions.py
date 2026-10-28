@@ -1,6 +1,5 @@
 """Focused lossless position codec and lookback tests."""
 
-import importlib.util
 import sys
 import unittest
 from datetime import date, datetime, timezone
@@ -12,12 +11,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from dlh_ingestion.sources.rdbms import positions
 
 
-MODULE_PATH = Path(__file__).resolve().parents[2] / "spark" / "raw" / "extraction.py"
-_SPEC = importlib.util.spec_from_file_location("extraction", MODULE_PATH)
-extraction = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(extraction)
-MSSQL = "jdbc:sqlserver://source"
-ORACLE = "jdbc:oracle:thin:@source"
+class TestKindInfo(unittest.TestCase):
+    """Kind introspection shared by dialects and the loader."""
+
+    def test_supported_kinds(self):
+        for kind, family, precision in (
+            ("smallint", "integral", 0),
+            ("bigint", "integral", 0),
+            ("decimal(18,0)", "integral", 0),
+            ("date", "date", 0),
+            ("timestamp_local(7)", "local", 7),
+            ("timestamp_instant(0)", "instant", 0),
+        ):
+            self.assertEqual(positions.kind_info(kind)[:2], (family, precision))
+
+    def test_unsupported_kind(self):
+        for kind in ("", "boolean", "decimal(10,2)", "timestamp_local(10)", "timestamp_utc(3)", 5, None):
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                positions.kind_info(kind)
 
 
 class TestPositions(unittest.TestCase):
@@ -124,55 +135,6 @@ class TestPositions(unittest.TestCase):
                 with self.subTest(kind=kind, unit=unit):
                     self.assertEqual(positions.lower_bound(position, kind, 0, unit, specified=True), position)
         self.assertEqual(positions.lower_bound("-5", "bigint", 0, None, specified=True), "-5")
-
-
-class TestSourceCodecs(unittest.TestCase):
-    """Source schema mapping and injection-safe temporal SQL."""
-
-    def test_metadata(self):
-        for name, precision, scale, url, expected in (
-            ("BIGINT", 19, 0, MSSQL, "bigint"),
-            ("int", 10, 0, MSSQL, "integer"),
-            ("DATE", 10, 0, MSSQL, "date"),
-            ("DATE", 7, 0, ORACLE, "timestamp_local(0)"),
-            ("datetime2", 27, 7, MSSQL, "timestamp_local(7)"),
-            ("datetimeoffset", 34, 7, MSSQL, "timestamp_instant(7)"),
-            ("datetime", 23, 3, MSSQL, "timestamp_local(3)"),
-            ("smalldatetime", 16, 0, MSSQL, "timestamp_local(0)"),
-            ("TIMESTAMP", 29, 9, ORACLE, "timestamp_local(9)"),
-            ("TIMESTAMP(9) WITH TIME ZONE", 0, 9, ORACLE, "timestamp_instant(9)"),
-            ("TIMESTAMP WITH LOCAL TIME ZONE", 0, 6, ORACLE, "timestamp_instant(6)"),
-            ("NUMBER", 38, 0, ORACLE, "decimal(38,0)"),
-        ):
-            self.assertEqual(extraction.jdbc_kind(name, precision, scale, url), expected)
-
-    def test_unsupported_metadata(self):
-        for name, precision, scale, url in (
-            ("timestamp", 8, 0, MSSQL), ("rowversion", 8, 0, MSSQL),
-            ("NUMBER", 0, -127, ORACLE), ("NUMBER", 39, 0, ORACLE),
-            ("NUMBER", 12, 2, ORACLE), ("VARCHAR", 50, 0, ORACLE),
-            ("datetime2", 28, 8, MSSQL), ("TIMESTAMP", 30, 10, ORACLE),
-        ):
-            with self.assertRaises(ValueError):
-                extraction.jdbc_kind(name, precision, scale, url)
-
-    def test_sql_literals(self):
-        self.assertEqual(extraction.literal("10", "bigint", MSSQL), "10")
-        self.assertEqual(extraction.literal(None, "bigint", ORACLE), "NULL")
-        self.assertEqual(extraction.literal("2026-10-26", "date", MSSQL), "CAST('2026-10-26' AS date)")
-        self.assertEqual(extraction.literal("2026-10-26", "date", ORACLE), "TO_DATE('2026-10-26', 'YYYY-MM-DD')")
-        value = "2026-10-26T12:00:00.1234567"
-        self.assertEqual(extraction.literal(value, "timestamp_local(7)", MSSQL), f"CAST('{value}' AS datetime2(7))")
-        self.assertEqual(extraction.literal(value + "Z", "timestamp_instant(7)", MSSQL), f"CAST('{value}Z' AS datetimeoffset(7))")
-        value = "2026-10-26T12:00:00.123456789"
-        self.assertEqual(extraction.literal(value, "timestamp_local(9)", ORACLE), f"TO_TIMESTAMP('{value}', 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9')")
-        self.assertEqual(extraction.literal(value + "Z", "timestamp_instant(9)", ORACLE), f"TO_TIMESTAMP_TZ('{value}+00:00', 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9TZH:TZM')")
-        with self.assertRaises(ValueError):
-            extraction.literal(value, "timestamp_local(9)", MSSQL)
-        with self.assertRaises(ValueError):
-            extraction.literal("1' OR 1=1", "bigint", MSSQL)
-        with self.assertRaises(ValueError):
-            extraction.literal("1", "bigint", "jdbc:unknown://host")
 
 
 if __name__ == "__main__":

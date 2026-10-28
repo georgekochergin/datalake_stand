@@ -35,15 +35,19 @@ def metadata_row(hook, table, source_id, entity_fqn):
 
 def source_count(spark, args, lower, upper, kind):
     """Count the exact source predicate without Spark temporal conversion."""
-    import extraction
     import load_entity
+    from dlh_ingestion.sources.rdbms import positions
+    from dlh_ingestion.sources.rdbms import registry as dialects
 
-    column = load_entity.sql_reference(args.jdbc_url, args.incremental_column)
+    dialect = dialects.by_jdbc_url(args.jdbc_url)
+    column = dialect.quote_identifier(args.incremental_column)
     predicates = []
     for value, operator in ((lower, ">"), (upper, "<=")):
         if value is not None:
-            predicates.append(f"{column} {operator} {extraction.literal(value, kind, args.jdbc_url)}")
-    query = f"SELECT COUNT(*) FROM {load_entity.sql_source_table(args.jdbc_url, args.source_table, allow_expression=True)}"
+            predicates.append(
+                f"{column} {operator} {dialect.position_literal(positions.canonical(value, kind), kind)}"
+            )
+    query = f"SELECT COUNT(*) FROM {load_entity.render_source_table(dialect, args.source_table, allow_expression=True)}"
     if predicates:
         query += " WHERE " + " AND ".join(predicates)
     connection = spark._jvm.java.sql.DriverManager.getConnection(
@@ -234,7 +238,7 @@ def main():
     from airflow.models.connection import Connection
     from airflow.providers.postgres.hooks.postgres import PostgresHook
     from airflow.utils.session import create_session
-    from ingestion.operators import _resolve_jdbc
+    from ingestion.operators import resolve_source_connection
     from pyspark.sql import SparkSession
 
     meta = BaseHook.get_connection("ingestion_meta")
@@ -243,7 +247,9 @@ def main():
     hook = PostgresHook(postgres_conn_id="ingestion_meta")
     with create_session() as session:
         source_jdbc = {
-            source: _resolve_jdbc(session.query(Connection).filter_by(conn_id=f"{source}_source").one())
+            source: resolve_source_connection(
+                session.query(Connection).filter_by(conn_id=f"{source}_source").one()
+            )
             for source in ("bank", "broker")
         }
     token = "e2e-temporal-" + uuid4().hex

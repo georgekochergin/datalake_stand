@@ -6,6 +6,8 @@ from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOpe
 from airflow.sdk import BaseHook, BaseOperator
 
 from dlh_ingestion import meta
+from dlh_ingestion.sources.rdbms import registry as rdbms_registry
+from dlh_ingestion.sources.rdbms.contracts import ConnectionSpec
 
 
 def _meta_connect(pg_conn_id: str = "ingestion_meta"):
@@ -15,26 +17,16 @@ def _meta_connect(pg_conn_id: str = "ingestion_meta"):
     return PostgresHook(postgres_conn_id=pg_conn_id).get_conn()
 
 
-JDBC_TEMPLATES = {
-    "mssql": ("jdbc:sqlserver://{host}:{port};databaseName={schema};encrypt=false", 1433),
-    "oracle": ("jdbc:oracle:thin:@//{host}:{port}/{schema}", 1521),
-}
-
-
-def _resolve_jdbc(connection) -> tuple[str, str, str]:
-    """Build (jdbc_url, user, password) from an Airflow Connection with a JDBC dialect."""
-    template = JDBC_TEMPLATES.get(connection.conn_type)
-    if template is None:
-        raise ValueError(
-            f"connection {connection.conn_id!r} scheme {connection.conn_type!r} is not a "
-            f"supported JDBC dialect (expected one of {sorted(JDBC_TEMPLATES)})"
-        )
-    url_template, default_port = template
-    jdbc_url = url_template.format(
+def resolve_source_connection(connection) -> tuple:
+    """Build (jdbc_url, user, password) from an Airflow Connection via the dialect registry."""
+    dialect = rdbms_registry.by_conn_type(connection.conn_type)
+    jdbc_url = dialect.build_jdbc_url(ConnectionSpec(
         host=connection.host,
-        port=connection.port or default_port,
-        schema=connection.schema,
-    )
+        port=connection.port,
+        database=connection.schema,
+        user=connection.login,
+        password=connection.password,
+    ))
     return jdbc_url, connection.login, connection.password
 
 
@@ -230,7 +222,7 @@ class IngestAppendOperator(SparkSubmitOperator):
         if self.source_type != "rdbms":
             raise ValueError(f"source_type {self.source_type!r} is not supported by JDBC ingestion")
         connection = BaseHook.get_connection(self.airflow_conn_id)
-        jdbc_url, jdbc_user, jdbc_password = _resolve_jdbc(connection)
+        jdbc_url, jdbc_user, jdbc_password = resolve_source_connection(connection)
         process_id = _pull_process_id(context)
         if process_id is None:
             raise ValueError("missing process_id from generate_process_id")

@@ -3,13 +3,16 @@
 Managed Airflow execution plans fixed source bounds in pg-meta, preserves
 batch identity across retries and atomically finalizes its watermark.
 Repeated appends remain valid at-least-once behavior. Pure helpers import
-without Spark; managed execution uses the registry mounted with Airflow.
+without Spark; managed execution uses the shared dlh_ingestion package.
 """
 
 import argparse
 import logging
 import re
 from decimal import Decimal
+
+from dlh_ingestion.sources.rdbms import positions
+from dlh_ingestion.sources.rdbms import registry as dialects
 
 CATALOG = "raw"
 METADATA_DTTM = "__load_dttm"
@@ -38,11 +41,6 @@ PARTITION_TYPES = frozenset(
         "TIMESTAMP",
     }
 )
-
-DRIVERS = {
-    "jdbc:sqlserver:": "com.microsoft.sqlserver.jdbc.SQLServerDriver",
-    "jdbc:oracle:": "oracle.jdbc.OracleDriver",
-}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -83,43 +81,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def resolve_driver(jdbc_url: str) -> str:
-    """Return the JDBC driver class for a supported jdbc: URL prefix."""
-    for prefix, driver in DRIVERS.items():
-        if jdbc_url.startswith(prefix):
-            return driver
-    raise ValueError(f"unsupported jdbc url (expected one of {sorted(DRIVERS)}): {jdbc_url!r}")
-
-
-def validate_target_table(target: str) -> tuple[str, str]:
-    """Validate raw.<namespace>.<table> and return (namespace, table)."""
-    parts = target.split(".")
-    if len(parts) != 3 or parts[0] != CATALOG:
-        raise ValueError(f"target table must be '{CATALOG}.<namespace>.<table>': {target!r}")
-    namespace, table = parts[1], parts[2]
-    if not IDENTIFIER_PATTERN.match(namespace) or not IDENTIFIER_PATTERN.match(table):
-        raise ValueError(
-            f"target table parts must match {IDENTIFIER_PATTERN.pattern}: {target!r}"
-        )
-    return namespace, table
-
-
-def sql_reference(jdbc_url: str, name: str) -> str:
-    """Render a column reference quoted for the source dialect.
-
-    Quoting is applied for every known RDBMS dialect: Oracle stores sydafa
-    identifiers lowercase and an unquoted reference would fold to uppercase
-    and miss the column, while MSSQL bracket quoting guards reserved words
-    and exact-case names. An unknown dialect (empty url) is rendered unquoted.
-    """
-    if jdbc_url.startswith("jdbc:oracle:"):
-        return '"%s"' % name.replace('"', '""')
-    if jdbc_url.startswith("jdbc:sqlserver:"):
-        return "[%s]" % name.replace("]", "]]")
-    return name
-
-
-def sql_source_table(jdbc_url: str, source_table: str, allow_expression: bool = False) -> str:
+def render_source_table(dialect, source_table: str, allow_expression: bool = False) -> str:
     """Render a schema.table reference quoted for the source dialect.
 
     Every part of the reference is quoted per dialect (Oracle double quotes,
@@ -134,21 +96,18 @@ def sql_source_table(jdbc_url: str, source_table: str, allow_expression: bool = 
         if allow_expression:
             return source_table
         raise
-    if jdbc_url.startswith(("jdbc:oracle:", "jdbc:sqlserver:")):
-        return ".".join(sql_reference(jdbc_url, name) for name, _ in parts)
-    return ".".join(
-        ('"%s"' % name.replace('"', '""')) if quoted else name for name, quoted in parts
-    )
+    return dialect.render_table(parts)
 
 
 def build_read_query(
     source_table: str,
     incremental_column: str | None,
     watermark_value: str | None,
-    jdbc_url: str = "",
+    jdbc_url: str,
 ) -> str:
     """Build the JDBC dbtable expression: bare table, or an incremental subquery."""
-    table = sql_source_table(jdbc_url, source_table)
+    dialect = dialects.by_jdbc_url(jdbc_url)
+    table = render_source_table(dialect, source_table)
     if incremental_column is None:
         return table
     if not COLUMN_NAME_PATTERN.match(incremental_column):
@@ -160,8 +119,21 @@ def build_read_query(
             f"watermark must be a plain integer (got {watermark_value!r}); "
             "quoted/ISO watermarks are not supported"
         )
-    column = sql_reference(jdbc_url, incremental_column)
+    column = dialect.quote_identifier(incremental_column)
     return f"(SELECT * FROM {table} WHERE {column} > {watermark_value}) q"
+
+
+def validate_target_table(target: str) -> tuple[str, str]:
+    """Validate raw.<namespace>.<table> and return (namespace, table)."""
+    parts = target.split(".")
+    if len(parts) != 3 or parts[0] != CATALOG:
+        raise ValueError(f"target table must be '{CATALOG}.<namespace>.<table>': {target!r}")
+    namespace, table = parts[1], parts[2]
+    if not IDENTIFIER_PATTERN.match(namespace) or not IDENTIFIER_PATTERN.match(table):
+        raise ValueError(
+            f"target table parts must match {IDENTIFIER_PATTERN.pattern}: {target!r}"
+        )
+    return namespace, table
 
 
 def _normalize_type(jdbc_type: str) -> str:
@@ -362,16 +334,19 @@ def _column_types(metadata, schema, table) -> dict[str, str]:
 
 
 def _jdbc_reader(spark, args, read_query):
-    """Build the JDBC reader with user/password/driver options."""
-    return (
+    """Build the JDBC reader with driver and engine options from the dialect."""
+    dialect = dialects.by_jdbc_url(args.jdbc_url)
+    reader = (
         spark.read.format("jdbc")
         .option("url", args.jdbc_url)
         .option("dbtable", read_query)
         .option("user", args.jdbc_user)
         .option("password", args.jdbc_password)
-        .option("driver", resolve_driver(args.jdbc_url))
-        .option("preferTimestampNTZ", "true")
+        .option("driver", dialect.driver_class)
     )
+    for key, value in dialect.reader_options().items():
+        reader = reader.option(key, value)
+    return reader
 
 
 def _bound_literal(value) -> str:
@@ -388,7 +363,7 @@ def _bound_literal(value) -> str:
 
 def _read_bounds(spark, args, read_query, column) -> tuple:
     """Read MIN/MAX of the partition column over the read query (one-row JDBC read)."""
-    column_ref = sql_reference(args.jdbc_url, column)
+    column_ref = dialects.by_jdbc_url(args.jdbc_url).quote_identifier(column)
     query = (
         f"(SELECT MIN({column_ref}) AS lower_bound, MAX({column_ref}) AS upper_bound "
         f"FROM {read_query}) bounds"
@@ -463,26 +438,6 @@ def main(argv: list[str] | None = None) -> None:
         spark.stop()
 
 
-def position_expression(column, kind, jdbc_url):
-    """Render a lossless source-side temporal string before Spark timestamp conversion."""
-    if kind.startswith("timestamp"):
-        if jdbc_url.startswith("jdbc:oracle:"):
-            value = f"SYS_EXTRACT_UTC({column})" if "instant" in kind else column
-            precision = int(kind.split("(")[1].rstrip(")"))
-            fraction = f".FF{precision}" if precision else ""
-            suffix = '\"Z\"' if "instant" in kind else ""
-            return f"TO_CHAR({value}, 'YYYY-MM-DD\"T\"HH24:MI:SS{fraction}{suffix}')"
-        precision = int(kind.split("(")[1].rstrip(")"))
-        value = f"SWITCHOFFSET({column}, '+00:00')" if "instant" in kind else column
-        expression = f"CONVERT(char(19), CAST({value} AS datetime2({precision})), 126)"
-        if precision:
-            expression += f" + '.' + LEFT(RIGHT('000000000' + CAST(DATEPART(nanosecond, {value}) AS varchar(9)), 9), {precision})"
-        return expression + (
-            " + 'Z'" if "instant" in kind else ""
-        )
-    return column
-
-
 def empty_incremental_window(batch) -> bool:
     """True when persisted bounds prove the strict window contains no rows.
 
@@ -498,30 +453,29 @@ def empty_incremental_window(batch) -> bool:
 
 def source_position(spark, args, inspect_only=False):
     """Inspect original JDBC type and obtain exact MAX plus NULL/empty diagnostics."""
-    import extraction
-
+    dialect = dialects.by_jdbc_url(args.jdbc_url)
     connection = spark._jvm.java.sql.DriverManager.getConnection(
         args.jdbc_url, args.jdbc_user, args.jdbc_password
     )
     try:
         statement = connection.createStatement()
         try:
-            column = sql_reference(args.jdbc_url, args.incremental_column)
-            table = sql_source_table(args.jdbc_url, args.source_table, allow_expression=True)
+            column = dialect.quote_identifier(args.incremental_column)
+            table = render_source_table(dialect, args.source_table, allow_expression=True)
             result = statement.executeQuery(f"SELECT {column} FROM {table} WHERE 1=0")
             try:
                 metadata = result.getMetaData()
-                kind = extraction.jdbc_kind(metadata.getColumnTypeName(1), metadata.getPrecision(1),
-                                            metadata.getScale(1), args.jdbc_url)
+                kind = dialect.position_kind(metadata.getColumnTypeName(1), metadata.getPrecision(1),
+                                             metadata.getScale(1))
             finally:
                 result.close()
-            expression = "NULL" if inspect_only else position_expression(f"MAX({column})", kind, args.jdbc_url)
+            expression = "NULL" if inspect_only else dialect.position_expression(f"MAX({column})", kind)
             result = statement.executeQuery(
                 f"SELECT {expression}, COUNT(*), COUNT({column}) FROM {table}"
             )
             try:
                 result.next()
-                upper = extraction.canonical(result.getString(1), kind)
+                upper = positions.canonical(result.getString(1), kind)
                 count = int(result.getString(2))
                 nonnull = int(result.getString(3))
             finally:
@@ -544,13 +498,14 @@ def oracle_utc_projection(spark, args):
     """
     if not args.jdbc_url.startswith("jdbc:oracle:"):
         return None
+    dialect = dialects.by_jdbc_url(args.jdbc_url)
     connection = spark._jvm.java.sql.DriverManager.getConnection(
         args.jdbc_url, args.jdbc_user, args.jdbc_password
     )
     try:
         statement = connection.createStatement()
         try:
-            table = sql_source_table(args.jdbc_url, args.source_table, allow_expression=True)
+            table = render_source_table(dialect, args.source_table, allow_expression=True)
             result = statement.executeQuery(f"SELECT * FROM {table} WHERE 1=0")
             try:
                 metadata = result.getMetaData()
@@ -558,7 +513,7 @@ def oracle_utc_projection(spark, args):
                 for index in range(1, metadata.getColumnCount() + 1):
                     name = str(metadata.getColumnLabel(index))
                     type_name = " ".join(str(metadata.getColumnTypeName(index)).upper().split())
-                    reference = sql_reference(args.jdbc_url, name)
+                    reference = dialect.quote_identifier(name)
                     if "TIME ZONE" in type_name:
                         projected.append(f"SYS_EXTRACT_UTC(extract_source.{reference}) AS {reference}")
                     else:
@@ -574,12 +529,12 @@ def oracle_utc_projection(spark, args):
 
 def managed_load(spark, args):
     """Execute a persisted batch with at-least-once append and atomic pg-meta finalization."""
-    import extraction
     import pyspark.sql.functions as F
     import psycopg2
 
     from dlh_ingestion import meta
 
+    dialect = dialects.by_jdbc_url(args.jdbc_url)
     connect = lambda: psycopg2.connect("")
     batch = meta.get_batch(dag_id=args.dag_id, run_id=args.run_id, source_id=args.source_id,
                            entity_fqn=args.source_table, db_connect=connect)
@@ -599,16 +554,16 @@ def managed_load(spark, args):
             raise ValueError("Incremental source type changed; migrate pg-meta")
         if has_null and not args.force_full:
             raise ValueError("NULL incremental value in source")
-        extraction.lower_bound(upper, kind, args.lookback_size, args.lookback_unit,
-                               specified=args.lookback_given)
+        positions.lower_bound(upper, kind, args.lookback_size, args.lookback_unit,
+                              specified=args.lookback_given)
     if batch is None:
         def calculate_lower(value):
             """Reject source resets before persisting an incremental window."""
             if value is not None and not args.force_full:
-                if empty or extraction.maximum(value, upper, kind) != upper:
+                if empty or positions.maximum(value, upper, kind) != upper:
                     raise ValueError("SOURCE_POSITION_REGRESSION: explicit reset/bootstrap required")
-            return extraction.lower_bound(value, kind, args.lookback_size, args.lookback_unit,
-                                          specified=args.lookback_given)
+            return positions.lower_bound(value, kind, args.lookback_size, args.lookback_unit,
+                                         specified=args.lookback_given)
 
         batch = meta.plan_batch(
             process_id=args.process_id, dag_id=args.dag_id, run_id=args.run_id,
@@ -619,8 +574,8 @@ def managed_load(spark, args):
             reason_text=args.reason, db_connect=connect,
             calculate_lower=calculate_lower,
             compare_positions=lambda left, right: (
-                0 if extraction.canonical(left, kind) == extraction.canonical(right, kind)
-                else 1 if extraction.maximum(left, right, kind) == extraction.canonical(left, kind) else -1
+                0 if positions.canonical(left, kind) == positions.canonical(right, kind)
+                else 1 if positions.maximum(left, right, kind) == positions.canonical(left, kind) else -1
             ),
         )
     elif batch["incremental_column"] != args.incremental_column or batch["incremental_type"] != kind:
@@ -633,10 +588,12 @@ def managed_load(spark, args):
     meta.start_batch(batch_id=batch_id, db_connect=connect)
     try:
         filters = []
-        column = sql_reference(args.jdbc_url, args.incremental_column) if args.incremental_column else None
+        column = dialect.quote_identifier(args.incremental_column) if args.incremental_column else None
         for key, op in (("lower_bound", ">"), ("upper_bound", "<=")):
             if batch[key] is not None:
-                filters.append(f"{column} {op} {extraction.literal(batch[key], kind, args.jdbc_url)}")
+                filters.append(
+                    f"{column} {op} {dialect.position_literal(positions.canonical(batch[key], kind), kind)}"
+                )
         if batch["empty_at_plan"]:
             filters.append("1=0")
         select = "extract_source.*"
@@ -644,10 +601,10 @@ def managed_load(spark, args):
         if projection is not None:
             select = ", ".join(projection)
         if column:
-            select += f', {position_expression(column, kind, args.jdbc_url)} AS "__extract_position"'
+            select += f', {dialect.position_expression(column, kind)} AS "__extract_position"'
         query = (
             f"(SELECT {select} FROM (SELECT * FROM "
-            f"{sql_source_table(args.jdbc_url, args.source_table, allow_expression=True)}) extract_source"
+            f"{render_source_table(dialect, args.source_table, allow_expression=True)}) extract_source"
             + (" WHERE " + " AND ".join(filters) if filters else "")
             + ") extract_batch"
         )
@@ -667,7 +624,7 @@ def managed_load(spark, args):
                 [F.max("__extract_position").alias("position")] if column else []
             )).first()
             rows = int(summary["n"])
-            observed = extraction.canonical(summary["position"], kind) if column else None
+            observed = positions.canonical(summary["position"], kind) if column else None
             clean = source.drop("__extract_position") if column else source
             if any(field.name in (METADATA_BATCH, METADATA_PID, METADATA_DTTM) for field in clean.schema.fields):
                 raise ValueError("Source column collides with ingestion metadata")
@@ -682,7 +639,7 @@ def managed_load(spark, args):
                 frame.writeTo(args.target_table).option("mergeSchema", "true").option("check-ordering", "false").append()
             watermark = batch["watermark_before"]
             if args.incremental_column and batch["reason"] != "manual_full":
-                watermark = extraction.maximum(watermark, observed, kind)
+                watermark = positions.maximum(watermark, observed, kind)
             meta.finalize_batch(batch_id=batch_id, row_count=rows, observed_max=observed,
                                     watermark_after=watermark, db_connect=connect)
         finally:
