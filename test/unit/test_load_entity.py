@@ -523,6 +523,50 @@ class TestOracleUtcProjection(unittest.TestCase):
             load_entity.oracle_utc_projection(None, args)
 
 
+class TestPositionExpression(unittest.TestCase):
+    """Lossless source-side temporal string rendering per dialect."""
+
+    def test_mssql_local_precision(self):
+        self.assertEqual(
+            load_entity.position_expression("updated_at", "timestamp_local(0)", "jdbc:sqlserver://h"),
+            "CONVERT(char(19), CAST(updated_at AS datetime2(0)), 126)",
+        )
+        self.assertEqual(
+            load_entity.position_expression("updated_at", "timestamp_local(3)", "jdbc:sqlserver://h"),
+            "CONVERT(char(19), CAST(updated_at AS datetime2(3)), 126) "
+            "+ '.' + LEFT(RIGHT('000000000' + CAST(DATEPART(nanosecond, updated_at) AS varchar(9)), 9), 3)",
+        )
+
+    def test_mssql_instant_uses_switchoffset_and_z_suffix(self):
+        offset = "SWITCHOFFSET(updated_at, '+00:00')"
+        self.assertEqual(
+            load_entity.position_expression("updated_at", "timestamp_instant(7)", "jdbc:sqlserver://h"),
+            f"CONVERT(char(19), CAST({offset} AS datetime2(7)), 126) "
+            f"+ '.' + LEFT(RIGHT('000000000' + CAST(DATEPART(nanosecond, {offset}) AS varchar(9)), 9), 7) + 'Z'",
+        )
+
+    def test_oracle_local_and_instant_precision(self):
+        self.assertEqual(
+            load_entity.position_expression('"updated_at"', "timestamp_local(0)", "jdbc:oracle:thin:@//h/s"),
+            "TO_CHAR(\"updated_at\", 'YYYY-MM-DD\"T\"HH24:MI:SS')",
+        )
+        self.assertEqual(
+            load_entity.position_expression('"updated_at"', "timestamp_local(9)", "jdbc:oracle:thin:@//h/s"),
+            "TO_CHAR(\"updated_at\", 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9')",
+        )
+        self.assertEqual(
+            load_entity.position_expression('"updated_at"', "timestamp_instant(9)", "jdbc:oracle:thin:@//h/s"),
+            "TO_CHAR(SYS_EXTRACT_UTC(\"updated_at\"), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9\"Z\"')",
+        )
+
+    def test_non_temporal_kinds_pass_column_through(self):
+        for kind in ("bigint", "integer", "decimal(38,0)", "date"):
+            self.assertEqual(
+                load_entity.position_expression("[_batch_id]", kind, "jdbc:sqlserver://h"),
+                "[_batch_id]",
+            )
+
+
 class TestEmptyIncrementalWindow(unittest.TestCase):
     """Only a zero-lookback window with equal typed bounds is provably empty."""
 
