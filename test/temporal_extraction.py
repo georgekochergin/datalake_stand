@@ -42,8 +42,8 @@ def metadata_row(hook, table, source_id, entity_fqn):
 def source_count(spark, args, lower, upper, kind):
     """Count the exact source predicate without Spark temporal conversion."""
     load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
-    from dlh_ingestion.sources.rdbms import positions
-    from dlh_ingestion.sources.rdbms import registry as dialects
+    from ingestion.sources.rdbms import positions
+    from ingestion.sources.rdbms import registry as dialects
 
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     column = dialect.quote_identifier(args.incremental_column)
@@ -78,8 +78,8 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
              expected_upper=None):
     """Verify bootstrap, overlap, manual-full, empty resume, and successful retry."""
     load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
-    from dlh_ingestion import meta
-    from dlh_ingestion.sources.rdbms import positions
+    from ingestion import meta
+    from ingestion.sources.rdbms import positions
 
     args = Namespace(
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
@@ -203,7 +203,7 @@ def precision_fixtures(source):
 def check_post_append_retry(spark, hook, jdbc, token):
     """Inject a real post-append metadata failure and accept a repeated append."""
     load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
-    from dlh_ingestion import meta
+    from ingestion import meta
 
     args = Namespace(
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],

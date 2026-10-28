@@ -6,8 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from dlh_ingestion.sources.rdbms import positions, registry
-from dlh_ingestion.sources.rdbms.contracts import ConnectionSpec
+from ingestion.sources.rdbms import positions, registry
+from ingestion.sources.rdbms.contracts import ConnectionSpec
 
 MSSQL = registry.by_conn_type("mssql")
 ORACLE = registry.by_conn_type("oracle")

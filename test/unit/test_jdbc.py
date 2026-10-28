@@ -1,4 +1,4 @@
-"""Unit tests for the shared JDBC layer (dlh_ingestion.sources.rdbms.jdbc)."""
+"""Unit tests for the shared JDBC layer (ingestion.sources.rdbms.jdbc)."""
 
 import sys
 import unittest
@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from dlh_ingestion.sources.rdbms import jdbc, registry
+from ingestion.sources.rdbms import jdbc, registry
 
 ORACLE = registry.by_conn_type("oracle")
 

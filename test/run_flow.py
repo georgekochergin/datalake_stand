@@ -486,13 +486,13 @@ def validate_manifests_and_dags() -> None:
     ), True)
 
     sys.path.insert(0, str(ws))
-    from ingestion.generate_dags import generate_all
-    from ingestion.lib.manifest import load_sources
+    from ingestion.generator.generate_dags import generate_all
+    from ingestion.generator.manifest import load_sources
 
     import yaml
 
     for source in ("bank", "broker"):
-        pipeline_path = ws / "ingestion" / "pipelines" / source / "main.yaml"
+        pipeline_path = ws / "ingestion" / "conf" / "pipelines" / source / "main.yaml"
         pipeline = yaml.safe_load(pipeline_path.read_text(encoding="utf-8"))
         entities = pipeline.get("entities", [])
         transactions = [entity for entity in entities if entity.get("fqn", "").endswith(".transactions")]
@@ -500,8 +500,8 @@ def validate_manifests_and_dags() -> None:
         check(source + " main has no legacy incremental keys", all("incremental_column" not in entity and "incremental_lookback" not in entity for entity in entities), True)
 
     generated = generate_all(
-        load_sources(ws / "ingestion" / "sources.yaml"),
-        ws / "ingestion" / "pipelines", ws / "ingestion" / "settings.yaml",
+        load_sources(ws / "ingestion" / "conf" / "sources.yaml"),
+        ws / "ingestion" / "conf" / "pipelines", ws / "ingestion" / "conf" / "settings.yaml",
     )
     check("generated DAG set", sorted(generated), sorted(name + ".py" for name in INGEST_DAGS))
     for name, content in generated.items():

@@ -23,7 +23,7 @@ def records(cursor, sql):
 
 def check_registry_recovery():
     """Exercise real pg-meta retry/finalization without touching JDBC sources."""
-    from dlh_ingestion import meta
+    from ingestion import meta
 
     connect = PostgresHook(postgres_conn_id="ingestion_meta").get_conn
     source = "e2e-registry-" + uuid4().hex

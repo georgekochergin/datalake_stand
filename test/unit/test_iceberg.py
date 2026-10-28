@@ -1,4 +1,4 @@
-"""Unit tests for the target-side Iceberg DDL helpers (dlh_ingestion.iceberg)."""
+"""Unit tests for the target-side Iceberg DDL helpers (ingestion.iceberg)."""
 
 import sys
 import unittest
@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from dlh_ingestion import iceberg
+from ingestion import iceberg
 
 
 class TestValidateTargetTable(unittest.TestCase):

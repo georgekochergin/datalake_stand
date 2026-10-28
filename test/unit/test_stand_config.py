@@ -112,9 +112,9 @@ cleanup() {
         helper = script.split("run_runtime_checks() {", 1)[1].split('\nif [ "$MODE"', 1)[0]
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
-            (workspace / "spark").mkdir()
-            (workspace / "spark/e2e_schema_evolution.py").touch()
-            (workspace / "spark/e2e_temporal_extraction.py").touch()
+            (workspace / "ingestion" / "spark").mkdir(parents=True)
+            (workspace / "ingestion/spark/e2e_schema_evolution.py").touch()
+            (workspace / "ingestion/spark/e2e_temporal_extraction.py").touch()
             log = workspace / "calls"
             harness = r'''
 set -euo pipefail

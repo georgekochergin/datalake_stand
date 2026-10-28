@@ -16,7 +16,7 @@ from uuid import uuid4
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from dlh_ingestion import meta
+from ingestion import meta
 
 
 class TransactionTests(unittest.TestCase):
@@ -27,7 +27,7 @@ class TransactionTests(unittest.TestCase):
         code = (
             "import sys; "
             f"sys.path.insert(0, {str(ROOT)!r}); "
-            "import dlh_ingestion.meta; "
+            "import ingestion.meta; "
             "assert not any(k == 'airflow' or k.startswith('airflow.') for k in sys.modules)"
         )
         subprocess.run([sys.executable, "-c", code], check=True)

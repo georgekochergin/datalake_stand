@@ -23,6 +23,8 @@ class FakeOperator:
 
 def load_operators():
     """Import under a private package and restore every mocked module afterwards."""
+    import ingestion.sources
+
     modules = {}
     for name in (
         "airflow", "airflow.providers", "airflow.providers.apache", "airflow.providers.apache.spark",
@@ -33,10 +35,11 @@ def load_operators():
     modules["airflow.sdk"].BaseHook = MagicMock()
     modules["airflow.sdk"].BaseOperator = FakeOperator
     modules["airflow.providers.apache.spark.operators.spark_submit"].SparkSubmitOperator = FakeOperator
-    modules["dlh_ingestion"] = types.ModuleType("dlh_ingestion")
-    modules["dlh_ingestion"].meta = MagicMock()
-    modules["dlh_ingestion.meta"] = modules["dlh_ingestion"].meta
-    path = Path(__file__).resolve().parents[2] / "airflow/plugins/ingestion/operators.py"
+    modules["ingestion"] = types.ModuleType("ingestion")
+    modules["ingestion"].meta = MagicMock()
+    modules["ingestion"].sources = ingestion.sources
+    modules["ingestion.meta"] = modules["ingestion"].meta
+    path = Path(__file__).resolve().parents[2] / "ingestion" / "operators.py"
     spec = importlib.util.spec_from_file_location("_operator_test_ingestion.operators", path)
     module = importlib.util.module_from_spec(spec)
     with patch.dict(sys.modules, modules):

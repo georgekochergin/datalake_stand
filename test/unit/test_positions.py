@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from dlh_ingestion.sources.rdbms import positions
+from ingestion.sources.rdbms import positions
 
 
 class TestKindInfo(unittest.TestCase):

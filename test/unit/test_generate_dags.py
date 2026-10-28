@@ -1,4 +1,4 @@
-"""Unit tests for ingestion.generate_dags."""
+"""Unit tests for ingestion.generator.generate_dags."""
 
 import sys
 import tempfile
@@ -7,14 +7,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from ingestion.generate_dags import (
+from ingestion.generator.generate_dags import (
     asset_uri,
     compute_drift,
     generate_all,
     generate_dag_source,
     main,
 )
-from ingestion.lib.manifest import EntityConfig, PipelineManifest, SourceConfig
+from ingestion.generator.manifest import EntityConfig, PipelineManifest, SourceConfig
 
 BANK = SourceConfig(source_id="bank", type="rdbms", airflow_conn_id="bank_source")
 PIPELINE = PipelineManifest(
@@ -124,10 +124,10 @@ class TestGenerateAll(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         repo_root = Path(__file__).resolve().parents[2]
-        from ingestion.lib.manifest import load_sources
+        from ingestion.generator.manifest import load_sources
 
-        cls.sources = load_sources(repo_root / "ingestion" / "sources.yaml")
-        cls.generated = generate_all(cls.sources, repo_root / "ingestion" / "pipelines")
+        cls.sources = load_sources(repo_root / "ingestion" / "conf" / "sources.yaml")
+        cls.generated = generate_all(cls.sources, repo_root / "ingestion" / "conf" / "pipelines")
 
     def test_covers_both_pipelines(self):
         self.assertEqual(set(self.generated), {
@@ -159,7 +159,7 @@ class TestGenerateAll(unittest.TestCase):
 
     def test_deterministic(self):
         repo_root = Path(__file__).resolve().parents[2]
-        again = generate_all(self.sources, repo_root / "ingestion" / "pipelines")
+        again = generate_all(self.sources, repo_root / "ingestion" / "conf" / "pipelines")
         self.assertEqual(self.generated, again)
 
 

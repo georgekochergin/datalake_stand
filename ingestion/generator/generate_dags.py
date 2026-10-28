@@ -13,9 +13,7 @@ import sys
 from pathlib import Path
 from urllib.parse import quote
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from ingestion.lib.manifest import (
+from ingestion.generator.manifest import (
     PipelineManifest,
     SourceConfig,
     load_pipeline,
@@ -23,13 +21,13 @@ from ingestion.lib.manifest import (
     load_settings,
     validate_pipeline,
 )
-from ingestion.lib.naming import CATALOG, resolve_fully_qualified
+from ingestion.generator.naming import CATALOG, resolve_fully_qualified
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SOURCES = REPO_ROOT / "ingestion" / "sources.yaml"
-DEFAULT_PIPELINES = REPO_ROOT / "ingestion" / "pipelines"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_SOURCES = REPO_ROOT / "ingestion" / "conf" / "sources.yaml"
+DEFAULT_PIPELINES = REPO_ROOT / "ingestion" / "conf" / "pipelines"
 DEFAULT_OUTPUT = REPO_ROOT / "airflow" / "dags" / "generated"
-DEFAULT_SETTINGS = REPO_ROOT / "ingestion" / "settings.yaml"
+DEFAULT_SETTINGS = REPO_ROOT / "ingestion" / "conf" / "settings.yaml"
 ACTIVATE_TTL_MINUTES = 15
 
 

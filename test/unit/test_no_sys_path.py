@@ -13,9 +13,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 RUNTIME_ROOTS = [
-    REPO_ROOT / "spark",
+    REPO_ROOT / "ingestion",
     REPO_ROOT / "airflow" / "plugins",
-    REPO_ROOT / "dlh_ingestion",
 ]
 RUNTIME_FILES = [
     REPO_ROOT / "test" / "temporal_extraction.py",

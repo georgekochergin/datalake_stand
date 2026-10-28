@@ -25,7 +25,7 @@ class TestAirflowIgnore(unittest.TestCase):
 
     def test_dag_scanner_excludes_only_nested_plugins(self):
         rules = patterns(self.dags_ignore)
-        excluded = "plugins/ingestion/operators.py"
+        excluded = "plugins/migrations/__init__.py"
         kept = ["update_source_bank.py", "generated/ingest__rdbms__bank__main.py"]
         self.assertTrue(any(re.search(rule, excluded) for rule in rules))
         for candidate in kept:
@@ -36,7 +36,7 @@ class TestAirflowIgnore(unittest.TestCase):
 
     def test_plugin_loader_excludes_framework_packages(self):
         rules = patterns(self.plugins_ignore)
-        excluded = ["ingestion/operators.py", "migrations/__init__.py"]
+        excluded = ["migrations/__init__.py"]
         for candidate in excluded:
             self.assertTrue(
                 any(re.search(rule, candidate) for rule in rules),

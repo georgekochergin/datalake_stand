@@ -3,7 +3,7 @@
 Managed Airflow execution plans fixed source bounds in pg-meta, preserves
 batch identity across retries and atomically finalizes its watermark.
 Repeated appends remain valid at-least-once behavior. Pure helpers import
-without Spark; managed execution uses the shared dlh_ingestion package.
+without Spark; managed execution uses the shared ingestion package.
 """
 
 import argparse
@@ -11,7 +11,7 @@ import logging
 import re
 from decimal import Decimal
 
-from dlh_ingestion.iceberg import (
+from ingestion.iceberg import (
     CATALOG,
     METADATA_BATCH,
     METADATA_DTTM,
@@ -20,10 +20,10 @@ from dlh_ingestion.iceberg import (
     schema_columns,
     validate_target_table,
 )
-from dlh_ingestion.sources.rdbms import jdbc
-from dlh_ingestion.sources.rdbms import positions
-from dlh_ingestion.sources.rdbms import registry as dialects
-from dlh_ingestion.sources.rdbms.contracts import parse_source_table
+from ingestion.sources.rdbms import jdbc
+from ingestion.sources.rdbms import positions
+from ingestion.sources.rdbms import registry as dialects
+from ingestion.sources.rdbms.contracts import parse_source_table
 
 COLUMN_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 WATERMARK_PATTERN = re.compile(r"^[0-9]+$")
@@ -303,7 +303,7 @@ def managed_load(spark, args):
     import pyspark.sql.functions as F
     import psycopg2
 
-    from dlh_ingestion import meta
+    from ingestion import meta
 
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     connect = lambda: psycopg2.connect("")

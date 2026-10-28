@@ -10,9 +10,9 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from dlh_ingestion.sources.rdbms import jdbc
+from ingestion.sources.rdbms import jdbc
 
-MODULE_PATH = Path(__file__).resolve().parents[2] / "spark" / "raw" / "rdbms" / "load_entity.py"
+MODULE_PATH = Path(__file__).resolve().parents[2] / "ingestion" / "spark" / "raw" / "rdbms" / "load_entity.py"
 _SPEC = importlib.util.spec_from_file_location("load_entity", MODULE_PATH)
 load_entity = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(load_entity)

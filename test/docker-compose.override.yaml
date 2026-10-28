@@ -32,12 +32,12 @@ services:
 
   spark-master:
     volumes: !override
-      - ./test/.workspace/spark:/opt/spark-jobs:ro
+      - ./test/.workspace/ingestion/spark:/opt/spark-jobs:ro
     ports: !override []
 
   spark-worker:
     volumes: !override
-      - ./test/.workspace/spark:/opt/spark-jobs:ro
+      - ./test/.workspace/ingestion/spark:/opt/spark-jobs:ro
     ports: !override []
 
   trino-init:
@@ -64,8 +64,8 @@ services:
     volumes: !override
       - ./test/.workspace/airflow/dags:/opt/airflow/dags
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
-      - ./test/.workspace/dlh_ingestion:/opt/python/dlh_ingestion:ro
-      - ./test/.workspace/spark:/opt/spark-jobs:ro
+      - ./test/.workspace/ingestion:/opt/python/ingestion:ro
+      - ./test/.workspace/ingestion/spark:/opt/spark-jobs:ro
       - ./test/.workspace/trino:/opt/airflow/sql:ro
       - airflow_logs:/opt/airflow/logs
 
@@ -73,14 +73,14 @@ services:
     volumes: !override
       - ./test/.workspace/airflow/dags:/opt/airflow/dags
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
-      - ./test/.workspace/dlh_ingestion:/opt/python/dlh_ingestion:ro
+      - ./test/.workspace/ingestion:/opt/python/ingestion:ro
       - airflow_logs:/opt/airflow/logs
 
   airflow-webserver:
     volumes: !override
       - ./test/.workspace/airflow/dags:/opt/airflow/dags
       - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
-      - ./test/.workspace/dlh_ingestion:/opt/python/dlh_ingestion:ro
+      - ./test/.workspace/ingestion:/opt/python/ingestion:ro
       - airflow_logs:/opt/airflow/logs
     ports: !override []
 

@@ -5,9 +5,9 @@ from functools import partial
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 from airflow.sdk import BaseHook, BaseOperator
 
-from dlh_ingestion import meta
-from dlh_ingestion.sources.rdbms import registry as rdbms_registry
-from dlh_ingestion.sources.rdbms.contracts import ConnectionSpec
+from ingestion import meta
+from ingestion.sources.rdbms import registry as rdbms_registry
+from ingestion.sources.rdbms.contracts import ConnectionSpec
 
 
 def _meta_connect(pg_conn_id: str = "ingestion_meta"):

@@ -3,7 +3,7 @@
 import re
 from dataclasses import dataclass
 
-from ingestion.lib import naming
+from ingestion.generator import naming
 
 _ALLOWED_SOURCE_KEYS = frozenset({"type", "airflow_conn_id"})
 _ALLOWED_PIPELINE_KEYS = frozenset({"source_id", "schedule", "catchup", "tags", "entities"})
