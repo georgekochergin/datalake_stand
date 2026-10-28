@@ -73,7 +73,7 @@ def check_registry_recovery():
     require(meta.get_batch(batch_id=competing["batch_id"], db_connect=connect)["watermark_after"] == "12",
             "stale failure preserves newer finalized state")
     try:
-        plan_batch(**dict(arguments, run_id=source + "-wrong-contract", incremental_column="other_position"))
+        meta.plan_batch(**dict(arguments, run_id=source + "-wrong-contract", incremental_column="other_position"))
     except ValueError:
         print("PASS  changed incremental contract requires migration")
     else:
