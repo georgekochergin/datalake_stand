@@ -87,7 +87,7 @@ def load_settings(path) -> IngestionSettings:
 
 
 def load_sources(path) -> dict[str, SourceConfig]:
-    """Load and validate the sources registry (ingestion/sources.yaml)."""
+    """Load and validate the sources registry (ingestion/conf/sources.yaml)."""
     raw = _read_yaml(path)
     if not isinstance(raw, dict) or not raw:
         raise ValueError("sources registry must be a non-empty mapping of source id to config")
@@ -116,7 +116,7 @@ def load_sources(path) -> dict[str, SourceConfig]:
 
 
 def load_pipeline(path) -> PipelineManifest:
-    """Load and validate one pipeline from the recursive ingestion/pipelines tree."""
+    """Load and validate one pipeline from the recursive ingestion/conf/pipelines tree."""
     raw = _read_yaml(path)
     if not isinstance(raw, dict):
         raise ValueError("pipeline manifest must be a mapping")

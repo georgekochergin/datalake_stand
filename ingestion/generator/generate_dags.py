@@ -114,7 +114,7 @@ def generate_dag_source(
         num_partitions = load_settings(DEFAULT_SETTINGS).num_partitions
     lines = [
         f'"""Generated DAG for pipeline "{pipeline.source_id}" — regenerate via '
-        'ingestion/generate_dags.py, do not edit."""',
+        'python3 -m ingestion.generator.generate_dags, do not edit."""',
         "from datetime import datetime",
         "",
         "from airflow import DAG",
