@@ -244,16 +244,16 @@ def main():
     from airflow.models.connection import Connection
     from airflow.providers.postgres.hooks.postgres import PostgresHook
     from airflow.utils.session import create_session
+    from ingestion.operators import resolve_source_connection
     from pyspark.sql import SparkSession
 
-    operators = load_module("ingestion_operators", "/opt/airflow/plugins/ingestion/operators.py")
     meta = BaseHook.get_connection("ingestion_meta")
     os.environ.update(PGHOST=meta.host, PGPORT=str(meta.port or 5432),
                       PGDATABASE=meta.schema, PGUSER=meta.login, PGPASSWORD=meta.password)
     hook = PostgresHook(postgres_conn_id="ingestion_meta")
     with create_session() as session:
         source_jdbc = {
-            source: operators.resolve_source_connection(
+            source: resolve_source_connection(
                 session.query(Connection).filter_by(conn_id=f"{source}_source").one()
             )
             for source in ("bank", "broker")
