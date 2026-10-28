@@ -56,6 +56,23 @@ class RdbmsDialect:
     url_prefixes: tuple[str, ...] = ()
     default_port: int = 0
     driver_class: str = ""
+    partition_type_names: frozenset[str] = frozenset(
+        {
+            "SMALLINT",
+            "TINYINT",
+            "INT",
+            "INTEGER",
+            "BIGINT",
+            "NUMBER",
+            "DECIMAL",
+            "NUMERIC",
+            "DATE",
+            "DATETIME",
+            "DATETIME2",
+            "SMALLDATETIME",
+            "TIMESTAMP",
+        }
+    )
 
     def build_jdbc_url(self, spec: ConnectionSpec) -> str:
         """Render the JDBC URL for a resolved connection."""
@@ -102,6 +119,12 @@ class RdbmsDialect:
     def column_projection(self, type_name: str, reference: str) -> str | None:
         """Return a source-side read expression for special types, else None."""
         return None
+
+    def is_partition_type(self, type_name: str) -> bool:
+        """Report whether a JDBC TYPE_NAME is usable as a partition column."""
+        stripped = type_name.strip()
+        base = stripped.upper().split()[0] if stripped else ""
+        return base in self.partition_type_names
 
     def reader_options(self) -> dict:
         """JDBC reader options required by the engine."""

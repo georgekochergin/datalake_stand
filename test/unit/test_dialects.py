@@ -248,5 +248,23 @@ class TestMetadataCandidates(unittest.TestCase):
             )
 
 
+
+
+class TestPartitionTypes(unittest.TestCase):
+    """Partition-column type classification belongs to the dialect, not the loader."""
+
+    def test_standard_names_accepted_for_both_engines(self):
+        for dialect in registry.all_dialects():
+            for type_name in ("bigint", "int identity", "NUMBER", "datetime2", "TIMESTAMP WITH TIME ZONE"):
+                with self.subTest(dialect=dialect.conn_type_aliases, type_name=type_name):
+                    self.assertTrue(dialect.is_partition_type(type_name))
+
+    def test_vendor_names_rejected_by_current_engines(self):
+        for dialect in registry.all_dialects():
+            for type_name in ("int8", "nvarchar", "varchar2", "", "rowversion", "datetimeoffset"):
+                with self.subTest(dialect=dialect.conn_type_aliases, type_name=type_name):
+                    self.assertFalse(dialect.is_partition_type(type_name))
+
+
 if __name__ == "__main__":
     unittest.main()

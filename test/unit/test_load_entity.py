@@ -10,7 +10,8 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from ingestion.sources.rdbms import jdbc
+from ingestion.sources.rdbms import jdbc, registry
+from ingestion.sources.rdbms.contracts import RdbmsDialect
 
 MODULE_PATH = Path(__file__).resolve().parents[2] / "ingestion" / "spark" / "raw" / "rdbms" / "load_entity.py"
 _SPEC = importlib.util.spec_from_file_location("load_entity", MODULE_PATH)
@@ -163,42 +164,55 @@ class TestBuildReadQuery(unittest.TestCase):
             load_entity.build_read_query("retail_bank.clients", None, None, "jdbc:postgresql://h/db")
 
 
+class StubPartitionDialect(RdbmsDialect):
+    """Minimal adapter accepting only its own vendor-specific type name."""
+
+    partition_type_names = frozenset({"INT8"})
+
+
 class TestPickPartitionColumn(unittest.TestCase):
-    """Auto-evaluation of the parallel-read column."""
+    """Auto-evaluation of the parallel-read column stays dialect-classified."""
+
+    def setUp(self):
+        self.dialect = registry.by_conn_type("mssql")
+
+    def pick(self, candidates):
+        return load_entity.pick_partition_column(self.dialect, candidates)
 
     def test_numeric_pk_preferred_over_later_date(self):
         candidates = [("client_id", "int"), ("updated_at", "datetime2")]
-        self.assertEqual(load_entity.pick_partition_column(candidates), "client_id")
+        self.assertEqual(self.pick(candidates), "client_id")
 
     def test_string_column_skipped(self):
         candidates = [("code", "nvarchar"), ("updated_at", "datetime2")]
-        self.assertEqual(load_entity.pick_partition_column(candidates), "updated_at")
+        self.assertEqual(self.pick(candidates), "updated_at")
 
     def test_order_respected(self):
         candidates = [("code", "varchar"), ("num", "bigint"), ("other", "int")]
-        self.assertEqual(load_entity.pick_partition_column(candidates), "num")
+        self.assertEqual(self.pick(candidates), "num")
 
     def test_identity_type_variant(self):
-        self.assertEqual(
-            load_entity.pick_partition_column([("id", "int identity")]),
-            "id",
-        )
+        self.assertEqual(self.pick([("id", "int identity")]), "id")
 
     def test_timestamp_with_zone_variant(self):
-        self.assertEqual(
-            load_entity.pick_partition_column([("ts", "TIMESTAMP WITH TIME ZONE")]),
-            "ts",
-        )
+        self.assertEqual(self.pick([("ts", "TIMESTAMP WITH TIME ZONE")]), "ts")
 
     def test_oracle_number(self):
         self.assertEqual(
-            load_entity.pick_partition_column([("client_id", "NUMBER")]),
+            load_entity.pick_partition_column(registry.by_conn_type("oracle"), [("client_id", "NUMBER")]),
             "client_id",
         )
 
+    def test_stub_adapter_accepts_own_type_without_loader_changes(self):
+        self.assertEqual(
+            load_entity.pick_partition_column(StubPartitionDialect(), [("id", "int8")]),
+            "id",
+        )
+        self.assertIsNone(self.pick([("id", "int8")]))
+
     def test_no_suitable_column(self):
         candidates = [("code", "varchar"), ("payload", "nvarchar")]
-        self.assertIsNone(load_entity.pick_partition_column(candidates))
+        self.assertIsNone(self.pick(candidates))
 
 
 class TestBoundLiteral(unittest.TestCase):

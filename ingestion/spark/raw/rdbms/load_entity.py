@@ -28,25 +28,6 @@ from ingestion.sources.rdbms.contracts import parse_source_table
 COLUMN_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 WATERMARK_PATTERN = re.compile(r"^[0-9]+$")
 
-PARTITION_TYPES = frozenset(
-    {
-        "SMALLINT",
-        "TINYINT",
-        "INT",
-        "INTEGER",
-        "BIGINT",
-        "NUMBER",
-        "DECIMAL",
-        "NUMERIC",
-        "DATE",
-        "DATETIME",
-        "DATETIME2",
-        "SMALLDATETIME",
-        "TIMESTAMP",
-    }
-)
-
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse and validate the loader CLI arguments."""
     parser = argparse.ArgumentParser(
@@ -127,16 +108,10 @@ def build_read_query(
     return f"(SELECT * FROM {table} WHERE {column} > {watermark_value}) q"
 
 
-def _normalize_type(jdbc_type: str) -> str:
-    """Normalize a JDBC TYPE_NAME (e.g. 'int identity') to its base token."""
-    stripped = jdbc_type.strip()
-    return stripped.upper().split()[0] if stripped else ""
-
-
-def pick_partition_column(candidates: list[tuple[str, str]]) -> str | None:
-    """Return the first numeric/date/timestamp candidate column, else None."""
+def pick_partition_column(dialect, candidates: list[tuple[str, str]]) -> str | None:
+    """Return the first candidate column the dialect allows for partitioning, else None."""
     for name, jdbc_type in candidates:
-        if _normalize_type(jdbc_type) in PARTITION_TYPES:
+        if dialect.is_partition_type(jdbc_type):
             return name
     return None
 
@@ -221,11 +196,13 @@ def main(argv: list[str] | None = None) -> None:
         )
         partition_column = None if args.no_parallelism else args.partition_column or args.incremental_column
         if not args.no_parallelism and partition_column is None:
+            dialect = dialects.by_jdbc_url(args.jdbc_url)
             partition_column = pick_partition_column(
+                dialect,
                 jdbc.key_columns(
-                    spark._jvm, dialects.by_jdbc_url(args.jdbc_url), args.jdbc_url,
+                    spark._jvm, dialect, args.jdbc_url,
                     args.jdbc_user, args.jdbc_password, args.source_table,
-                )
+                ),
             )
         reader = _jdbc_reader(spark, args, read_query)
         if partition_column is not None:
@@ -384,8 +361,9 @@ def managed_load(spark, args):
         )
         reader = _jdbc_reader(spark, args, query)
         if not args.no_parallelism and (not kind or not kind.startswith("timestamp")):
-            partition_column = args.incremental_column or pick_partition_column(jdbc.key_columns(
-                spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table))
+            partition_column = args.incremental_column or pick_partition_column(
+                dialect, jdbc.key_columns(
+                    spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table))
             if partition_column:
                 low, high = _read_bounds(spark, args, query, partition_column)
                 if low is not None and high is not None and low != high:
