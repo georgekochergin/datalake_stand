@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from ingestion.sources.rdbms import positions, registry
-from ingestion.sources.rdbms.contracts import ConnectionSpec
+from ingestion.sources.rdbms.contracts import ConnectionSpec, MetadataLocation
 
 MSSQL = registry.by_conn_type("mssql")
 ORACLE = registry.by_conn_type("oracle")
@@ -232,17 +232,19 @@ class TestMetadataCandidates(unittest.TestCase):
     """JDBC metadata lookup variants fold only unquoted fragments."""
 
     def test_only_unquoted_fragments_fold(self):
+        expected = (MetadataLocation(None, "schema", "Mixed.Table"),
+                    MetadataLocation(None, "SCHEMA", "Mixed.Table"))
         for dialect in registry.all_dialects():
             self.assertEqual(
                 dialect.metadata_candidates([("schema", False), ("Mixed.Table", True)]),
-                (("schema", "Mixed.Table"), ("SCHEMA", "Mixed.Table")),
+                expected,
             )
 
     def test_fully_quoted_names_never_fold(self):
         for dialect in registry.all_dialects():
             self.assertEqual(
                 dialect.metadata_candidates([("Schema", True), ("Table", True)]),
-                (("Schema", "Table"),),
+                (MetadataLocation(None, "Schema", "Table"),),
             )
 
 

@@ -19,6 +19,15 @@ class ConnectionSpec:
     password: str
 
 
+@dataclass(frozen=True)
+class MetadataLocation:
+    """Full JDBC metadata lookup address: catalog, schema, and table."""
+
+    catalog: str | None
+    schema: str | None
+    table: str
+
+
 def parse_source_table(source_table: str) -> list[tuple[str, bool]]:
     """Parse schema.table, retaining quoted case and embedded dots for JDBC metadata."""
     parts = []
@@ -82,10 +91,13 @@ class RdbmsDialect:
         return column
 
     def metadata_candidates(self, parts: list[tuple[str, bool]]) -> tuple:
-        """Return (schema, table) lookup variants for JDBC metadata calls."""
+        """Return JDBC metadata lookup locations for the dialect's object addressing."""
         original = tuple(name for name, _ in parts)
         folded = tuple(name if quoted else name.upper() for name, quoted in parts)
-        return tuple(dict.fromkeys((original, folded)))
+        return tuple(
+            MetadataLocation(None, schema, table)
+            for schema, table in dict.fromkeys((original, folded))
+        )
 
     def column_projection(self, type_name: str, reference: str) -> str | None:
         """Return a source-side read expression for special types, else None."""

@@ -94,10 +94,10 @@ def key_columns(jvm, dialect, jdbc_url, user, password, source_table) -> list[tu
         parts = parse_source_table(source_table)
         with connection(jvm, jdbc_url, user, password) as jdbc_connection:
             metadata = jdbc_connection.getMetaData()
-            for candidate_schema, candidate_table in dialect.metadata_candidates(parts):
-                ordered = _ordered_key_columns(metadata, candidate_schema, candidate_table)
+            for location in dialect.metadata_candidates(parts):
+                ordered = _ordered_key_columns(metadata, location)
                 if ordered:
-                    types = _column_types(metadata, candidate_schema, candidate_table)
+                    types = _column_types(metadata, location)
                     return [(name, types.get(name.lower(), "")) for name in ordered]
     except Exception as exc:
         _LOGGER.warning(
@@ -112,10 +112,10 @@ def key_columns(jvm, dialect, jdbc_url, user, password, source_table) -> list[tu
     return []
 
 
-def _ordered_key_columns(metadata, schema, table) -> list[str]:
+def _ordered_key_columns(metadata, location) -> list[str]:
     """Primary-key columns in KEY_SEQ order, then unique-index columns."""
     ordered: list[str] = []
-    primary_keys = metadata.getPrimaryKeys(None, schema, table)
+    primary_keys = metadata.getPrimaryKeys(location.catalog, location.schema, location.table)
     try:
         pairs = []
         while primary_keys.next():
@@ -125,7 +125,7 @@ def _ordered_key_columns(metadata, schema, table) -> list[str]:
                 ordered.append(name)
     finally:
         primary_keys.close()
-    indexes = metadata.getIndexInfo(None, schema, table, True, True)
+    indexes = metadata.getIndexInfo(location.catalog, location.schema, location.table, True, True)
     try:
         while indexes.next():
             if not indexes.getBoolean("NON_UNIQUE"):
@@ -137,10 +137,10 @@ def _ordered_key_columns(metadata, schema, table) -> list[str]:
     return ordered
 
 
-def _column_types(metadata, schema, table) -> dict[str, str]:
+def _column_types(metadata, location) -> dict[str, str]:
     """Map lowercased column names to JDBC TYPE_NAME values."""
     types: dict[str, str] = {}
-    columns = metadata.getColumns(None, schema, table, None)
+    columns = metadata.getColumns(location.catalog, location.schema, location.table, None)
     try:
         while columns.next():
             name = columns.getString("COLUMN_NAME")

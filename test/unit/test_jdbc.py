@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from ingestion.sources.rdbms import jdbc, registry
+from ingestion.sources.rdbms.contracts import MetadataLocation, RdbmsDialect
 
 ORACLE = registry.by_conn_type("oracle")
 
@@ -33,8 +34,10 @@ class TestKeyColumns(unittest.TestCase):
                 jdbc.key_columns(spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", 'schema."Mixed.Table"'),
                 [("id", "INTEGER")],
             )
-        self.assertEqual(keys.call_args_list[0].args, (metadata, "schema", "Mixed.Table"))
-        self.assertEqual(keys.call_args_list[1].args, (metadata, "SCHEMA", "Mixed.Table"))
+        self.assertEqual(keys.call_args_list[0].args,
+                         (metadata, MetadataLocation(None, "schema", "Mixed.Table")))
+        self.assertEqual(keys.call_args_list[1].args,
+                         (metadata, MetadataLocation(None, "SCHEMA", "Mixed.Table")))
         connection.close.assert_called_once()
 
     def test_fully_quoted_names_never_fold(self):
@@ -46,7 +49,8 @@ class TestKeyColumns(unittest.TestCase):
                 jdbc.key_columns(spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", '"Schema"."Table"'),
                 [],
             )
-        keys.assert_called_once_with(connection.getMetaData.return_value, "Schema", "Table")
+        keys.assert_called_once_with(connection.getMetaData.return_value,
+                                     MetadataLocation(None, "Schema", "Table"))
         self.assertIn("falling back", logs.output[0])
 
     def test_metadata_error_warns(self):
@@ -60,6 +64,48 @@ class TestKeyColumns(unittest.TestCase):
         spark, _ = fake_jvm()
         with self.assertLogs(jdbc.__name__, level="WARNING"):
             self.assertEqual(jdbc.key_columns(spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", "a..b"), [])
+
+
+class CatalogDialect(RdbmsDialect):
+    """Stub engine addressing objects through a JDBC catalog instead of a schema."""
+
+    def metadata_candidates(self, parts):
+        """One exact location: the database is the catalog, no schema level."""
+        return (MetadataLocation(parts[0][0], None, parts[1][0]),)
+
+
+class TestCatalogAddressing(unittest.TestCase):
+    """A dialect-controlled catalog reaches every JDBC metadata call."""
+
+    def test_catalog_dialect_passes_full_location(self):
+        spark, connection = fake_jvm()
+        metadata = connection.getMetaData.return_value
+        primary_keys = metadata.getPrimaryKeys.return_value
+        primary_keys.next.side_effect = [True, False]
+        primary_keys.getInt.return_value = 1
+        primary_keys.getString.return_value = "id"
+        indexes = metadata.getIndexInfo.return_value
+        indexes.next.side_effect = [False]
+        columns = metadata.getColumns.return_value
+        columns.next.side_effect = [True, False]
+        columns.getString.side_effect = ["id", "int8"]
+        self.assertEqual(
+            jdbc.key_columns(spark._jvm, CatalogDialect(), "jdbc:stub://", "u", "p", "example_db.example_table"),
+            [("id", "int8")],
+        )
+        metadata.getPrimaryKeys.assert_called_once_with("example_db", None, "example_table")
+        metadata.getIndexInfo.assert_called_once_with("example_db", None, "example_table", True, True)
+        metadata.getColumns.assert_called_once_with("example_db", None, "example_table", None)
+
+    def test_catalog_dialect_error_still_falls_back(self):
+        spark, _ = fake_jvm()
+        spark._jvm.java.sql.DriverManager.getConnection.side_effect = RuntimeError("catalog engine offline")
+        with self.assertLogs(jdbc.__name__, level="WARNING") as logs:
+            self.assertEqual(
+                jdbc.key_columns(spark._jvm, CatalogDialect(), "jdbc:stub://", "u", "p", "example_db.example_table"),
+                [],
+            )
+        self.assertIn("catalog engine offline", logs.output[0])
 
 
 class TestCompatibilityProjection(unittest.TestCase):
