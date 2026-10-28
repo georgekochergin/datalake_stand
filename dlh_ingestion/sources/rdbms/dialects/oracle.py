@@ -63,3 +63,14 @@ class OracleDialect(RdbmsDialect):
         fraction = f".FF{precision}" if precision else ""
         suffix = '"Z"' if family == "instant" else ""
         return f"TO_CHAR({value}, 'YYYY-MM-DD\"T\"HH24:MI:SS{fraction}{suffix}')"
+
+    def column_projection(self, type_name: str, reference: str) -> str | None:
+        """Rewrite timezone types, unmappable by Spark JDBC, into UTC instants.
+
+        Spark cannot resolve Oracle TIMESTAMP ... WITH [LOCAL] TIME ZONE columns
+        at all (JDBC type -101/-102). SYS_EXTRACT_UTC normalizes them to UTC
+        independently of the session timezone.
+        """
+        if "TIME ZONE" in type_name:
+            return f"SYS_EXTRACT_UTC({reference})"
+        return None

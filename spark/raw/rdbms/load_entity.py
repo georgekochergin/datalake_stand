@@ -20,11 +20,12 @@ from dlh_ingestion.iceberg import (
     schema_columns,
     validate_target_table,
 )
+from dlh_ingestion.sources.rdbms import jdbc
 from dlh_ingestion.sources.rdbms import positions
 from dlh_ingestion.sources.rdbms import registry as dialects
+from dlh_ingestion.sources.rdbms.contracts import parse_source_table
 
 COLUMN_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-SOURCE_PART_PATTERN = re.compile(r'"((?:[A-Za-z0-9_.]|"")+)"|([A-Za-z0-9_]+)')
 WATERMARK_PATTERN = re.compile(r"^[0-9]+$")
 
 PARTITION_TYPES = frozenset(
@@ -158,96 +159,6 @@ def validate_incremental_column(schema, incremental_column: str) -> None:
         )
 
 
-def parse_source_table(source_table: str) -> list[tuple[str, bool]]:
-    """Parse schema.table, retaining quoted case and embedded dots for JDBC metadata."""
-    parts = []
-    offset = 0
-    while offset < len(source_table):
-        match = SOURCE_PART_PATTERN.match(source_table, offset)
-        if match is None:
-            raise ValueError(f"invalid source table reference: {source_table!r}")
-        quoted, unquoted = match.groups()
-        parts.append((quoted.replace('""', '"') if quoted is not None else unquoted, quoted is not None))
-        offset = match.end()
-        if offset == len(source_table):
-            break
-        if source_table[offset] != "." or offset + 1 == len(source_table):
-            raise ValueError(f"invalid source table reference: {source_table!r}")
-        offset += 1
-    if len(parts) != 2:
-        raise ValueError(f"source table must contain schema.table: {source_table!r}")
-    return parts
-
-
-def detect_key_columns(spark, jdbc_url, user, password, source_table) -> list[tuple[str, str]]:
-    """Best-effort ordered (column, JDBC type) candidates from PK and unique indexes."""
-    try:
-        parts = parse_source_table(source_table)
-        connection = spark._jvm.java.sql.DriverManager.getConnection(jdbc_url, user, password)
-        try:
-            metadata = connection.getMetaData()
-            original = tuple(name for name, _ in parts)
-            folded = tuple(name if quoted else name.upper() for name, quoted in parts)
-            for candidate_schema, candidate_table in dict.fromkeys((original, folded)):
-                ordered = _ordered_key_columns(metadata, candidate_schema, candidate_table)
-                if ordered:
-                    types = _column_types(metadata, candidate_schema, candidate_table)
-                    return [(name, types.get(name.lower(), "")) for name in ordered]
-        finally:
-            connection.close()
-    except Exception as exc:
-        logging.getLogger(__name__).warning(
-            "JDBC metadata unavailable for %s; falling back to an unpartitioned read: %s",
-            source_table, exc,
-        )
-        return []
-    logging.getLogger(__name__).warning(
-        "No JDBC key metadata found for %s; falling back to an unpartitioned read",
-        source_table,
-    )
-    return []
-
-
-def _ordered_key_columns(metadata, schema, table) -> list[str]:
-    """Primary-key columns in KEY_SEQ order, then unique-index columns."""
-    ordered: list[str] = []
-    primary_keys = metadata.getPrimaryKeys(None, schema, table)
-    try:
-        pairs = []
-        while primary_keys.next():
-            pairs.append((primary_keys.getInt("KEY_SEQ"), primary_keys.getString("COLUMN_NAME")))
-        for _, name in sorted(pairs):
-            if name not in ordered:
-                ordered.append(name)
-    finally:
-        primary_keys.close()
-    indexes = metadata.getIndexInfo(None, schema, table, True, True)
-    try:
-        while indexes.next():
-            if not indexes.getBoolean("NON_UNIQUE"):
-                name = indexes.getString("COLUMN_NAME")
-                if name is not None and name not in ordered:
-                    ordered.append(name)
-    finally:
-        indexes.close()
-    return ordered
-
-
-def _column_types(metadata, schema, table) -> dict[str, str]:
-    """Map lowercased column names to JDBC TYPE_NAME values."""
-    types: dict[str, str] = {}
-    columns = metadata.getColumns(None, schema, table, None)
-    try:
-        while columns.next():
-            name = columns.getString("COLUMN_NAME")
-            type_name = columns.getString("TYPE_NAME")
-            if name is not None and type_name is not None:
-                types[name.lower()] = type_name
-    finally:
-        columns.close()
-    return types
-
-
 def _jdbc_reader(spark, args, read_query):
     """Build the JDBC reader with driver and engine options from the dialect."""
     dialect = dialects.by_jdbc_url(args.jdbc_url)
@@ -311,8 +222,9 @@ def main(argv: list[str] | None = None) -> None:
         partition_column = None if args.no_parallelism else args.partition_column or args.incremental_column
         if not args.no_parallelism and partition_column is None:
             partition_column = pick_partition_column(
-                detect_key_columns(
-                    spark, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table
+                jdbc.key_columns(
+                    spark._jvm, dialects.by_jdbc_url(args.jdbc_url), args.jdbc_url,
+                    args.jdbc_user, args.jdbc_password, args.source_table,
                 )
             )
         reader = _jdbc_reader(spark, args, read_query)
@@ -369,77 +281,21 @@ def empty_incremental_window(batch) -> bool:
 def source_position(spark, args, inspect_only=False):
     """Inspect original JDBC type and obtain exact MAX plus NULL/empty diagnostics."""
     dialect = dialects.by_jdbc_url(args.jdbc_url)
-    connection = spark._jvm.java.sql.DriverManager.getConnection(
-        args.jdbc_url, args.jdbc_user, args.jdbc_password
-    )
-    try:
-        statement = connection.createStatement()
-        try:
-            column = dialect.quote_identifier(args.incremental_column)
-            table = render_source_table(dialect, args.source_table, allow_expression=True)
-            result = statement.executeQuery(f"SELECT {column} FROM {table} WHERE 1=0")
-            try:
-                metadata = result.getMetaData()
-                kind = dialect.position_kind(metadata.getColumnTypeName(1), metadata.getPrecision(1),
-                                             metadata.getScale(1))
-            finally:
-                result.close()
-            expression = "NULL" if inspect_only else dialect.position_expression(f"MAX({column})", kind)
-            result = statement.executeQuery(
-                f"SELECT {expression}, COUNT(*), COUNT({column}) FROM {table}"
-            )
-            try:
-                result.next()
-                upper = positions.canonical(result.getString(1), kind)
-                count = int(result.getString(2))
-                nonnull = int(result.getString(3))
-            finally:
-                result.close()
-            return kind, upper, count == 0, count != nonnull
-        finally:
-            statement.close()
-    finally:
-        connection.close()
+    column = dialect.quote_identifier(args.incremental_column)
+    table = render_source_table(dialect, args.source_table, allow_expression=True)
+    with jdbc.connection(spark._jvm, args.jdbc_url, args.jdbc_user, args.jdbc_password) as connection:
+        label, type_name, precision, scale = jdbc.column_metadata(
+            connection, f"SELECT {column} FROM {table} WHERE 1=0"
+        )[0]
+        kind = dialect.position_kind(type_name, precision, scale)
+        expression = "NULL" if inspect_only else dialect.position_expression(f"MAX({column})", kind)
+        row = jdbc.first_row(
+            connection, f"SELECT {expression}, COUNT(*), COUNT({column}) FROM {table}"
+        )
+    upper = positions.canonical(row[0], kind)
+    count, nonnull = int(row[1]), int(row[2])
+    return kind, upper, count == 0, count != nonnull
 
-
-def oracle_utc_projection(spark, args):
-    """Rewrite Oracle timezone columns, unmappable by Spark JDBC, into UTC instants.
-
-    Spark cannot resolve Oracle TIMESTAMP ... WITH [LOCAL] TIME ZONE columns at
-    all (JDBC type -101/-102), regardless of the incremental contract. Such
-    columns are projected as SYS_EXTRACT_UTC(...): session-timezone independent
-    normalization to UTC required by the position contract. Returns None when
-    the source has no timezone columns, leaving extract_source.* untouched.
-    """
-    if not args.jdbc_url.startswith("jdbc:oracle:"):
-        return None
-    dialect = dialects.by_jdbc_url(args.jdbc_url)
-    connection = spark._jvm.java.sql.DriverManager.getConnection(
-        args.jdbc_url, args.jdbc_user, args.jdbc_password
-    )
-    try:
-        statement = connection.createStatement()
-        try:
-            table = render_source_table(dialect, args.source_table, allow_expression=True)
-            result = statement.executeQuery(f"SELECT * FROM {table} WHERE 1=0")
-            try:
-                metadata = result.getMetaData()
-                projected = []
-                for index in range(1, metadata.getColumnCount() + 1):
-                    name = str(metadata.getColumnLabel(index))
-                    type_name = " ".join(str(metadata.getColumnTypeName(index)).upper().split())
-                    reference = dialect.quote_identifier(name)
-                    if "TIME ZONE" in type_name:
-                        projected.append(f"SYS_EXTRACT_UTC(extract_source.{reference}) AS {reference}")
-                    else:
-                        projected.append(f"extract_source.{reference}")
-                return projected if any("SYS_EXTRACT_UTC" in item for item in projected) else None
-            finally:
-                result.close()
-        finally:
-            statement.close()
-    finally:
-        connection.close()
 
 
 def managed_load(spark, args):
@@ -511,22 +367,25 @@ def managed_load(spark, args):
                 )
         if batch["empty_at_plan"]:
             filters.append("1=0")
+        source_table = render_source_table(dialect, args.source_table, allow_expression=True)
         select = "extract_source.*"
-        projection = oracle_utc_projection(spark, args)
+        projection = jdbc.compatibility_projection(
+            spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, source_table
+        )
         if projection is not None:
             select = ", ".join(projection)
         if column:
             select += f', {dialect.position_expression(column, kind)} AS "__extract_position"'
         query = (
             f"(SELECT {select} FROM (SELECT * FROM "
-            f"{render_source_table(dialect, args.source_table, allow_expression=True)}) extract_source"
+            f"{source_table}) extract_source"
             + (" WHERE " + " AND ".join(filters) if filters else "")
             + ") extract_batch"
         )
         reader = _jdbc_reader(spark, args, query)
         if not args.no_parallelism and (not kind or not kind.startswith("timestamp")):
-            partition_column = args.incremental_column or pick_partition_column(detect_key_columns(
-                spark, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table))
+            partition_column = args.incremental_column or pick_partition_column(jdbc.key_columns(
+                spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table))
             if partition_column:
                 low, high = _read_bounds(spark, args, query, partition_column)
                 if low is not None and high is not None and low != high:

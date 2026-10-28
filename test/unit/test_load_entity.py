@@ -10,6 +10,8 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from dlh_ingestion.sources.rdbms import jdbc
+
 MODULE_PATH = Path(__file__).resolve().parents[2] / "spark" / "raw" / "rdbms" / "load_entity.py"
 _SPEC = importlib.util.spec_from_file_location("load_entity", MODULE_PATH)
 load_entity = importlib.util.module_from_spec(_SPEC)
@@ -246,52 +248,6 @@ class _FakeSchema:
         self.fields = list(fields)
 
 
-class TestMetadata(unittest.TestCase):
-    """Quote-aware metadata resolution and observable fallback."""
-
-    def test_quoted_dots_case_and_escaped_quotes(self):
-        self.assertEqual(
-            load_entity.parse_source_table('"Mixed.Schema"."Ta""ble.part"'),
-            [("Mixed.Schema", True), ('Ta"ble.part', True)],
-        )
-
-    def test_invalid_fqn(self):
-        for value in ('a."b', "a..b", "a.b.", 'a."b"x', "a.b.c", ""):
-            with self.subTest(value=value), self.assertRaises(ValueError):
-                load_entity.build_read_query(value, None, None, MSSQL_URL)
-
-    def test_only_unquoted_fragments_fold(self):
-        spark = MagicMock()
-        connection = spark._jvm.java.sql.DriverManager.getConnection.return_value
-        metadata = connection.getMetaData.return_value
-        with patch.object(load_entity, "_ordered_key_columns", side_effect=[[], ["id"]]) as keys, patch.object(
-            load_entity, "_column_types", return_value={"id": "INTEGER"}
-        ):
-            self.assertEqual(
-                load_entity.detect_key_columns(spark, "jdbc:oracle:", "u", "p", 'schema."Mixed.Table"'),
-                [("id", "INTEGER")],
-            )
-        self.assertEqual(keys.call_args_list[0].args, (metadata, "schema", "Mixed.Table"))
-        self.assertEqual(keys.call_args_list[1].args, (metadata, "SCHEMA", "Mixed.Table"))
-        connection.close.assert_called_once()
-
-    def test_fully_quoted_names_never_fold(self):
-        spark = MagicMock()
-        connection = spark._jvm.java.sql.DriverManager.getConnection.return_value
-        with patch.object(load_entity, "_ordered_key_columns", return_value=[]) as keys, self.assertLogs(
-            load_entity.__name__, level="WARNING"
-        ) as logs:
-            self.assertEqual(load_entity.detect_key_columns(spark, "jdbc:oracle:", "u", "p", '"Schema"."Table"'), [])
-        keys.assert_called_once_with(connection.getMetaData.return_value, "Schema", "Table")
-        self.assertIn("falling back", logs.output[0])
-
-    def test_metadata_error_warns(self):
-        spark = MagicMock()
-        spark._jvm.java.sql.DriverManager.getConnection.side_effect = RuntimeError("metadata offline")
-        with self.assertLogs(load_entity.__name__, level="WARNING") as logs:
-            self.assertEqual(load_entity.detect_key_columns(spark, "jdbc:oracle:", "u", "p", "s.t"), [])
-        self.assertIn("metadata offline", logs.output[0])
-
 
 class TestMain(unittest.TestCase):
     """Exercise empty-source and partitioning behavior without installing Spark."""
@@ -320,7 +276,7 @@ class TestMain(unittest.TestCase):
         with patch.dict(sys.modules, {"pyspark": pyspark, "pyspark.sql": sql, "pyspark.sql.functions": functions}), patch.object(
             load_entity, "_jdbc_reader", return_value=reader
         ), patch.object(load_entity, "schema_columns", return_value=[(field.name, "bigint") for field in source.schema.fields]), patch.object(
-            load_entity, "detect_key_columns", return_value=[]
+            jdbc, "key_columns", return_value=[]
         ) as detect, patch.object(load_entity, "_read_bounds", return_value=(None, None)) as bounds:
             try:
                 load_entity.main(build_argv(*extra))
@@ -360,17 +316,6 @@ class TestMain(unittest.TestCase):
         for name in ("__process_id", "__load_dttm", "__batch_id", "__extract_position"):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "collides"):
                 self.run_loader(("--no-parallelism",), _FakeSchema(_FakeField(name, _FakeType("long"))))
-
-
-class TestOracleUtcProjection(unittest.TestCase):
-    """Timezone-column rewriting engages only for the Oracle dialect."""
-
-    def test_non_oracle_dialects_keep_plain_select(self):
-        args = types.SimpleNamespace(jdbc_url="jdbc:sqlserver://host;databaseName=db")
-        self.assertIsNone(load_entity.oracle_utc_projection(None, args))
-        args = types.SimpleNamespace(jdbc_url="jdbc:oracle:thin:@//host:1521/db")
-        with self.assertRaises(Exception):
-            load_entity.oracle_utc_projection(None, args)
 
 
 

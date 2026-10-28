@@ -211,5 +211,40 @@ class TestPositionExpression(unittest.TestCase):
             self.assertEqual(ORACLE.position_expression('"x"', kind), '"x"')
 
 
+class TestColumnProjection(unittest.TestCase):
+    """Special-type read expressions; every dialect except Oracle reads natively."""
+
+    def test_mssql_reads_natively(self):
+        for type_name in ("datetime2", "datetimeoffset", "nvarchar", "TIMESTAMP WITH TIME ZONE"):
+            self.assertIsNone(MSSQL.column_projection(type_name, "extract_source.[ts]"))
+
+    def test_oracle_rewrites_timezone_columns_only(self):
+        for type_name in ("TIMESTAMP(9) WITH TIME ZONE", "TIMESTAMP WITH LOCAL TIME ZONE"):
+            self.assertEqual(
+                ORACLE.column_projection(type_name, 'extract_source."ts"'),
+                'SYS_EXTRACT_UTC(extract_source."ts")',
+            )
+        for type_name in ("TIMESTAMP(9)", "DATE", "NUMBER", "VARCHAR2"):
+            self.assertIsNone(ORACLE.column_projection(type_name, 'extract_source."ts"'))
+
+
+class TestMetadataCandidates(unittest.TestCase):
+    """JDBC metadata lookup variants fold only unquoted fragments."""
+
+    def test_only_unquoted_fragments_fold(self):
+        for dialect in registry.all_dialects():
+            self.assertEqual(
+                dialect.metadata_candidates([("schema", False), ("Mixed.Table", True)]),
+                (("schema", "Mixed.Table"), ("SCHEMA", "Mixed.Table")),
+            )
+
+    def test_fully_quoted_names_never_fold(self):
+        for dialect in registry.all_dialects():
+            self.assertEqual(
+                dialect.metadata_candidates([("Schema", True), ("Table", True)]),
+                (("Schema", "Table"),),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

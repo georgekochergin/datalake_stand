@@ -1,8 +1,11 @@
 """Connection and SQL contracts shared by every RDBMS dialect adapter."""
 
+import re
 from dataclasses import dataclass
 
 from . import positions
+
+SOURCE_PART_PATTERN = re.compile(r'"((?:[A-Za-z0-9_.]|"")+)"|([A-Za-z0-9_]+)')
 
 
 @dataclass(frozen=True)
@@ -14,6 +17,27 @@ class ConnectionSpec:
     database: str
     user: str
     password: str
+
+
+def parse_source_table(source_table: str) -> list[tuple[str, bool]]:
+    """Parse schema.table, retaining quoted case and embedded dots for JDBC metadata."""
+    parts = []
+    offset = 0
+    while offset < len(source_table):
+        match = SOURCE_PART_PATTERN.match(source_table, offset)
+        if match is None:
+            raise ValueError(f"invalid source table reference: {source_table!r}")
+        quoted, unquoted = match.groups()
+        parts.append((quoted.replace('""', '"') if quoted is not None else unquoted, quoted is not None))
+        offset = match.end()
+        if offset == len(source_table):
+            break
+        if source_table[offset] != "." or offset + 1 == len(source_table):
+            raise ValueError(f"invalid source table reference: {source_table!r}")
+        offset += 1
+    if len(parts) != 2:
+        raise ValueError(f"source table must contain schema.table: {source_table!r}")
+    return parts
 
 
 class RdbmsDialect:
@@ -56,6 +80,16 @@ class RdbmsDialect:
     def position_expression(self, column: str, kind: str) -> str:
         """Render a lossless source-side temporal string for the position column."""
         return column
+
+    def metadata_candidates(self, parts: list[tuple[str, bool]]) -> tuple:
+        """Return (schema, table) lookup variants for JDBC metadata calls."""
+        original = tuple(name for name, _ in parts)
+        folded = tuple(name if quoted else name.upper() for name, quoted in parts)
+        return tuple(dict.fromkeys((original, folded)))
+
+    def column_projection(self, type_name: str, reference: str) -> str | None:
+        """Return a source-side read expression for special types, else None."""
+        return None
 
     def reader_options(self) -> dict:
         """JDBC reader options required by the engine."""
