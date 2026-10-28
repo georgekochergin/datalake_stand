@@ -72,7 +72,7 @@ class TestIngestOperator(unittest.TestCase):
         self.assertEqual(args[args.index("--num-partitions") + 1], "4")
         self.assertNotIn("--no-parallelism", args)
         self.assertEqual(operator.source_type, "rdbms")
-        self.assertEqual(operator.application, "/opt/spark-jobs/raw/load_entity.py")
+        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/load_entity.py")
         self.assertEqual(operator.deploy_mode, "client")
         self.assertIn("jdbc:sqlserver://host:1433;databaseName=db;encrypt=false", args)
         operator = self.operator(parallelism=False, num_partitions=7, incremental_column="_batch_id", lookback_size=5)

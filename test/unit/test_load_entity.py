@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-MODULE_PATH = Path(__file__).resolve().parents[2] / "spark" / "raw" / "load_entity.py"
+MODULE_PATH = Path(__file__).resolve().parents[2] / "spark" / "raw" / "rdbms" / "load_entity.py"
 _SPEC = importlib.util.spec_from_file_location("load_entity", MODULE_PATH)
 load_entity = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(load_entity)
@@ -105,37 +105,6 @@ class TestParseArgs(unittest.TestCase):
     def test_invalid_incremental_column(self):
         with self.assertRaises(ValueError):
             load_entity.parse_args(build_argv("--incremental-column", "Client-Id"))
-
-
-
-class TestValidateTargetTable(unittest.TestCase):
-    """Target table identifier validation."""
-
-    def test_valid(self):
-        self.assertEqual(
-            load_entity.validate_target_table("raw.bank.retail_bank__clients"),
-            ("bank", "retail_bank__clients"),
-        )
-
-    def test_wrong_catalog(self):
-        with self.assertRaises(ValueError):
-            load_entity.validate_target_table("iceberg.bank.retail_bank__clients")
-
-    def test_two_parts(self):
-        with self.assertRaises(ValueError):
-            load_entity.validate_target_table("bank.retail_bank__clients")
-
-    def test_four_parts(self):
-        with self.assertRaises(ValueError):
-            load_entity.validate_target_table("raw.bank.a.b")
-
-    def test_uppercase_namespace(self):
-        with self.assertRaises(ValueError):
-            load_entity.validate_target_table("raw.Bank.retail_bank__clients")
-
-    def test_empty_namespace(self):
-        with self.assertRaises(ValueError):
-            load_entity.validate_target_table("raw..clients")
 
 
 
@@ -250,53 +219,6 @@ class TestBoundLiteral(unittest.TestCase):
         self.assertEqual(load_entity._bound_literal(1.5), "1.5")
 
 
-class TestBuildCreateTableSql(unittest.TestCase):
-    """First-load DDL construction."""
-
-    def test_full_ddl(self):
-        ddl = load_entity.build_create_table_sql(
-            "raw.bank.retail_bank__clients",
-            [("client_id", "bigint"), ("full_name", "string")],
-        )
-        self.assertEqual(
-            ddl,
-            "CREATE TABLE raw.bank.retail_bank__clients "
-            "(`client_id` bigint, `full_name` string, "
-            "`__load_dttm` timestamp_ltz, `__process_id` bigint, `__batch_id` bigint) USING iceberg "
-            "PARTITIONED BY (days(`__load_dttm`)) "
-            "LOCATION 's3://datalake/raw/bank/retail_bank__clients' "
-            "TBLPROPERTIES ('write.spark.accept-any-schema'='true')",
-        )
-
-    def test_backtick_in_column_name_escaped(self):
-        ddl = load_entity.build_create_table_sql(
-            "raw.bank.t",
-            [("a`b", "string")],
-        )
-        self.assertIn("`a``b` string", ddl)
-
-    def test_exact_location_for_each_namespace(self):
-        for namespace, table in (("bank", "retail_bank__accounts"), ("broker", "trading_core__transactions")):
-            with self.subTest(namespace=namespace):
-                ddl = load_entity.build_create_table_sql(f"raw.{namespace}.{table}", [("id", "bigint")])
-                self.assertIn(f"LOCATION 's3://datalake/raw/{namespace}/{table}'", ddl)
-
-    def test_unsafe_location_parts_rejected(self):
-        for target in ("raw.bank.a/b", "raw.bank.a'b", "raw../accounts", "raw.bank.a-b"):
-            with self.subTest(target=target), self.assertRaises(ValueError):
-                load_entity.build_create_table_sql(target, [("id", "bigint")])
-
-    def test_metadata_collision_rejected(self):
-        with self.assertRaises(ValueError):
-            load_entity.build_create_table_sql(
-                "raw.bank.t",
-                [("__load_dttm", "timestamptz")],
-            )
-
-    def test_invalid_target_rejected(self):
-        with self.assertRaises(ValueError):
-            load_entity.build_create_table_sql("bank.t", [("a", "int")])
-
 
 class _FakeType:
     """Minimal stand-in for a pyspark DataType."""
@@ -397,7 +319,7 @@ class TestMain(unittest.TestCase):
         sql.functions = functions
         with patch.dict(sys.modules, {"pyspark": pyspark, "pyspark.sql": sql, "pyspark.sql.functions": functions}), patch.object(
             load_entity, "_jdbc_reader", return_value=reader
-        ), patch.object(load_entity, "_schema_columns", return_value=[(field.name, "bigint") for field in source.schema.fields]), patch.object(
+        ), patch.object(load_entity, "schema_columns", return_value=[(field.name, "bigint") for field in source.schema.fields]), patch.object(
             load_entity, "detect_key_columns", return_value=[]
         ) as detect, patch.object(load_entity, "_read_bounds", return_value=(None, None)) as bounds:
             try:

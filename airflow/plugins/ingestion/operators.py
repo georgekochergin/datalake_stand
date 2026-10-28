@@ -192,7 +192,7 @@ class IngestAppendOperator(SparkSubmitOperator):
         if type(num_partitions) is not int or num_partitions <= 0:
             raise ValueError("num_partitions must be a positive integer")
         super().__init__(
-            application="/opt/spark-jobs/raw/load_entity.py",
+            application="/opt/spark-jobs/raw/rdbms/load_entity.py",
             conn_id="spark_default",
             deploy_mode="client",
             **kwargs,

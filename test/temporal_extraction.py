@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """Exercise temporal managed extraction against real JDBC sources and Iceberg."""
 
+import importlib.util
 import os
-import sys
 from argparse import Namespace
 from uuid import uuid4
 from unittest.mock import patch
 
-sys.path[:0] = ["/opt/airflow/plugins", "/opt/spark-jobs/raw"]
+
+def load_module(name, path):
+    """Load a runtime module explicitly by file path, without sys.path changes."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def require(condition, message):
@@ -35,7 +41,7 @@ def metadata_row(hook, table, source_id, entity_fqn):
 
 def source_count(spark, args, lower, upper, kind):
     """Count the exact source predicate without Spark temporal conversion."""
-    import load_entity
+    load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
     from dlh_ingestion.sources.rdbms import positions
     from dlh_ingestion.sources.rdbms import registry as dialects
 
@@ -71,7 +77,7 @@ def source_count(spark, args, lower, upper, kind):
 def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, token,
              expected_upper=None):
     """Verify bootstrap, overlap, manual-full, empty resume, and successful retry."""
-    import load_entity
+    load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
     from dlh_ingestion import meta
     from dlh_ingestion.sources.rdbms import positions
 
@@ -196,7 +202,7 @@ def precision_fixtures(source):
 
 def check_post_append_retry(spark, hook, jdbc, token):
     """Inject a real post-append metadata failure and accept a repeated append."""
-    import load_entity
+    load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
     from dlh_ingestion import meta
 
     args = Namespace(
@@ -238,16 +244,16 @@ def main():
     from airflow.models.connection import Connection
     from airflow.providers.postgres.hooks.postgres import PostgresHook
     from airflow.utils.session import create_session
-    from ingestion.operators import resolve_source_connection
     from pyspark.sql import SparkSession
 
+    operators = load_module("ingestion_operators", "/opt/airflow/plugins/ingestion/operators.py")
     meta = BaseHook.get_connection("ingestion_meta")
     os.environ.update(PGHOST=meta.host, PGPORT=str(meta.port or 5432),
                       PGDATABASE=meta.schema, PGUSER=meta.login, PGPASSWORD=meta.password)
     hook = PostgresHook(postgres_conn_id="ingestion_meta")
     with create_session() as session:
         source_jdbc = {
-            source: resolve_source_connection(
+            source: operators.resolve_source_connection(
                 session.query(Connection).filter_by(conn_id=f"{source}_source").one()
             )
             for source in ("bank", "broker")

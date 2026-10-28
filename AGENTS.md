@@ -2,7 +2,7 @@
 
 ## Контекст и архитектура
 - Стенд КХД/DLH: Trino, Spark, Nessie, Airflow, SILO, Postgres. Источники — `sydafa`.
-- Каркас: `airflow/` `spark/` `trino/` (пользовательский код, не в git), `conf/` (как запущен стенд), `test/` (демо + e2e).
+- Каркас: `dlh_ingestion/` (общий код переноса данных: диалекты СУБД, позиции, pg-meta, Iceberg-DDL), `airflow/` `spark/` `trino/` (пользовательский код в git через allowlist `.gitignore`), `conf/` (как запущен стенд), `test/` (демо + e2e).
 - Конфигурация источников sydafa: через `sources.json` (`conf/sydafa/sources.json` на живом стенде, `test/sydafa/sources.json` в тестах).
 - Читатель источников: `sydafa`/`sydafa` (только SELECT). Админ снаружи недоступен.
 - Внутренние DNS-имена СУБД (риг именует контейнеры `sydafa-src-<тип>-<source_id>`): `sydafa-src-mssql-bank:1433`, `sydafa-src-oracle-broker:1521`.

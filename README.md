@@ -157,7 +157,8 @@ docker info | grep "Total Memory"   # должно быть ≥ 16 GiB
 | Путь | Назначение |
 |---|---|
 | `airflow/` | Пользовательский код оркестрации: DAG-и обновления источников (`dags/update_source_*.py`), сгенерированные DAG-и загрузки (`dags/generated/`, артефакт, в git не попадают), плагины `plugins/ingestion` (операторы и реестр pg-meta) и `plugins/migrations` (батчи операций обновления источников) |
-| `spark/` | Spark-job-ы по слоям: `spark/raw/load_entity.py` — append-загрузчик одной сущности (JDBC → Iceberg) и `spark/raw/extraction.py` — типизированные позиции инкремента и диалектные SQL-кодеки |
+| `spark/` | Spark-job-ы по слоям и типам источников: `spark/raw/rdbms/load_entity.py` — append-загрузчик одной сущности RDBMS (JDBC → Iceberg) |
+| `dlh_ingestion/` | Общий код переноса данных, импортируемый и Airflow, и Spark-драйвером (доставляется в контейнеры томом и `PYTHONPATH=/opt/dlh_ingestion`): `sources/rdbms/positions.py` — типизированные позиции инкремента, `sources/rdbms/dialects/` — адаптеры MSSQL/Oracle (URL, quoting, литералы, temporal-выражения), `sources/rdbms/registry.py` — реестр диалектов по conn_type/JDBC URL, `meta.py` — клиент pg-meta (партии и водяные знаки), `iceberg.py` — DDL целевых raw-таблиц |
 | `trino/` | Пользовательский SQL (каркас) |
 | `ingestion/` | Манифесты источников (`sources.yaml`), пайплайнов (`pipelines/**/*.yaml`), технические настройки (`settings.yaml`), библиотека валидации (`lib/`), генератор DAG-ов (`generate_dags.py`) |
 | `conf/airflow` | Dockerfile и requirements образа Airflow (+ Spark, JDK, JDBC-драйверы), генератор паролей |
@@ -172,7 +173,8 @@ docker info | grep "Total Memory"   # должно быть ≥ 16 GiB
 | `.env` | `STAND_USER` / `STAND_PASSWORD` (по умолчанию `admin123` / `admin123`) |
 
 Каталоги `airflow/`, `spark/`, `trino/` — пользовательский код: compose
-монтирует их в контейнеры (`plugins` — только чтение), в git через
+монтирует их в контейнеры (`plugins` — только чтение; `dlh_ingestion` — только
+чтение, импортируется через `PYTHONPATH`), в git через
 `.gitignore` попадают лишь явно разрешённые поддеревья.
 
 ---
@@ -247,7 +249,7 @@ orphan-контейнеры по меткам родительского про�
 После `down -v` стенд поднимается с нуля: источники пересоздаются по
 `conf/sydafa/sources.json`, pg-meta инициализируется DDL из `conf/pg-meta/init/`.
 
-Изменения кода в `airflow/`, `spark/`, `trino/`, `conf/` подхватываются
+Изменения кода в `airflow/`, `spark/`, `trino/`, `dlh_ingestion/`, `conf/` подхватываются
 пересозданием контейнеров; изменение Dockerfile/requirements требует пересборки
 (`docker compose build`, затем `docker compose up -d`).
 
@@ -615,7 +617,7 @@ DAG ingest__rdbms__bank__main
     └── TaskGroup "ingest_group"                       (сущности параллельно)
         ├── TaskGroup "load_retail_bank__transactions" (одна сущность)
         │   ├── log_start   событие START в pg-meta
-        │   ├── load        IngestAppendOperator → spark/raw/load_entity.py
+        │   ├── load        IngestAppendOperator → spark/raw/rdbms/load_entity.py
         │   ├── log_end     событие END в pg-meta
         │   └── publish_asset  публикация Asset после успешного log_end
         └── TaskGroup "load_retail_bank__deals" ...
@@ -640,7 +642,7 @@ DAG ingest__rdbms__bank__main
 - **`log_start` / `log_end`** (`TableLogOperator`) — события жизненного цикла
   сущности в `airflow_tasks_log`, без публикации Asset и управления состоянием
   извлечения. Таблицы `ingestion.extraction_batches` и `ingestion.extraction_state`
-  обслуживает Spark-функция `managed_load()` через `ingestion.registry`;
+  обслуживает Spark-функция `managed_load()` через `dlh_ingestion.meta`;
   `incremental_column` передаётся только задаче `load`.
 - **`publish_asset`** (`EmptyOperator` с `outlets`) — отдельная задача публикации
   события обновления Asset `raw://<source_id>/<fqn>`, на который смогут
@@ -648,7 +650,7 @@ DAG ingest__rdbms__bank__main
   `log_end`: загрузка завершилась и её успех записан в pg-meta. Ошибка или
   пропуск `log_end` не допускает публикацию.
 - **`load`** (`IngestAppendOperator`, наследник `SparkSubmitOperator`,
-  client-mode, job `spark/raw/load_entity.py`) — исполнитель загрузки. Во время
+  client-mode, job `spark/raw/rdbms/load_entity.py`) — исполнитель загрузки. Во время
   исполнения: разрешает Airflow Connection источника в JDBC URL (проверяя схему
   соединения против `type`), берёт `process_id` из XCom, передаёт spark-job
   параметры сущности (включая режим, lookback, пул) и реквизиты pg-meta через
@@ -941,7 +943,7 @@ Oracle `TIMESTAMP WITH TIME ZONE` дополнительно нормализу�
 
 #### 4.6.2. Жизненный цикл загрузки
 
-Загрузкой управляет реестр в pg-meta (`airflow/plugins/ingestion/registry.py`).
+Загрузкой управляет клиент pg-meta (`dlh_ingestion/meta.py`, общий для Airflow и Spark-драйвера).
 Ключевая идея: **границы извлечения фиксируются до чтения** и переживают
 повторы, а водяной знак двигается только атомарно с закрытием партии.
 

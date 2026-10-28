@@ -11,15 +11,18 @@ import logging
 import re
 from decimal import Decimal
 
+from dlh_ingestion.iceberg import (
+    CATALOG,
+    METADATA_BATCH,
+    METADATA_DTTM,
+    METADATA_PID,
+    build_create_table_sql,
+    schema_columns,
+    validate_target_table,
+)
 from dlh_ingestion.sources.rdbms import positions
 from dlh_ingestion.sources.rdbms import registry as dialects
 
-CATALOG = "raw"
-METADATA_DTTM = "__load_dttm"
-METADATA_PID = "__process_id"
-METADATA_BATCH = "__batch_id"
-
-IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 COLUMN_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SOURCE_PART_PATTERN = re.compile(r'"((?:[A-Za-z0-9_.]|"")+)"|([A-Za-z0-9_]+)')
 WATERMARK_PATTERN = re.compile(r"^[0-9]+$")
@@ -123,19 +126,6 @@ def build_read_query(
     return f"(SELECT * FROM {table} WHERE {column} > {watermark_value}) q"
 
 
-def validate_target_table(target: str) -> tuple[str, str]:
-    """Validate raw.<namespace>.<table> and return (namespace, table)."""
-    parts = target.split(".")
-    if len(parts) != 3 or parts[0] != CATALOG:
-        raise ValueError(f"target table must be '{CATALOG}.<namespace>.<table>': {target!r}")
-    namespace, table = parts[1], parts[2]
-    if not IDENTIFIER_PATTERN.match(namespace) or not IDENTIFIER_PATTERN.match(table):
-        raise ValueError(
-            f"target table parts must match {IDENTIFIER_PATTERN.pattern}: {target!r}"
-        )
-    return namespace, table
-
-
 def _normalize_type(jdbc_type: str) -> str:
     """Normalize a JDBC TYPE_NAME (e.g. 'int identity') to its base token."""
     stripped = jdbc_type.strip()
@@ -148,31 +138,6 @@ def pick_partition_column(candidates: list[tuple[str, str]]) -> str | None:
         if _normalize_type(jdbc_type) in PARTITION_TYPES:
             return name
     return None
-
-
-def quote_identifier(name: str) -> str:
-    """Quote a column name for Spark SQL DDL (backticks; embedded backticks doubled)."""
-    return "`%s`" % name.replace("`", "``")
-
-
-def build_create_table_sql(target: str, columns: list[tuple[str, str]]) -> str:
-    """Build the first-load Iceberg DDL from (column name, DDL type) pairs."""
-    namespace, table = validate_target_table(target)
-    rendered: list[str] = []
-    for name, ddl_type in columns:
-        if name in (METADATA_DTTM, METADATA_PID, METADATA_BATCH, "__extract_position"):
-            raise ValueError(f"source column {name!r} collides with a metadata column")
-        rendered.append(f"{quote_identifier(name)} {ddl_type}")
-    rendered.append(f"{quote_identifier(METADATA_DTTM)} timestamp_ltz")
-    rendered.append(f"{quote_identifier(METADATA_PID)} bigint")
-    rendered.append(f"{quote_identifier(METADATA_BATCH)} bigint")
-    joined = ", ".join(rendered)
-    return (
-        f"CREATE TABLE {target} ({joined}) USING iceberg "
-        f"PARTITIONED BY (days({quote_identifier(METADATA_DTTM)})) "
-        f"LOCATION 's3://datalake/raw/{namespace}/{table}' "
-        f"TBLPROPERTIES ('write.spark.accept-any-schema'='true')"
-    )
 
 
 def validate_incremental_column(schema, incremental_column: str) -> None:
@@ -191,56 +156,6 @@ def validate_incremental_column(schema, incremental_column: str) -> None:
             f"incremental column {incremental_column!r} has unsupported type "
             f"{type_name!r}: numeric (integral) incremental columns are required"
         )
-
-
-def _schema_columns(schema) -> list[tuple[str, str]]:
-    """Map a PySpark schema to (column name, DDL type) pairs."""
-    from pyspark.sql.types import (
-        BinaryType,
-        BooleanType,
-        ByteType,
-        DateType,
-        DecimalType,
-        DoubleType,
-        FloatType,
-        IntegerType,
-        LongType,
-        ShortType,
-        StringType,
-        TimestampNTZType,
-        TimestampType,
-    )
-
-    def ddl_type(data_type):
-        if isinstance(data_type, StringType):
-            return "string"
-        if isinstance(data_type, BooleanType):
-            return "boolean"
-        if isinstance(data_type, ByteType):
-            return "tinyint"
-        if isinstance(data_type, ShortType):
-            return "smallint"
-        if isinstance(data_type, IntegerType):
-            return "int"
-        if isinstance(data_type, LongType):
-            return "bigint"
-        if isinstance(data_type, FloatType):
-            return "float"
-        if isinstance(data_type, DoubleType):
-            return "double"
-        if isinstance(data_type, DateType):
-            return "date"
-        if isinstance(data_type, TimestampType):
-            return "timestamp_ltz"
-        if isinstance(data_type, TimestampNTZType):
-            return "timestamp_ntz"
-        if isinstance(data_type, DecimalType):
-            return f"decimal({data_type.precision},{data_type.scale})"
-        if isinstance(data_type, BinaryType):
-            return "binary"
-        raise ValueError(f"unsupported source column type for raw DDL: {data_type!r}")
-
-    return [(field.name, ddl_type(field.dataType)) for field in schema.fields]
 
 
 def parse_source_table(source_table: str) -> list[tuple[str, bool]]:
@@ -413,7 +328,7 @@ def main(argv: list[str] | None = None) -> None:
         source_frame = reader.load()
         if args.incremental_column is not None:
             validate_incremental_column(source_frame.schema, args.incremental_column)
-        create_sql = build_create_table_sql(args.target_table, _schema_columns(source_frame.schema))
+        create_sql = build_create_table_sql(args.target_table, schema_columns(source_frame.schema))
         frame = (
             source_frame.withColumn(METADATA_DTTM, F.current_timestamp())
             .withColumn(METADATA_PID, F.lit(args.process_id).cast("long"))
@@ -631,7 +546,7 @@ def managed_load(spark, args):
             namespace, _ = validate_target_table(args.target_table)
             spark.sql(f"CREATE NAMESPACE IF NOT EXISTS raw.{namespace}")
             if not spark.catalog.tableExists(args.target_table):
-                spark.sql(build_create_table_sql(args.target_table, _schema_columns(clean.schema)))
+                spark.sql(build_create_table_sql(args.target_table, schema_columns(clean.schema)))
             if rows:
                 frame = clean.withColumn(METADATA_DTTM, F.current_timestamp()).withColumn(
                     METADATA_PID, F.lit(args.process_id).cast("long")).withColumn(
