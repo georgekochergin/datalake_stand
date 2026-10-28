@@ -1,1 +1,1 @@
-"""Airflow runtime for the raw-layer ingestion framework (operators + pg-meta registry)."""
+"""Airflow runtime of the ingestion framework (operators; shared code in dlh_ingestion)."""

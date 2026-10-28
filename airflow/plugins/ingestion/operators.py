@@ -5,7 +5,15 @@ from functools import partial
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 from airflow.sdk import BaseHook, BaseOperator
 
-from . import registry
+from dlh_ingestion import meta
+
+
+def _meta_connect(pg_conn_id: str = "ingestion_meta"):
+    """Open a pg-meta connection through the Airflow Postgres provider."""
+    from airflow.providers.postgres.hooks.postgres import PostgresHook
+
+    return PostgresHook(postgres_conn_id=pg_conn_id).get_conn()
+
 
 JDBC_TEMPLATES = {
     "mssql": ("jdbc:sqlserver://{host}:{port};databaseName={schema};encrypt=false", 1433),
@@ -72,13 +80,13 @@ def log_task_failed(
     process_id = _pull_process_id(context)
     if process_id is None:
         return
-    registry.log_task(
-        pg_conn_id=pg_conn_id,
+    meta.log_task(
         process_id=process_id,
         source_id=source_id,
         entity_fqn=entity_fqn,
         datalake_table=datalake_table,
         status="FAILED",
+        db_connect=partial(_meta_connect, pg_conn_id),
     )
 
 
@@ -93,25 +101,27 @@ class GenerateProcessIdOperator(BaseOperator):
     def execute(self, context):
         dag_run = context["dag_run"]
         validate_run_conf(dag_run.conf, self.entities)
-        return registry.get_or_create_process_id(
-            self.pg_conn_id, dag_id=dag_run.dag_id, run_id=dag_run.run_id,
-            execution_date=dag_run.logical_date
+        return meta.get_or_create_process_id(
+            dag_id=dag_run.dag_id, run_id=dag_run.run_id,
+            execution_date=dag_run.logical_date,
+            db_connect=partial(_meta_connect, self.pg_conn_id),
         )
 
 
 def _dagrun_event(status: str, context) -> None:
     """Append a dagrun END/FAILED event for the run's allocated process_id."""
     dag_run = context["dag_run"]
-    process_id = registry.find_process_id("ingestion_meta", dag_run.dag_id, dag_run.run_id)
+    connect = partial(_meta_connect, "ingestion_meta")
+    process_id = meta.find_process_id(dag_run.dag_id, dag_run.run_id, db_connect=connect)
     if process_id is None:
         return
-    registry.log_dagrun(
-        pg_conn_id="ingestion_meta",
+    meta.log_dagrun(
         process_id=process_id,
         dag_id=dag_run.dag_id,
         run_id=dag_run.run_id,
         execution_date=None,
         status=status,
+        db_connect=connect,
     )
 
 
@@ -150,13 +160,13 @@ class TableLogOperator(BaseOperator):
 
     def execute(self, context):
         process_id = _validate_process_id(self.process_id)
-        registry.log_task(
-            pg_conn_id=self.pg_conn_id,
+        meta.log_task(
             process_id=process_id,
             source_id=self.source_id,
             entity_fqn=self.entity_fqn,
             datalake_table=self.datalake_table,
             status=self.status,
+            db_connect=partial(_meta_connect, self.pg_conn_id),
         )
 
 

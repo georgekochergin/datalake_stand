@@ -7,6 +7,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCANNED_ROOTS = [
+    REPO_ROOT / "dlh_ingestion",
     REPO_ROOT / "ingestion",
     REPO_ROOT / "spark" / "raw",
     REPO_ROOT / "airflow" / "plugins" / "ingestion",

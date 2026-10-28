@@ -36,7 +36,7 @@ class TestAirflowIgnore(unittest.TestCase):
 
     def test_plugin_loader_excludes_framework_packages(self):
         rules = patterns(self.plugins_ignore)
-        excluded = ["ingestion/operators.py", "ingestion/registry.py", "migrations/__init__.py"]
+        excluded = ["ingestion/operators.py", "migrations/__init__.py"]
         for candidate in excluded:
             self.assertTrue(
                 any(re.search(rule, candidate) for rule in rules),

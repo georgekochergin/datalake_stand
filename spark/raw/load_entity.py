@@ -9,7 +9,6 @@ without Spark; managed execution uses the registry mounted with Airflow.
 import argparse
 import logging
 import re
-import sys
 from decimal import Decimal
 
 CATALOG = "raw"
@@ -579,12 +578,11 @@ def managed_load(spark, args):
     import pyspark.sql.functions as F
     import psycopg2
 
-    sys.path.insert(0, "/opt/airflow/plugins")
-    from ingestion import registry
+    from dlh_ingestion import meta
 
     connect = lambda: psycopg2.connect("")
-    batch = registry.get_batch(dag_id=args.dag_id, run_id=args.run_id, source_id=args.source_id,
-                               entity_fqn=args.source_table, db_connect=connect)
+    batch = meta.get_batch(dag_id=args.dag_id, run_id=args.run_id, source_id=args.source_id,
+                           entity_fqn=args.source_table, db_connect=connect)
     if batch and (batch["process_id"] != args.process_id or batch["target_table"] != args.target_table
                   or batch["incremental_column"] != args.incremental_column):
         raise ValueError("Persisted batch identity or extraction contract changed")
@@ -612,7 +610,7 @@ def managed_load(spark, args):
             return extraction.lower_bound(value, kind, args.lookback_size, args.lookback_unit,
                                           specified=args.lookback_given)
 
-        batch = registry.plan_batch(
+        batch = meta.plan_batch(
             process_id=args.process_id, dag_id=args.dag_id, run_id=args.run_id,
             source_id=args.source_id, entity_fqn=args.source_table, target_table=args.target_table,
             incremental_column=args.incremental_column, incremental_type=kind,
@@ -629,10 +627,10 @@ def managed_load(spark, args):
         raise ValueError("Extraction contract changed; migrate pg-meta and start a new DagRun")
     batch_id = batch["batch_id"]
     if empty_incremental_window(batch):
-        registry.finalize_batch(batch_id=batch_id, row_count=0, observed_max=None,
+        meta.finalize_batch(batch_id=batch_id, row_count=0, observed_max=None,
                                 db_connect=connect)
         return
-    registry.start_batch(batch_id=batch_id, db_connect=connect)
+    meta.start_batch(batch_id=batch_id, db_connect=connect)
     try:
         filters = []
         column = sql_reference(args.jdbc_url, args.incremental_column) if args.incremental_column else None
@@ -685,13 +683,13 @@ def managed_load(spark, args):
             watermark = batch["watermark_before"]
             if args.incremental_column and batch["reason"] != "manual_full":
                 watermark = extraction.maximum(watermark, observed, kind)
-            registry.finalize_batch(batch_id=batch_id, row_count=rows, observed_max=observed,
+            meta.finalize_batch(batch_id=batch_id, row_count=rows, observed_max=observed,
                                     watermark_after=watermark, db_connect=connect)
         finally:
             source.unpersist()
     except Exception:
         try:
-            registry.fail_batch(batch_id=batch_id, error="Extraction execution failed; see task logs", db_connect=connect)
+            meta.fail_batch(batch_id=batch_id, error="Extraction execution failed; see task logs", db_connect=connect)
         except Exception:
             logging.getLogger(__name__).warning("Unable to persist batch failure")
         raise

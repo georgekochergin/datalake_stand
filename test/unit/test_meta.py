@@ -1,10 +1,9 @@
-"""Registry transaction tests, with optional isolated PostgreSQL integration.
+"""pg-meta client transaction tests, with optional isolated PostgreSQL integration.
 
 Set EXTRACTION_TEST_DSN to a disposable database. The integration tests create
 their own database and never replace an existing ingestion schema.
 """
 
-import importlib.util
 import os
 from pathlib import Path
 import subprocess
@@ -15,28 +14,28 @@ from uuid import uuid4
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location("extraction_registry", ROOT / "airflow/plugins/ingestion/registry.py")
-registry = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(registry)
+sys.path.insert(0, str(ROOT))
+
+from dlh_ingestion import meta
 
 
 class TransactionTests(unittest.TestCase):
     """Verify transaction ownership and explicit CAS rollback without a server."""
 
     def test_import_does_not_load_airflow(self):
-        """A Spark driver can import the module without Airflow installed."""
+        """The Spark driver imports the module without Airflow installed."""
         code = (
-            "import importlib.util, sys; "
-            f"s=importlib.util.spec_from_file_location('registry', {str(ROOT / 'airflow/plugins/ingestion/registry.py')!r}); "
-            "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+            "import sys; "
+            f"sys.path.insert(0, {str(ROOT)!r}); "
+            "import dlh_ingestion.meta; "
             "assert not any(k == 'airflow' or k.startswith('airflow.') for k in sys.modules)"
         )
         subprocess.run([sys.executable, "-c", code], check=True)
 
     def test_connection_commit_and_close(self):
-        """The registry commits and releases injected connections."""
+        """The client commits and releases injected connections."""
         conn = MagicMock()
-        with registry.connection(db_connect=lambda: conn):
+        with meta.connection(db_connect=lambda: conn):
             pass
         conn.commit.assert_called_once()
         conn.close.assert_called_once()
@@ -46,7 +45,7 @@ class TransactionTests(unittest.TestCase):
         """Exceptions never commit a partial metadata transaction."""
         conn = MagicMock()
         with self.assertRaisesRegex(ValueError, "failure"):
-            with registry.connection(db_connect=lambda: conn):
+            with meta.connection(db_connect=lambda: conn):
                 raise ValueError("failure")
         conn.rollback.assert_called_once()
         conn.close.assert_called_once()
@@ -60,9 +59,9 @@ class TransactionTests(unittest.TestCase):
         state = {"watermark": "9"}
         batch = {"status": "RUNNING", "reason": "regular", "incremental_column": "id",
                  "source_id": "bank", "entity_fqn": "s.t", "expected_revision": 1}
-        with patch.object(registry, "_lock_batch", return_value=(state, batch)):
+        with patch.object(meta, "_lock_batch", return_value=(state, batch)):
             with self.assertRaisesRegex(ValueError, "CAS"):
-                registry.finalize_batch(1, 1, "10", watermark_after="10", db_connect=lambda: conn)
+                meta.finalize_batch(1, 1, "10", watermark_after="10", db_connect=lambda: conn)
         self.assertEqual(cur.execute.call_count, 1)
         conn.rollback.assert_called_once()
         conn.commit.assert_not_called()
@@ -96,12 +95,12 @@ class PostgresTests(unittest.TestCase):
     def tearDownClass(cls):
         """Remove only the database created by this test class."""
         with cls.admin.cursor() as cur:
-            cur.execute(cls.sql.SQL("DROP DATABASE {}").format(cls.sql.Identifier(cls.database)))
+            cur.execute(cls.sql.SQL("DROP DATABASE {}").format(sql.Identifier(cls.database)))
         cls.admin.close()
 
     @classmethod
     def connect(cls):
-        """Return a fresh registry-owned DB-API connection."""
+        """Return a fresh client-owned DB-API connection."""
         return cls.psycopg2.connect(**cls.params)
 
     def setUp(self):
@@ -114,40 +113,40 @@ class PostgresTests(unittest.TestCase):
 
     def plan(self, **changes):
         """Plan a batch with test-specific overrides."""
-        return registry.plan_batch(**(self.args | changes))
+        return meta.plan_batch(**(self.args | changes))
 
     def finish(self, batch, count=1, observed="10"):
         """Finalize using an integer comparator rather than textual ordering."""
-        return registry.finalize_batch(
+        return meta.finalize_batch(
             batch["batch_id"], count, observed, db_connect=self.connect,
             compare_positions=lambda left, right: (int(left) > int(right)) - (int(left) < int(right)),
         )
 
     def state(self):
         """Read committed state for this case."""
-        with registry.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+        with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
             cur.execute("SELECT * FROM ingestion.extraction_state WHERE source_id = %s", (self.source,))
-            return registry._row(cur)
+            return meta._row(cur)
 
     def test_bootstrap_retry_and_idempotent_success(self):
         """Bounds and IDs survive failures and success is finalized only once."""
         batch = self.plan()
         self.assertEqual((batch["reason"], batch["mode"], batch["expected_revision"]),
                          ("bootstrap", "full_snapshot", 1))
-        registry.start_batch(batch["batch_id"], db_connect=self.connect)
-        registry.fail_batch(batch["batch_id"], "safe failure", db_connect=self.connect)
+        meta.start_batch(batch["batch_id"], db_connect=self.connect)
+        meta.fail_batch(batch["batch_id"], "safe failure", db_connect=self.connect)
         retry = self.plan(upper_bound="99")
         self.assertEqual(retry["batch_id"], batch["batch_id"])
         self.assertEqual(retry["upper_bound"], "10")
         self.assertIsNone(self.state()["watermark"])
-        started = registry.start_batch(batch["batch_id"], db_connect=self.connect)
+        started = meta.start_batch(batch["batch_id"], db_connect=self.connect)
         self.assertEqual(started["attempt_count"], 2)
         result = self.finish(batch)
         self.assertEqual(result["watermark_after"], "10")
         self.assertIsNone(result["last_error"])
         self.assertEqual(self.finish(batch, 99, "99"), result)
         self.assertEqual(self.state()["revision"], 2)
-        self.assertEqual(registry.fail_batch(batch["batch_id"], "late", db_connect=self.connect), result)
+        self.assertEqual(meta.fail_batch(batch["batch_id"], "late", db_connect=self.connect), result)
 
     def test_typed_max_and_empty_noop(self):
         """A lookback never moves the watermark backwards and no-op advances revision."""
@@ -190,25 +189,25 @@ class PostgresTests(unittest.TestCase):
         batch = self.plan()
         with self.assertRaisesRegex(ValueError, "contract"):
             self.plan(incremental_column="other")
-        with registry.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+        with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
             cur.execute("UPDATE ingestion.extraction_state SET revision = revision + 1 WHERE source_id = %s",
                         (self.source,))
         for operation in (
-            lambda: registry.get_batch(batch_id=batch["batch_id"], db_connect=self.connect),
-            lambda: registry.start_batch(batch["batch_id"], db_connect=self.connect),
+            lambda: meta.get_batch(batch_id=batch["batch_id"], db_connect=self.connect),
+            lambda: meta.start_batch(batch["batch_id"], db_connect=self.connect),
             lambda: self.finish(batch),
         ):
             with self.assertRaisesRegex(ValueError, "revision"):
                 operation()
-        with registry.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+        with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
             cur.execute("SELECT status FROM ingestion.extraction_batches WHERE batch_id = %s", (batch["batch_id"],))
             self.assertEqual(cur.fetchone()[0], "PLANNED")
 
     def test_process_id_is_idempotent(self):
         """Repeated process allocation uses the same unique start event."""
         kwargs = dict(dag_id=self.source, run_id="run", db_connect=self.connect)
-        first = registry.get_or_create_process_id(**kwargs)
-        self.assertEqual(registry.get_or_create_process_id(**kwargs), first)
+        first = meta.get_or_create_process_id(**kwargs)
+        self.assertEqual(meta.get_or_create_process_id(**kwargs), first)
 
     def test_regressed_source_maximum_is_rejected(self):
         """Typed source regression rejects planning without creating a batch."""
@@ -216,22 +215,22 @@ class PostgresTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "regressed"):
             self.plan(run_id="run2", upper_bound="9",
                       compare_positions=lambda left, right: int(left) - int(right))
-        self.assertIsNone(registry.get_batch(dag_id="dag", run_id="run2", source_id=self.source,
-                                            entity_fqn="s.t", db_connect=self.connect))
+        self.assertIsNone(meta.get_batch(dag_id="dag", run_id="run2", source_id=self.source,
+                                         entity_fqn="s.t", db_connect=self.connect))
 
     def test_manual_full_ignores_incorrect_explicit_watermark(self):
         """An explicit caller result cannot accidentally rebase a manual snapshot."""
         self.finish(self.plan())
         batch = self.plan(run_id="manual", force_full=True, reason_text="audit")
-        result = registry.finalize_batch(batch["batch_id"], 1, "99", watermark_after="99",
-                                         db_connect=self.connect)
+        result = meta.finalize_batch(batch["batch_id"], 1, "99", watermark_after="99",
+                                     db_connect=self.connect)
         self.assertEqual(result["watermark_after"], "10")
 
     def test_last_batch_fk_rejects_unknown_batch(self):
         """The deferred FK rejects last_batch_id pointers to unknown batches at commit."""
         self.plan()
         with self.assertRaises(self.psycopg2.Error):
-            with registry.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+            with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
                 cur.execute(
                     "UPDATE ingestion.extraction_state SET last_batch_id = %s WHERE source_id = %s",
                     (2147483647, self.source),

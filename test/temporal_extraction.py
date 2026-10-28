@@ -67,9 +67,9 @@ def source_count(spark, args, lower, upper, kind):
 def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, token,
              expected_upper=None):
     """Verify bootstrap, overlap, manual-full, empty resume, and successful retry."""
-    import extraction
     import load_entity
-    from ingestion import registry
+    from dlh_ingestion import meta
+    from dlh_ingestion.sources.rdbms import positions
 
     args = Namespace(
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
@@ -97,13 +97,14 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
     watermark = None
     for revision, phase in enumerate(("bootstrap", "lookback", "forcefull", "normal"), start=1):
         args.run_id = f"{token}-{target}-{phase}"
-        args.process_id = registry.get_or_create_process_id(dag_id=args.dag_id, run_id=args.run_id)
+        args.process_id = meta.get_or_create_process_id(dag_id=args.dag_id, run_id=args.run_id,
+                                                        db_connect=hook.get_conn)
         args.force_full = phase == "forcefull"
         args.reason = "e2e temporal manual-full contract" if args.force_full else None
         args.lookback_size = 1 if phase in ("bootstrap", "lookback") else 0
         args.lookback_unit = "d" if args.lookback_size else None
         args.lookback_given = bool(args.lookback_size)
-        lower = extraction.lower_bound(watermark, kind, 1, "d") if phase == "lookback" else (
+        lower = positions.lower_bound(watermark, kind, 1, "d") if phase == "lookback" else (
             watermark if phase == "normal" else None
         )
         bound = None if args.force_full else upper
@@ -192,7 +193,7 @@ def precision_fixtures(source):
 def check_post_append_retry(spark, hook, jdbc, token):
     """Inject a real post-append metadata failure and accept a repeated append."""
     import load_entity
-    from ingestion import registry
+    from dlh_ingestion import meta
 
     args = Namespace(
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
@@ -200,11 +201,11 @@ def check_post_append_retry(spark, hook, jdbc, token):
         target_table="raw.e2e_contract.post_append_retry", source_id="e2e_retry",
         incremental_column="position", partition_column=None, no_parallelism=True,
         num_partitions=1, watermark_value=None, dag_id="e2e_post_append_retry",
-        run_id=token, process_id=registry.get_or_create_process_id(
-            dag_id="e2e_post_append_retry", run_id=token),
+        run_id=token, process_id=meta.get_or_create_process_id(
+            dag_id="e2e_post_append_retry", run_id=token, db_connect=hook.get_conn),
         force_full=False, reason=None, lookback_size=0, lookback_unit=None, lookback_given=False,
     )
-    with patch.object(registry, "finalize_batch", side_effect=RuntimeError("injected metadata failure")):
+    with patch.object(meta, "finalize_batch", side_effect=RuntimeError("injected metadata failure")):
         try:
             load_entity.managed_load(spark, args)
         except RuntimeError as exc:

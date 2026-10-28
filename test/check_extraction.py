@@ -23,45 +23,55 @@ def records(cursor, sql):
 
 def check_registry_recovery():
     """Exercise real pg-meta retry/finalization without touching JDBC sources."""
-    from ingestion.registry import fail_batch, finalize_batch, get_batch, get_or_create_process_id, plan_batch, start_batch
+    from dlh_ingestion import meta
 
+    connect = PostgresHook(postgres_conn_id="ingestion_meta").get_conn
     source = "e2e-registry-" + uuid4().hex
-    process_id = get_or_create_process_id(dag_id="e2e_registry", run_id=source, execution_date=None)
-    require(get_or_create_process_id(dag_id="e2e_registry", run_id=source, execution_date=None) == process_id, "DagRun process allocation is idempotent")
+    process_id = meta.get_or_create_process_id(dag_id="e2e_registry", run_id=source,
+                                               execution_date=None, db_connect=connect)
+    require(meta.get_or_create_process_id(dag_id="e2e_registry", run_id=source,
+                                          execution_date=None, db_connect=connect) == process_id,
+            "DagRun process allocation is idempotent")
     arguments = dict(process_id=process_id, dag_id="e2e_registry", run_id=source,
                      source_id=source, entity_fqn="synthetic.transactions",
                      target_table="raw.synthetic.transactions", incremental_column="position",
-                     incremental_type="bigint", upper_bound="10", empty_at_plan=False)
-    planned = plan_batch(**arguments)
+                     incremental_type="bigint", upper_bound="10", empty_at_plan=False,
+                     db_connect=connect)
+    planned = meta.plan_batch(**arguments)
     batch_id = planned["batch_id"]
-    start_batch(batch_id)
-    fail_batch(batch_id, "synthetic failure after append before metadata commit")
-    retry = plan_batch(**dict(arguments, upper_bound="999"))
+    meta.start_batch(batch_id, db_connect=connect)
+    meta.fail_batch(batch_id, "synthetic failure after append before metadata commit", db_connect=connect)
+    retry = meta.plan_batch(**dict(arguments, upper_bound="999"))
     require(retry["batch_id"] == batch_id and retry["upper_bound"] == "10", "retry retains identity and frozen upper bound")
     require(retry["status"] == "FAILED" and retry["watermark_after"] is None, "failed attempt does not finalize watermark")
-    start_batch(batch_id)
-    finished = finalize_batch(batch_id, 2, "10")
+    meta.start_batch(batch_id, db_connect=connect)
+    finished = meta.finalize_batch(batch_id, 2, "10", db_connect=connect)
     require(finished["attempt_count"] == 2 and finished["last_error"] is None, "retry records attempts and clears error")
-    repeated = finalize_batch(batch_id, 999, "999")
+    repeated = meta.finalize_batch(batch_id, 999, "999", db_connect=connect)
     require(repeated == finished, "repeated successful finalization returns original result")
-    second = plan_batch(**dict(arguments, run_id=source + "-regression", upper_bound="9"))
-    start_batch(second["batch_id"])
-    regression = finalize_batch(second["batch_id"], 1, "9", compare_positions=lambda left, right: int(left) - int(right))
+    second = meta.plan_batch(**dict(arguments, run_id=source + "-regression", upper_bound="9"))
+    meta.start_batch(second["batch_id"], db_connect=connect)
+    regression = meta.finalize_batch(second["batch_id"], 1, "9",
+                                     compare_positions=lambda left, right: int(left) - int(right),
+                                     db_connect=connect)
     require(regression["watermark_after"] == "10", "typed comparison prevents watermark regression from 10 to 9")
-    third = plan_batch(**dict(arguments, run_id=source + "-noop", upper_bound="10"))
-    noop = finalize_batch(third["batch_id"], 0, None)
+    third = meta.plan_batch(**dict(arguments, run_id=source + "-noop", upper_bound="10"))
+    noop = meta.finalize_batch(third["batch_id"], 0, None, db_connect=connect)
     require(noop["watermark_after"] == "10" and noop["attempt_count"] == 0, "no-op finalization requires no Spark execution")
-    stale = plan_batch(**dict(arguments, run_id=source + "-stale", upper_bound="11"))
-    competing = plan_batch(**dict(arguments, run_id=source + "-newer", upper_bound="12"))
-    start_batch(competing["batch_id"])
-    finalize_batch(competing["batch_id"], 1, "12", compare_positions=lambda left, right: int(left) - int(right))
+    stale = meta.plan_batch(**dict(arguments, run_id=source + "-stale", upper_bound="11"))
+    competing = meta.plan_batch(**dict(arguments, run_id=source + "-newer", upper_bound="12"))
+    meta.start_batch(competing["batch_id"], db_connect=connect)
+    meta.finalize_batch(competing["batch_id"], 1, "12",
+                        compare_positions=lambda left, right: int(left) - int(right), db_connect=connect)
     try:
-        finalize_batch(stale["batch_id"], 1, "11", compare_positions=lambda left, right: int(left) - int(right))
+        meta.finalize_batch(stale["batch_id"], 1, "11",
+                            compare_positions=lambda left, right: int(left) - int(right), db_connect=connect)
     except ValueError:
         print("PASS  stale revision finalization rejected")
     else:
         raise AssertionError("stale revision must not finalize")
-    require(get_batch(batch_id=competing["batch_id"])["watermark_after"] == "12", "stale failure preserves newer finalized state")
+    require(meta.get_batch(batch_id=competing["batch_id"], db_connect=connect)["watermark_after"] == "12",
+            "stale failure preserves newer finalized state")
     try:
         plan_batch(**dict(arguments, run_id=source + "-wrong-contract", incremental_column="other_position"))
     except ValueError:
@@ -89,10 +99,10 @@ def check_registry_recovery():
             )
             require(cursor.rowcount == 1, "migration state CAS updates one entity")
         connection.commit()
-        migrated = plan_batch(**dict(arguments, run_id=source + "-migrated", incremental_column="other_position", upper_bound="90000"))
+        migrated = meta.plan_batch(**dict(arguments, run_id=source + "-migrated", incremental_column="other_position", upper_bound="90000"))
         require(migrated["reason"] == "bootstrap" and migrated["watermark_before"] is None, "migrated contract reboots from null watermark")
-        start_batch(migrated["batch_id"])
-        finalized = finalize_batch(migrated["batch_id"], 1, "90000")
+        meta.start_batch(migrated["batch_id"], db_connect=connect)
+        finalized = meta.finalize_batch(migrated["batch_id"], 1, "90000", db_connect=connect)
         require(finalized["watermark_after"] == "90000", "new contract bootstrap advances independently")
         with connection.cursor() as cursor:
             cursor.execute("SELECT count(*) FROM ingestion.extraction_state_migrations WHERE source_id = %s", (source,))
