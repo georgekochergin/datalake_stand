@@ -125,6 +125,7 @@ fi
 echo "==> Подготовка изолированного дерева проекта в $TEST_WS..."
 mkdir -p "$TEST_WS/conf" "$TEST_WS/airflow" "$TEST_WS/spark" "$TEST_WS/trino"
 cp -R "$PROJECT_ROOT/ingestion" "$TEST_WS/ingestion"
+cp -R "$PROJECT_ROOT/dlh_ingestion" "$TEST_WS/dlh_ingestion"
 cp -R "$PROJECT_ROOT/conf/." "$TEST_WS/conf/"
 python3 - "$TEST_WS/conf/sydafa/sources.json" <<'PY'
 import json
