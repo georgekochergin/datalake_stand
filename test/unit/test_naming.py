@@ -1,4 +1,4 @@
-"""Unit tests for ingestion.lib.naming."""
+"""Unit tests for ingestion.generator.naming."""
 
 import sys
 import unittest
@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from ingestion.lib import naming
+from ingestion.generator import naming
 
 
 class TestResolveTargetTableName(unittest.TestCase):

@@ -5,28 +5,28 @@ from functools import partial
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 from airflow.sdk import BaseHook, BaseOperator
 
-from . import registry
-
-JDBC_TEMPLATES = {
-    "mssql": ("jdbc:sqlserver://{host}:{port};databaseName={schema};encrypt=false", 1433),
-    "oracle": ("jdbc:oracle:thin:@//{host}:{port}/{schema}", 1521),
-}
+from ingestion import meta
+from ingestion.sources.rdbms import registry as rdbms_registry
+from ingestion.sources.rdbms.contracts import ConnectionSpec
 
 
-def _resolve_jdbc(connection) -> tuple[str, str, str]:
-    """Build (jdbc_url, user, password) from an Airflow Connection with a JDBC dialect."""
-    template = JDBC_TEMPLATES.get(connection.conn_type)
-    if template is None:
-        raise ValueError(
-            f"connection {connection.conn_id!r} scheme {connection.conn_type!r} is not a "
-            f"supported JDBC dialect (expected one of {sorted(JDBC_TEMPLATES)})"
-        )
-    url_template, default_port = template
-    jdbc_url = url_template.format(
+def _meta_connect(pg_conn_id: str = "ingestion_meta"):
+    """Open a pg-meta connection through the Airflow Postgres provider."""
+    from airflow.providers.postgres.hooks.postgres import PostgresHook
+
+    return PostgresHook(postgres_conn_id=pg_conn_id).get_conn()
+
+
+def resolve_source_connection(connection) -> tuple:
+    """Build (jdbc_url, user, password) from an Airflow Connection via the dialect registry."""
+    dialect = rdbms_registry.by_conn_type(connection.conn_type)
+    jdbc_url = dialect.build_jdbc_url(ConnectionSpec(
         host=connection.host,
-        port=connection.port or default_port,
-        schema=connection.schema,
-    )
+        port=connection.port,
+        database=connection.schema,
+        user=connection.login,
+        password=connection.password,
+    ))
     return jdbc_url, connection.login, connection.password
 
 
@@ -72,13 +72,13 @@ def log_task_failed(
     process_id = _pull_process_id(context)
     if process_id is None:
         return
-    registry.log_task(
-        pg_conn_id=pg_conn_id,
+    meta.log_task(
         process_id=process_id,
         source_id=source_id,
         entity_fqn=entity_fqn,
         datalake_table=datalake_table,
         status="FAILED",
+        db_connect=partial(_meta_connect, pg_conn_id),
     )
 
 
@@ -93,25 +93,27 @@ class GenerateProcessIdOperator(BaseOperator):
     def execute(self, context):
         dag_run = context["dag_run"]
         validate_run_conf(dag_run.conf, self.entities)
-        return registry.get_or_create_process_id(
-            self.pg_conn_id, dag_id=dag_run.dag_id, run_id=dag_run.run_id,
-            execution_date=dag_run.logical_date
+        return meta.get_or_create_process_id(
+            dag_id=dag_run.dag_id, run_id=dag_run.run_id,
+            execution_date=dag_run.logical_date,
+            db_connect=partial(_meta_connect, self.pg_conn_id),
         )
 
 
 def _dagrun_event(status: str, context) -> None:
     """Append a dagrun END/FAILED event for the run's allocated process_id."""
     dag_run = context["dag_run"]
-    process_id = registry.find_process_id("ingestion_meta", dag_run.dag_id, dag_run.run_id)
+    connect = partial(_meta_connect, "ingestion_meta")
+    process_id = meta.find_process_id(dag_run.dag_id, dag_run.run_id, db_connect=connect)
     if process_id is None:
         return
-    registry.log_dagrun(
-        pg_conn_id="ingestion_meta",
+    meta.log_dagrun(
         process_id=process_id,
         dag_id=dag_run.dag_id,
         run_id=dag_run.run_id,
         execution_date=None,
         status=status,
+        db_connect=connect,
     )
 
 
@@ -150,13 +152,13 @@ class TableLogOperator(BaseOperator):
 
     def execute(self, context):
         process_id = _validate_process_id(self.process_id)
-        registry.log_task(
-            pg_conn_id=self.pg_conn_id,
+        meta.log_task(
             process_id=process_id,
             source_id=self.source_id,
             entity_fqn=self.entity_fqn,
             datalake_table=self.datalake_table,
             status=self.status,
+            db_connect=partial(_meta_connect, self.pg_conn_id),
         )
 
 
@@ -190,7 +192,7 @@ class IngestAppendOperator(SparkSubmitOperator):
         if type(num_partitions) is not int or num_partitions <= 0:
             raise ValueError("num_partitions must be a positive integer")
         super().__init__(
-            application="/opt/spark-jobs/raw/load_entity.py",
+            application="/opt/spark-jobs/raw/rdbms/load_entity.py",
             conn_id="spark_default",
             deploy_mode="client",
             **kwargs,
@@ -220,7 +222,7 @@ class IngestAppendOperator(SparkSubmitOperator):
         if self.source_type != "rdbms":
             raise ValueError(f"source_type {self.source_type!r} is not supported by JDBC ingestion")
         connection = BaseHook.get_connection(self.airflow_conn_id)
-        jdbc_url, jdbc_user, jdbc_password = _resolve_jdbc(connection)
+        jdbc_url, jdbc_user, jdbc_password = resolve_source_connection(connection)
         process_id = _pull_process_id(context)
         if process_id is None:
             raise ValueError("missing process_id from generate_process_id")

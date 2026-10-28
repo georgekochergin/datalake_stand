@@ -1,23 +1,20 @@
 """Exercise raw Iceberg schema evolution using the actual loader DDL helper."""
 
-import importlib.util
-
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
+
+from ingestion import iceberg
 
 
 def main():
     """Check add/drop/rename/type-change against the isolated raw catalog."""
-    spec = importlib.util.spec_from_file_location("load_entity", "/opt/spark-jobs/raw/load_entity.py")
-    loader = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(loader)
     spark = SparkSession.builder.appName("raw-schema-evolution-contract").getOrCreate()
     target = "raw.e2e_contract.schema_evolution"
     try:
         spark.sql("CREATE NAMESPACE IF NOT EXISTS raw.e2e_contract")
         spark.sql(f"DROP TABLE IF EXISTS {target}")
         first = spark.sql("SELECT CAST(1 AS INT) AS id, 'initial' AS label")
-        spark.sql(loader.build_create_table_sql(target, loader._schema_columns(first.schema)))
+        spark.sql(iceberg.build_create_table_sql(target, iceberg.schema_columns(first.schema)))
 
         def append(frame, process_id):
             tagged = frame.withColumn("__load_dttm", F.current_timestamp()).withColumn(

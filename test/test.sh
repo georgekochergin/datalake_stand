@@ -58,7 +58,7 @@ fi
 
 # ==================== ШАГ 2 (verify): Запуск на работающем стенде ====================
 run_runtime_checks() {
-  if [ ! -f "$TEST_WS/spark/e2e_schema_evolution.py" ] || [ ! -f "$TEST_WS/spark/e2e_temporal_extraction.py" ]; then
+  if [ ! -f "$TEST_WS/ingestion/spark/e2e_schema_evolution.py" ] || [ ! -f "$TEST_WS/ingestion/spark/e2e_temporal_extraction.py" ]; then
     echo "FAIL: Отсутствуют workspace Spark e2e apps; сначала выполните полный запуск."
     return 1
   fi
@@ -114,8 +114,8 @@ trap 'exit 143' TERM HUP
 
 cleanup
 
-echo "==> Генерация DAG-ов ингестии (ingestion/generate_dags.py)..."
-python3 ingestion/generate_dags.py
+echo "==> Генерация DAG-ов ингестии (python -m ingestion.generator.generate_dags)..."
+python3 -m ingestion.generator.generate_dags
 gen_rc=$?
 if [ "$gen_rc" -ne 0 ]; then
   echo "FAIL: Генерация DAG-ов завершилась с ошибкой."
@@ -123,7 +123,7 @@ if [ "$gen_rc" -ne 0 ]; then
 fi
 
 echo "==> Подготовка изолированного дерева проекта в $TEST_WS..."
-mkdir -p "$TEST_WS/conf" "$TEST_WS/airflow" "$TEST_WS/spark" "$TEST_WS/trino"
+mkdir -p "$TEST_WS/conf" "$TEST_WS/airflow" "$TEST_WS/trino"
 cp -R "$PROJECT_ROOT/ingestion" "$TEST_WS/ingestion"
 cp -R "$PROJECT_ROOT/conf/." "$TEST_WS/conf/"
 python3 - "$TEST_WS/conf/sydafa/sources.json" <<'PY'
@@ -139,11 +139,8 @@ path.write_text(json.dumps(manifest, indent=2))
 PY
 cp -R "$PROJECT_ROOT/airflow/." "$TEST_WS/airflow/"
 cp "$PROJECT_ROOT/test/check_extraction.py" "$TEST_WS/airflow/plugins/e2e_check_extraction.py"
-if [ -d "$PROJECT_ROOT/spark" ]; then
-  cp -R "$PROJECT_ROOT/spark/." "$TEST_WS/spark/"
-fi
-cp "$PROJECT_ROOT/test/schema_evolution.py" "$TEST_WS/spark/e2e_schema_evolution.py"
-cp "$PROJECT_ROOT/test/temporal_extraction.py" "$TEST_WS/spark/e2e_temporal_extraction.py"
+cp "$PROJECT_ROOT/test/schema_evolution.py" "$TEST_WS/ingestion/spark/e2e_schema_evolution.py"
+cp "$PROJECT_ROOT/test/temporal_extraction.py" "$TEST_WS/ingestion/spark/e2e_temporal_extraction.py"
 if [ -d "$PROJECT_ROOT/trino" ]; then
   cp -R "$PROJECT_ROOT/trino/." "$TEST_WS/trino/"
 fi

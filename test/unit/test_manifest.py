@@ -1,4 +1,4 @@
-"""Unit tests for ingestion.lib.manifest."""
+"""Unit tests for ingestion.generator.manifest."""
 
 import sys
 import tempfile
@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from ingestion.lib import manifest
+from ingestion.generator import manifest
 
 try:
     import yaml
@@ -259,8 +259,8 @@ class TestValidatePipeline(unittest.TestCase):
     @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
     def test_real_repo_manifests_are_valid(self):
         repo_root = Path(__file__).resolve().parents[2]
-        sources = manifest.load_sources(repo_root / "ingestion" / "sources.yaml")
-        paths = sorted((repo_root / "ingestion" / "pipelines").rglob("*.yaml"))
+        sources = manifest.load_sources(repo_root / "ingestion" / "conf" / "sources.yaml")
+        paths = sorted((repo_root / "ingestion" / "conf" / "pipelines").rglob("*.yaml"))
         self.assertEqual(len(paths), 4)
         for pipeline_path in paths:
             pipeline = manifest.load_pipeline(pipeline_path)

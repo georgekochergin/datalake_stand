@@ -133,7 +133,7 @@ services:
       AWS_ACCESS_KEY_ID: ${STAND_USER}
       AWS_SECRET_ACCESS_KEY: ${STAND_PASSWORD}
       AWS_REGION: us-east-1
-    volumes: ["./spark:/opt/spark-jobs:ro"]
+    volumes: ["./ingestion/spark:/opt/spark-jobs:ro"]
     depends_on:
       nessie: {condition: service_started}
       silo-init: {condition: service_completed_successfully}
@@ -145,7 +145,7 @@ services:
     entrypoint: ["/bin/bash", "-c"]
     command: ["exec /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077 --webui-port 8081"]
     environment: *spark-env
-    volumes: ["./spark:/opt/spark-jobs:ro"]
+    volumes: ["./ingestion/spark:/opt/spark-jobs:ro"]
     ports: ["8081:8081"]
     depends_on: [spark-master]
     networks: [dlh-poc]
@@ -229,6 +229,7 @@ services:
         airflow pools set ingest_loads 4 'Raw-layer ingestion load tasks (shared across ingest DAGs)'
     environment: &airflow-env
       <<: *spark-env
+      PYTHONPATH: /opt/python
       STAND_USER: ${STAND_USER}
       STAND_PASSWORD: ${STAND_PASSWORD}
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${STAND_USER}:${STAND_PASSWORD}@airflow-postgres:5432/airflow
@@ -259,7 +260,8 @@ services:
     volumes:
       - ./airflow:/opt/airflow/dags
       - ./airflow/plugins:/opt/airflow/plugins:ro
-      - ./spark:/opt/spark-jobs:ro
+      - ./ingestion:/opt/python/ingestion:ro
+      - ./ingestion/spark:/opt/spark-jobs:ro
       - ./trino:/opt/airflow/sql:ro
       - airflow_logs:/opt/airflow/logs
     depends_on:
@@ -276,6 +278,7 @@ services:
     volumes:
       - ./airflow:/opt/airflow/dags
       - ./airflow/plugins:/opt/airflow/plugins:ro
+      - ./ingestion:/opt/python/ingestion:ro
       - airflow_logs:/opt/airflow/logs
     depends_on:
       airflow-init:
@@ -292,6 +295,7 @@ services:
     volumes:
       - ./airflow:/opt/airflow/dags
       - ./airflow/plugins:/opt/airflow/plugins:ro
+      - ./ingestion:/opt/python/ingestion:ro
       - airflow_logs:/opt/airflow/logs
     depends_on:
       airflow-init:

@@ -1,4 +1,9 @@
-"""Lossless typed extraction positions and source SQL codecs, without Spark."""
+"""Canonical typed extraction positions and lookback arithmetic, without Spark.
+
+Positions are the persisted pg-meta contract: a plain string that preserves
+the exact source value of an incremental column at its declared precision,
+independent of any particular database or execution engine.
+"""
 
 import re
 from datetime import date, datetime
@@ -20,7 +25,7 @@ _RANGES = {
 }
 
 
-def _kind(kind):
+def kind_info(kind):
     """Return family, fractional precision, and signed numeric bounds."""
     if not isinstance(kind, str):
         raise ValueError("Position kind must be a string")
@@ -38,19 +43,9 @@ def _kind(kind):
     raise ValueError(f"Unsupported position kind: {kind!r}")
 
 
-def _dialect(jdbc_url):
-    """Restrict SQL rendering and metadata interpretation to known sources."""
-    if isinstance(jdbc_url, str):
-        if jdbc_url.startswith("jdbc:sqlserver:"):
-            return "mssql"
-        if jdbc_url.startswith("jdbc:oracle:"):
-            return "oracle"
-    raise ValueError("Unsupported JDBC dialect")
-
-
 def _parse(value, kind):
     """Parse into integer values, ordinal days, or ordinal nanoseconds."""
-    family, precision, bounds = _kind(kind)
+    family, precision, bounds = kind_info(kind)
     if value is None:
         return None
     if isinstance(value, bool):
@@ -111,7 +106,7 @@ def _format(value, kind):
     """Render a parsed position at exactly the declared precision."""
     if value is None:
         return None
-    family, precision, _ = _kind(kind)
+    family, precision, _ = kind_info(kind)
     if family == "integral":
         return str(value)
     if family == "date":
@@ -137,7 +132,7 @@ def lower_bound(watermark, kind, size=0, unit=None, specified=False):
     specified marks a configured lookback: temporal kinds then require a unit
     even at size 0, matching manifest validation that cannot know the type.
     """
-    family, _, bounds = _kind(kind)
+    family, _, bounds = kind_info(kind)
     if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= 10**38 - 1:
         raise ValueError("Lookback size must be an integer in 0..10^38-1")
     if family == "integral":
@@ -163,57 +158,3 @@ def maximum(previous, observed, kind):
     values = [_parse(value, kind) for value in (previous, observed)]
     values = [value for value in values if value is not None]
     return _format(max(values) if values else None, kind)
-
-
-def literal(value, kind, jdbc_url):
-    """Render a validated source SQL expression without implicit temporal casts."""
-    dialect = _dialect(jdbc_url)
-    family, precision, _ = _kind(kind)
-    text = canonical(value, kind)
-    if text is None:
-        return "NULL"
-    if family == "integral":
-        return text
-    if dialect == "mssql":
-        if family != "date" and precision > 7:
-            raise ValueError("MSSQL timestamp precision cannot exceed 7")
-        target = "date" if family == "date" else f"{'datetimeoffset' if family == 'instant' else 'datetime2'}({precision})"
-        return f"CAST('{text}' AS {target})"
-    if family == "date":
-        return f"TO_DATE('{text}', 'YYYY-MM-DD')"
-    mask = 'YYYY-MM-DD"T"HH24:MI:SS' + (f".FF{precision}" if precision else "")
-    if family == "instant":
-        return f"TO_TIMESTAMP_TZ('{text[:-1]}+00:00', '{mask}TZH:TZM')"
-    return f"TO_TIMESTAMP('{text}', '{mask}')"
-
-
-def jdbc_kind(type_name, precision, scale, jdbc_url):
-    """Map JDBC source type metadata to the persisted position contract."""
-    dialect = _dialect(jdbc_url)
-    if not isinstance(type_name, str):
-        raise ValueError("JDBC type name must be a string")
-    name = " ".join(type_name.upper().split())
-    if name in ("SMALLINT", "INT", "INTEGER", "BIGINT"):
-        return {"INT": "integer", "INTEGER": "integer"}.get(name, name.lower())
-    if name in ("DECIMAL", "NUMERIC", "NUMBER"):
-        if isinstance(precision, bool) or not isinstance(precision, int) or not 1 <= precision <= 38 or isinstance(scale, bool) or scale != 0:
-            raise ValueError("Only decimal(p,0), 1 <= p <= 38, is supported")
-        return f"decimal({precision},0)"
-    if name == "DATE":
-        return "date" if dialect == "mssql" else "timestamp_local(0)"
-    if dialect == "mssql":
-        if name in ("DATETIME", "SMALLDATETIME"):
-            return f"timestamp_local({3 if name == 'DATETIME' else 0})"
-        if name not in ("DATETIME2", "DATETIMEOFFSET"):
-            raise ValueError(f"Unsupported MSSQL position type: {name}")
-        family = "instant" if name == "DATETIMEOFFSET" else "local"
-        fractional, limit = scale, 7
-    else:
-        match = re.fullmatch(r"TIMESTAMP(?:\(([0-9])\))?( WITH (?:LOCAL )?TIME ZONE)?", name)
-        if not match:
-            raise ValueError(f"Unsupported Oracle position type: {name}")
-        family = "instant" if match[2] else "local"
-        fractional, limit = int(match[1]) if match[1] is not None else scale, 9
-    if isinstance(fractional, bool) or not isinstance(fractional, int) or not 0 <= fractional <= limit:
-        raise ValueError("Unsupported JDBC timestamp fractional precision")
-    return f"timestamp_{family}({fractional})"

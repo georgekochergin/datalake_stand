@@ -7,8 +7,8 @@ from pathlib import Path
 
 import yaml
 
-from ingestion.generate_dags import generate_all, main
-from ingestion.lib.manifest import SourceConfig, load_pipeline, load_settings
+from ingestion.generator.generate_dags import generate_all, main
+from ingestion.generator.manifest import SourceConfig, load_pipeline, load_settings
 
 
 class TestConfiguration(unittest.TestCase):

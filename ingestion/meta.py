@@ -1,19 +1,17 @@
-"""Transactional extraction registry, importable by Airflow and Spark."""
+"""Transactional extraction metadata client shared by Airflow and the Spark driver.
+
+Pure DB-API code: callers inject db_connect, so the module imports neither
+Airflow nor any database driver. Connections are owned per call: one short
+transaction, commit or rollback, then close.
+"""
 
 from contextlib import contextmanager
 
 
-def _hook(pg_conn_id):
-    """Load Airflow only when its connection management is needed."""
-    from airflow.providers.postgres.hooks.postgres import PostgresHook
-
-    return PostgresHook(postgres_conn_id=pg_conn_id)
-
-
 @contextmanager
-def connection(pg_conn_id="ingestion_meta", db_connect=None):
+def connection(db_connect):
     """Own a short DB-API transaction and close its connection."""
-    conn = db_connect() if db_connect is not None else _hook(pg_conn_id).get_conn()
+    conn = db_connect()
     try:
         conn.autocommit = False
         yield conn
@@ -31,17 +29,16 @@ def _row(cursor):
     return dict(zip((column[0] for column in cursor.description), row)) if row is not None else None
 
 
-def next_process_id(pg_conn_id="ingestion_meta", *, db_connect=None):
+def next_process_id(*, db_connect):
     """Allocate an identifier for legacy callers."""
-    with connection(pg_conn_id, db_connect) as conn, conn.cursor() as cur:
+    with connection(db_connect) as conn, conn.cursor() as cur:
         cur.execute("SELECT nextval('ingestion.process_id_seq')")
         return int(cur.fetchone()[0])
 
 
-def get_or_create_process_id(pg_conn_id="ingestion_meta", dag_id=None, run_id=None,
-                             execution_date=None, *, db_connect=None):
+def get_or_create_process_id(dag_id=None, run_id=None, execution_date=None, *, db_connect):
     """Allocate one process and start event per DagRun, including concurrent retries."""
-    with connection(pg_conn_id, db_connect) as conn, conn.cursor() as cur:
+    with connection(db_connect) as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO ingestion.airflow_dagruns_log "
             "(process_id, dag_id, run_id, execution_date, status) "
@@ -53,9 +50,9 @@ def get_or_create_process_id(pg_conn_id="ingestion_meta", dag_id=None, run_id=No
         return int(cur.fetchone()[0])
 
 
-def log_dagrun(pg_conn_id, process_id, dag_id, run_id, execution_date, status):
+def log_dagrun(process_id, dag_id, run_id, execution_date, status, *, db_connect):
     """Append a DagRun lifecycle event, ignoring duplicate start events."""
-    with connection(pg_conn_id) as conn, conn.cursor() as cur:
+    with connection(db_connect) as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO ingestion.airflow_dagruns_log "
             "(process_id, dag_id, run_id, execution_date, status) "
@@ -64,9 +61,9 @@ def log_dagrun(pg_conn_id, process_id, dag_id, run_id, execution_date, status):
         )
 
 
-def log_task(pg_conn_id, process_id, source_id, entity_fqn, datalake_table, status):
+def log_task(process_id, source_id, entity_fqn, datalake_table, status, *, db_connect):
     """Append a task lifecycle event."""
-    with connection(pg_conn_id) as conn, conn.cursor() as cur:
+    with connection(db_connect) as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO ingestion.airflow_tasks_log "
             "(process_id, source_id, entity_fqn, datalake_table, status) "
@@ -75,9 +72,9 @@ def log_task(pg_conn_id, process_id, source_id, entity_fqn, datalake_table, stat
         )
 
 
-def find_process_id(pg_conn_id, dag_id, run_id, *, db_connect=None):
+def find_process_id(dag_id, run_id, *, db_connect):
     """Find an identifier already assigned to a DagRun."""
-    with connection(pg_conn_id, db_connect) as conn, conn.cursor() as cur:
+    with connection(db_connect) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT max(process_id) FROM ingestion.airflow_dagruns_log "
             "WHERE dag_id = %s AND run_id = %s", (dag_id, run_id),
@@ -130,10 +127,9 @@ def _lock_batch(cur, batch_id):
     return state, batch
 
 
-def get_batch(pg_conn_id="ingestion_meta", *, dag_id=None, run_id=None,
-              source_id=None, entity_fqn=None, batch_id=None, db_connect=None):
+def get_batch(*, dag_id=None, run_id=None, source_id=None, entity_fqn=None, batch_id=None, db_connect):
     """Return a revision-validated persisted batch before accessing the source."""
-    with connection(pg_conn_id, db_connect) as conn, conn.cursor() as cur:
+    with connection(db_connect) as conn, conn.cursor() as cur:
         if batch_id is None:
             cur.execute(
                 "SELECT batch_id FROM ingestion.extraction_batches "
@@ -147,11 +143,11 @@ def get_batch(pg_conn_id="ingestion_meta", *, dag_id=None, run_id=None,
         return _lock_batch(cur, batch_id)[1]
 
 
-def plan_batch(pg_conn_id="ingestion_meta", *, process_id, dag_id, run_id, source_id,
+def plan_batch(*, process_id, dag_id, run_id, source_id,
                entity_fqn, target_table, incremental_column, incremental_type,
                upper_bound, empty_at_plan, force_full=False, lookback_size=0,
                lookback_unit=None, reason_text=None, calculate_lower=None,
-               compare_positions=None, db_connect=None):
+               compare_positions=None, db_connect):
     """Persist fixed bounds once and return the original batch on retry.
 
     calculate_lower(watermark) returns a typed canonical lower bound or None
@@ -164,7 +160,7 @@ def plan_batch(pg_conn_id="ingestion_meta", *, process_id, dag_id, run_id, sourc
     if force_full and (not isinstance(reason_text, str) or not reason_text.strip()):
         raise ValueError("Manual full snapshot requires reason_text")
     configured_mode = "incremental" if incremental_column is not None else "full_snapshot"
-    with connection(pg_conn_id, db_connect) as conn, conn.cursor() as cur:
+    with connection(db_connect) as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO ingestion.extraction_state "
             "(source_id, entity_fqn, configured_mode, incremental_column, incremental_type) "
@@ -213,9 +209,9 @@ def plan_batch(pg_conn_id="ingestion_meta", *, process_id, dag_id, run_id, sourc
         return _row(cur)
 
 
-def start_batch(batch_id, pg_conn_id="ingestion_meta", *, db_connect=None):
+def start_batch(batch_id, *, db_connect):
     """Start an attempt after the caller has ensured no live executor remains."""
-    with connection(pg_conn_id, db_connect) as conn, conn.cursor() as cur:
+    with connection(db_connect) as conn, conn.cursor() as cur:
         _, batch = _lock_batch(cur, batch_id)
         if batch["status"] == "SUCCEEDED":
             return batch
@@ -230,8 +226,8 @@ def start_batch(batch_id, pg_conn_id="ingestion_meta", *, db_connect=None):
 _UNSET = object()
 
 
-def finalize_batch(batch_id, row_count, observed_max, pg_conn_id="ingestion_meta", *,
-                   compare_positions=None, watermark_after=_UNSET, db_connect=None):
+def finalize_batch(batch_id, row_count, observed_max, *, compare_positions=None,
+                   watermark_after=_UNSET, db_connect):
     """Atomically finish a batch and CAS the state revision.
 
     compare_positions(left, right) returns a negative/zero/positive typed
@@ -240,7 +236,7 @@ def finalize_batch(batch_id, row_count, observed_max, pg_conn_id="ingestion_meta
     """
     if type(row_count) is not int or row_count < 0:
         raise ValueError("row_count must be a nonnegative integer")
-    with connection(pg_conn_id, db_connect) as conn, conn.cursor() as cur:
+    with connection(db_connect) as conn, conn.cursor() as cur:
         state, batch = _lock_batch(cur, batch_id)
         if batch["status"] == "SUCCEEDED":
             return batch
@@ -276,9 +272,9 @@ def finalize_batch(batch_id, row_count, observed_max, pg_conn_id="ingestion_meta
         return _row(cur)
 
 
-def fail_batch(batch_id, error, pg_conn_id="ingestion_meta", *, db_connect=None):
+def fail_batch(batch_id, error, *, db_connect):
     """Record a caller-sanitized failure without changing extraction state."""
-    with connection(pg_conn_id, db_connect) as conn, conn.cursor() as cur:
+    with connection(db_connect) as conn, conn.cursor() as cur:
         _, batch = _lock_batch(cur, batch_id)
         if batch["status"] == "SUCCEEDED":
             return batch

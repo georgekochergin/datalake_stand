@@ -23,6 +23,8 @@ class FakeOperator:
 
 def load_operators():
     """Import under a private package and restore every mocked module afterwards."""
+    import ingestion.sources
+
     modules = {}
     for name in (
         "airflow", "airflow.providers", "airflow.providers.apache", "airflow.providers.apache.spark",
@@ -33,8 +35,11 @@ def load_operators():
     modules["airflow.sdk"].BaseHook = MagicMock()
     modules["airflow.sdk"].BaseOperator = FakeOperator
     modules["airflow.providers.apache.spark.operators.spark_submit"].SparkSubmitOperator = FakeOperator
-    modules["_operator_test_ingestion"].registry = MagicMock()
-    path = Path(__file__).resolve().parents[2] / "airflow/plugins/ingestion/operators.py"
+    modules["ingestion"] = types.ModuleType("ingestion")
+    modules["ingestion"].meta = MagicMock()
+    modules["ingestion"].sources = ingestion.sources
+    modules["ingestion.meta"] = modules["ingestion"].meta
+    path = Path(__file__).resolve().parents[2] / "ingestion" / "operators.py"
     spec = importlib.util.spec_from_file_location("_operator_test_ingestion.operators", path)
     module = importlib.util.module_from_spec(spec)
     with patch.dict(sys.modules, modules):
@@ -70,8 +75,9 @@ class TestIngestOperator(unittest.TestCase):
         self.assertEqual(args[args.index("--num-partitions") + 1], "4")
         self.assertNotIn("--no-parallelism", args)
         self.assertEqual(operator.source_type, "rdbms")
-        self.assertEqual(operator.application, "/opt/spark-jobs/raw/load_entity.py")
+        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/load_entity.py")
         self.assertEqual(operator.deploy_mode, "client")
+        self.assertIn("jdbc:sqlserver://host:1433;databaseName=db;encrypt=false", args)
         operator = self.operator(parallelism=False, num_partitions=7, incremental_column="_batch_id", lookback_size=5)
         operator.execute(self.context)
         self.assertIn("--no-parallelism", operator.application_args)
@@ -79,7 +85,7 @@ class TestIngestOperator(unittest.TestCase):
         self.assertIn("--lookback-size", operator.application_args)
         self.assertEqual(operator.application_args[operator.application_args.index("--lookback-size") + 1], "5")
         self.assertNotIn("--watermark-value", operator.application_args)
-        self.module.registry.get_watermark.assert_not_called()
+        self.module.meta.get_watermark.assert_not_called()
         self.assertEqual(operator.application_args[operator.application_args.index("--num-partitions") + 1], "7")
 
     def test_oracle_connection(self):
@@ -147,7 +153,7 @@ class TestIngestOperator(unittest.TestCase):
 
     def test_same_pid_across_loads_retries_and_different_runs(self):
         generate = self.module.GenerateProcessIdOperator()
-        self.module.registry.get_or_create_process_id.side_effect = lambda pg, **kw: {"run_a": 101, "run_b": 102}[kw["run_id"]]
+        self.module.meta.get_or_create_process_id.side_effect = lambda **kw: {"run_a": 101, "run_b": 102}[kw["run_id"]]
         ids = []
         for run_id in ("run_a", "run_b"):
             dag_run = types.SimpleNamespace(dag_id="dag", run_id=run_id, logical_date="date", conf={})
@@ -161,10 +167,10 @@ class TestIngestOperator(unittest.TestCase):
                     args = operator.application_args
                     self.assertEqual(args[args.index("--process-id") + 1], str(process_id))
         self.assertEqual(ids, [101, 102])
-        self.assertEqual([call.kwargs["run_id"] for call in self.module.registry.get_or_create_process_id.call_args_list], [
+        self.assertEqual([call.kwargs["run_id"] for call in self.module.meta.get_or_create_process_id.call_args_list], [
             "run_a", "run_a", "run_b", "run_b"
         ])
-        self.module.registry.next_process_id.assert_not_called()
+        self.module.meta.next_process_id.assert_not_called()
 
 
 class TestRunConfValidation(unittest.TestCase):
@@ -183,11 +189,14 @@ class TestRunConfValidation(unittest.TestCase):
         for conf in (None, {}, {"force_full_snapshot_fqns": []}, {"reason": "scheduled"},
                      {"force_full_snapshot_fqns": ["s.t", "s.other"], "reason": "repair"}):
             with self.subTest(conf=conf):
-                self.module.registry.get_or_create_process_id.reset_mock()
-                self.module.registry.get_or_create_process_id.return_value = 42
+                self.module.meta.get_or_create_process_id.reset_mock()
+                self.module.meta.get_or_create_process_id.return_value = 42
                 self.assertEqual(self.execute(conf), 42)
-                self.module.registry.get_or_create_process_id.assert_called_once_with(
-                    "ingestion_meta", dag_id="dag", run_id="run", execution_date="date")
+                call = self.module.meta.get_or_create_process_id.call_args
+                self.assertEqual(
+                    (call.kwargs["dag_id"], call.kwargs["run_id"], call.kwargs["execution_date"]),
+                    ("dag", "run", "date"),
+                )
 
     def test_invalid_conf_never_allocates_process_id(self):
         for conf in (
@@ -202,7 +211,7 @@ class TestRunConfValidation(unittest.TestCase):
         ):
             with self.subTest(conf=conf), self.assertRaises(ValueError):
                 self.execute(conf)
-            self.module.registry.get_or_create_process_id.assert_not_called()
+            self.module.meta.get_or_create_process_id.assert_not_called()
 
 
 class TestTableLogOperator(unittest.TestCase):
@@ -211,7 +220,7 @@ class TestTableLogOperator(unittest.TestCase):
     def setUp(self):
         self.module = load_operators()
         self.events = []
-        self.module.registry.log_task.side_effect = lambda **kwargs: self.events.append(kwargs["status"])
+        self.module.meta.log_task.side_effect = lambda **kwargs: self.events.append(kwargs["status"])
 
     def operator(self, **kwargs):
         return self.module.TableLogOperator(
@@ -222,16 +231,17 @@ class TestTableLogOperator(unittest.TestCase):
     def test_end_only_logs_lifecycle(self):
         self.operator(status="END").execute({})
         self.assertEqual(self.events, ["END"])
-        self.module.registry.log_task.assert_called_once_with(
-            pg_conn_id="ingestion_meta", process_id=42, source_id="bank", entity_fqn="s.t",
-            datalake_table="raw.bank.s__t", status="END",
-        )
-        self.module.registry.get_watermark.assert_not_called()
-        self.module.registry.set_watermark.assert_not_called()
-        self.module.registry.plan_batch.assert_not_called()
-        self.module.registry.start_batch.assert_not_called()
-        self.module.registry.finalize_batch.assert_not_called()
-        self.module.registry.fail_batch.assert_not_called()
+        kwargs = self.module.meta.log_task.call_args.kwargs
+        self.assertEqual({key: value for key, value in kwargs.items() if key != "db_connect"}, {
+            "process_id": 42, "source_id": "bank", "entity_fqn": "s.t",
+            "datalake_table": "raw.bank.s__t", "status": "END",
+        })
+        self.module.meta.get_watermark.assert_not_called()
+        self.module.meta.set_watermark.assert_not_called()
+        self.module.meta.plan_batch.assert_not_called()
+        self.module.meta.start_batch.assert_not_called()
+        self.module.meta.finalize_batch.assert_not_called()
+        self.module.meta.fail_batch.assert_not_called()
 
     def test_logging_interface_has_no_extraction_parameters(self):
         import inspect
@@ -241,15 +251,15 @@ class TestTableLogOperator(unittest.TestCase):
         self.assertNotIn("trino_conn_id", parameters)
 
     def test_log_failure_is_propagated(self):
-        self.module.registry.log_task.side_effect = RuntimeError("log failed")
+        self.module.meta.log_task.side_effect = RuntimeError("log failed")
         with self.assertRaisesRegex(RuntimeError, "log failed"):
             self.operator(status="END").execute({})
 
     def test_start_and_snapshot_end_do_not_query_watermark(self):
         self.operator(status="START").execute({})
         self.operator(status="END").execute({})
-        self.module.registry.get_watermark.assert_not_called()
-        self.module.registry.set_watermark.assert_not_called()
+        self.module.meta.get_watermark.assert_not_called()
+        self.module.meta.set_watermark.assert_not_called()
         self.assertEqual(self.events, ["START", "END"])
 
     def test_invalid_pid_fails_cleanly(self):

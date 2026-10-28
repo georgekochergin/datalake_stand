@@ -4,7 +4,7 @@ import ast
 import unittest
 from pathlib import Path
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[2] / "airflow" / "plugins" / "ingestion"
+PLUGIN_ROOT = Path(__file__).resolve().parents[2] / "airflow" / "plugins"
 
 
 class TestPluginSyntax(unittest.TestCase):

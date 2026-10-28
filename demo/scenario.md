@@ -27,13 +27,13 @@ Trino/pg-meta → партиции в silo → устойчивость к эв�
    ```bash
    python3 -m venv .venv
    source .venv/bin/activate
-   python -m pip install -r ingestion/requirements.txt
+   python -m pip install -r ingestion/generator/requirements.txt
    ```
 
    Окружение называется `.venv`; оставьте его активным для команд шага 3.
    В новом терминале активируйте его снова: `source .venv/bin/activate`.
-   Файл `ingestion/requirements.txt` содержит внешние зависимости
-   `ingestion/generate_dags.py` и используемых им модулей; при изменении
+   Файл `ingestion/generator/requirements.txt` содержит внешние зависимости
+   генератора и используемых им модулей; при изменении
    зависимостей генератора обновляйте этот файл. Airflow и Spark для
    генерации DAG-ов на хосте не требуются.
 
@@ -152,7 +152,7 @@ SELECT * FROM "trading_core"."clients" ORDER BY "client_id" DESC FETCH FIRST 10 
 ## Шаг 3. Генерация DAG-ов загрузки (имитация CI/CD) и запуск
 
 DAG-и загрузки не пишутся руками — генерируются из YAML-манифестов
-(`ingestion/pipelines/`). В production это делает CI; здесь — одна команда.
+(`ingestion/conf/pipelines/`). В production это делает CI; здесь — одна команда.
 Чтобы показать генерацию «вживую», начните с чистого состояния.
 
 1. Терминал (из корня репозитория) — удалить сгенерированные DAG-и:
@@ -172,9 +172,9 @@ rm airflow/dags/generated/ingest__*.py
 3. Сгенерировать DAG-и заново:
 
 ```bash
-python3 ingestion/generate_dags.py
+python3 -m ingestion.generator.generate_dags
 ls -la airflow/dags/generated/
-python3 ingestion/generate_dags.py --check
+python3 -m ingestion.generator.generate_dags --check
 ```
 
 4. Показать сгенерированные файлы: `ingest__rdbms__bank__main.py`,
@@ -193,8 +193,8 @@ python3 ingestion/generate_dags.py --check
 **Параллелизм JDBC и пулы Airflow.** Где показать настройку четырёх
 JDBC-партиций для transactions и отключение параллельного чтения для остальных:
 
-1. **Конфигурация** (до запуска): `ingestion/settings.yaml` —
-   `spark.jdbc.num_partitions: 4`; `ingestion/pipelines/bank/main.yaml` — у
+1. **Конфигурация** (до запуска): `ingestion/conf/settings.yaml` —
+   `spark.jdbc.num_partitions: 4`; `ingestion/conf/pipelines/bank/main.yaml` — у
    `transactions` нет `spark.parallelism: false` (параллельное чтение
    разрешено, колонка нарезки — `_batch_id`), у `deals` и всех таблиц `refs`
    — `spark.parallelism: false` (один поток).

@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """Exercise temporal managed extraction against real JDBC sources and Iceberg."""
 
+import importlib.util
 import os
-import sys
 from argparse import Namespace
 from uuid import uuid4
 from unittest.mock import patch
 
-sys.path[:0] = ["/opt/airflow/plugins", "/opt/spark-jobs/raw"]
+
+def load_module(name, path):
+    """Load a runtime module explicitly by file path, without sys.path changes."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def require(condition, message):
@@ -35,15 +41,19 @@ def metadata_row(hook, table, source_id, entity_fqn):
 
 def source_count(spark, args, lower, upper, kind):
     """Count the exact source predicate without Spark temporal conversion."""
-    import extraction
-    import load_entity
+    load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
+    from ingestion.sources.rdbms import positions
+    from ingestion.sources.rdbms import registry as dialects
 
-    column = load_entity.sql_reference(args.jdbc_url, args.incremental_column)
+    dialect = dialects.by_jdbc_url(args.jdbc_url)
+    column = dialect.quote_identifier(args.incremental_column)
     predicates = []
     for value, operator in ((lower, ">"), (upper, "<=")):
         if value is not None:
-            predicates.append(f"{column} {operator} {extraction.literal(value, kind, args.jdbc_url)}")
-    query = f"SELECT COUNT(*) FROM {load_entity.sql_source_table(args.jdbc_url, args.source_table, allow_expression=True)}"
+            predicates.append(
+                f"{column} {operator} {dialect.position_literal(positions.canonical(value, kind), kind)}"
+            )
+    query = f"SELECT COUNT(*) FROM {load_entity.render_source_table(dialect, args.source_table, allow_expression=True)}"
     if predicates:
         query += " WHERE " + " AND ".join(predicates)
     connection = spark._jvm.java.sql.DriverManager.getConnection(
@@ -67,9 +77,9 @@ def source_count(spark, args, lower, upper, kind):
 def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, token,
              expected_upper=None):
     """Verify bootstrap, overlap, manual-full, empty resume, and successful retry."""
-    import extraction
-    import load_entity
-    from ingestion import registry
+    load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
+    from ingestion import meta
+    from ingestion.sources.rdbms import positions
 
     args = Namespace(
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
@@ -97,13 +107,14 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
     watermark = None
     for revision, phase in enumerate(("bootstrap", "lookback", "forcefull", "normal"), start=1):
         args.run_id = f"{token}-{target}-{phase}"
-        args.process_id = registry.get_or_create_process_id(dag_id=args.dag_id, run_id=args.run_id)
+        args.process_id = meta.get_or_create_process_id(dag_id=args.dag_id, run_id=args.run_id,
+                                                        db_connect=hook.get_conn)
         args.force_full = phase == "forcefull"
         args.reason = "e2e temporal manual-full contract" if args.force_full else None
         args.lookback_size = 1 if phase in ("bootstrap", "lookback") else 0
         args.lookback_unit = "d" if args.lookback_size else None
         args.lookback_given = bool(args.lookback_size)
-        lower = extraction.lower_bound(watermark, kind, 1, "d") if phase == "lookback" else (
+        lower = positions.lower_bound(watermark, kind, 1, "d") if phase == "lookback" else (
             watermark if phase == "normal" else None
         )
         bound = None if args.force_full else upper
@@ -191,8 +202,8 @@ def precision_fixtures(source):
 
 def check_post_append_retry(spark, hook, jdbc, token):
     """Inject a real post-append metadata failure and accept a repeated append."""
-    import load_entity
-    from ingestion import registry
+    load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
+    from ingestion import meta
 
     args = Namespace(
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
@@ -200,11 +211,11 @@ def check_post_append_retry(spark, hook, jdbc, token):
         target_table="raw.e2e_contract.post_append_retry", source_id="e2e_retry",
         incremental_column="position", partition_column=None, no_parallelism=True,
         num_partitions=1, watermark_value=None, dag_id="e2e_post_append_retry",
-        run_id=token, process_id=registry.get_or_create_process_id(
-            dag_id="e2e_post_append_retry", run_id=token),
+        run_id=token, process_id=meta.get_or_create_process_id(
+            dag_id="e2e_post_append_retry", run_id=token, db_connect=hook.get_conn),
         force_full=False, reason=None, lookback_size=0, lookback_unit=None, lookback_given=False,
     )
-    with patch.object(registry, "finalize_batch", side_effect=RuntimeError("injected metadata failure")):
+    with patch.object(meta, "finalize_batch", side_effect=RuntimeError("injected metadata failure")):
         try:
             load_entity.managed_load(spark, args)
         except RuntimeError as exc:
@@ -233,7 +244,7 @@ def main():
     from airflow.models.connection import Connection
     from airflow.providers.postgres.hooks.postgres import PostgresHook
     from airflow.utils.session import create_session
-    from ingestion.operators import _resolve_jdbc
+    from ingestion.operators import resolve_source_connection
     from pyspark.sql import SparkSession
 
     meta = BaseHook.get_connection("ingestion_meta")
@@ -242,7 +253,9 @@ def main():
     hook = PostgresHook(postgres_conn_id="ingestion_meta")
     with create_session() as session:
         source_jdbc = {
-            source: _resolve_jdbc(session.query(Connection).filter_by(conn_id=f"{source}_source").one())
+            source: resolve_source_connection(
+                session.query(Connection).filter_by(conn_id=f"{source}_source").one()
+            )
             for source in ("bank", "broker")
         }
     token = "e2e-temporal-" + uuid4().hex
