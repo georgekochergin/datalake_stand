@@ -229,7 +229,7 @@ services:
         airflow pools set ingest_loads 4 'Raw-layer ingestion load tasks (shared across ingest DAGs)'
     environment: &airflow-env
       <<: *spark-env
-      PYTHONPATH: /opt/dlh_ingestion
+      PYTHONPATH: /opt/python
       STAND_USER: ${STAND_USER}
       STAND_PASSWORD: ${STAND_PASSWORD}
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${STAND_USER}:${STAND_PASSWORD}@airflow-postgres:5432/airflow
@@ -260,7 +260,7 @@ services:
     volumes:
       - ./airflow:/opt/airflow/dags
       - ./airflow/plugins:/opt/airflow/plugins:ro
-      - ./dlh_ingestion:/opt/dlh_ingestion:ro
+      - ./dlh_ingestion:/opt/python/dlh_ingestion:ro
       - ./spark:/opt/spark-jobs:ro
       - ./trino:/opt/airflow/sql:ro
       - airflow_logs:/opt/airflow/logs
@@ -278,7 +278,7 @@ services:
     volumes:
       - ./airflow:/opt/airflow/dags
       - ./airflow/plugins:/opt/airflow/plugins:ro
-      - ./dlh_ingestion:/opt/dlh_ingestion:ro
+      - ./dlh_ingestion:/opt/python/dlh_ingestion:ro
       - airflow_logs:/opt/airflow/logs
     depends_on:
       airflow-init:
@@ -295,7 +295,7 @@ services:
     volumes:
       - ./airflow:/opt/airflow/dags
       - ./airflow/plugins:/opt/airflow/plugins:ro
-      - ./dlh_ingestion:/opt/dlh_ingestion:ro
+      - ./dlh_ingestion:/opt/python/dlh_ingestion:ro
       - airflow_logs:/opt/airflow/logs
     depends_on:
       airflow-init:
