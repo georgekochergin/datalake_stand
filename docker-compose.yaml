@@ -289,7 +289,7 @@ services:
     build: {context: ., dockerfile: conf/airflow/Dockerfile}
     image: dlh-poc-airflow:latest
     pull_policy: build
-    command: ["api-server"] # ⚠ Airflow 3.x: проверить точное имя команды/компонента на этапе реализации (см. docs/README.md)
+    command: ["api-server"] # ⚠ Airflow 3.x: проверить точное имя команды/компонента на этапе реализации (см. README.md)
     environment: *airflow-env
     ports: ["8089:8080"]
     volumes:

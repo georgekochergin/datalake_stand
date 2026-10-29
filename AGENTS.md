@@ -2,7 +2,7 @@
 
 ## Контекст и архитектура
 - Стенд КХД/DLH: Trino, Spark, Nessie, Airflow, SILO, Postgres. Источники — `sydafa`.
-- Каркас: `ingestion/` (весь код процесса загрузки в git: `conf/` — YAML-манифесты, `generator/` — генератор DAG-ов, `operators.py`, `meta.py` — pg-meta, `iceberg.py`, `sources/` — диалекты СУБД и JDBC, `spark/` — Spark-приложения, в контейнерах `/opt/python/ingestion` + `PYTHONPATH=/opt/python` и `/opt/spark-jobs`), `airflow/` `trino/` (пользовательский код в git через allowlist `.gitignore`), `conf/` (как запущен стенд), `test/` (демо + e2e), `docs/` (документация: README стенда, сценарий демонстрации, настройка graphify).
+- Каркас: `ingestion/` (весь код процесса загрузки в git: `conf/` — YAML-манифесты, `generator/` — генератор DAG-ов, `operators.py`, `meta.py` — pg-meta, `iceberg.py`, `sources/` — диалекты СУБД и JDBC, `spark/` — Spark-приложения, в контейнерах `/opt/python/ingestion` + `PYTHONPATH=/opt/python` и `/opt/spark-jobs`), `airflow/` `trino/` (пользовательский код в git через allowlist `.gitignore`), `conf/` (как запущен стенд), `test/` (демо + e2e), `docs/` (документация: сценарий демонстрации, настройка graphify).
 - Конфигурация источников sydafa: через `sources.json` (`conf/sydafa/sources.json` на живом стенде, `test/sydafa/sources.json` в тестах).
 - Читатель источников: `sydafa`/`sydafa` (только SELECT). Админ снаружи недоступен.
 - Внутренние DNS-имена СУБД (риг именует контейнеры `sydafa-src-<тип>-<source_id>`): `sydafa-src-mssql-bank:1433`, `sydafa-src-oracle-broker:1521`.
