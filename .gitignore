@@ -29,3 +29,9 @@ test/.workspace/**
 
 /trino/*
 !/trino/.gitkeep
+
+# Граф кодовой базы graphify: в git — только сам граф.
+# graph.json самодостаточен для запросов (имена сообществ записаны в узлах);
+# остальное — кэш пересборок и производные артефакты (см. docs/graphify.md)
+graphify-out/*
+!graphify-out/graph.json
