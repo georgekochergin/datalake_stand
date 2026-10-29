@@ -14,9 +14,11 @@ SQL через Trino (DBeaver, BI) и Spark.
 
 Дополнительно в репозитории:
 
-- [`demo/scenario.md`](demo/scenario.md) — пошаговый сценарий демонстрации стенда
+- [`docs/scenario.md`](scenario.md) — пошаговый сценарий демонстрации стенда
   с готовыми SQL-запросами и JSON-запросами к API;
-- [`backlog.md`](backlog.md) — отложенные задачи (изоляция Spark drivers,
+- [`docs/graphify.md`](graphify.md) — настройка графа кодовой базы (graphify):
+  установка, переменные окружения, git-хук перестроения, состав артефактов;
+- [`backlog.md`](../backlog.md) — отложенные задачи (изоляция Spark drivers,
   гарантии полноты инкрементальной загрузки).
 
 **Содержание**
@@ -167,7 +169,7 @@ docker info | grep "Total Memory"   # должно быть ≥ 16 GiB
 | `conf/silo` | `init-bucket.sh` — создание bucket `datalake` |
 | `conf/pg-meta` | `init/01_ingestion.sql` — DDL операционной схемы загрузки (применяется контейнером при первом старте на пустом томе) |
 | `conf/sydafa` | `sources.json` — декларативный манифест источников: схема таблиц, правила генерации, внешние порты |
-| `demo/` | Сценарий демонстрации стенда |
+| `docs/` | Документация: `README.md` (этот файл), `scenario.md` (сценарий демонстрации), `graphify.md` (настройка графа кодовой базы) |
 | `test/` | e2e-тесты (`test.sh`, `run_flow.py`, `check_extraction.py`, `schema_evolution.py`, `temporal_extraction.py`) и юнит-тесты (`unit/`) |
 | `docker-compose.yaml` | Каркас стенда (проект `dlh-poc`) |
 | `.env` | `STAND_USER` / `STAND_PASSWORD` (по умолчанию `admin123` / `admin123`) |
@@ -433,7 +435,7 @@ docker compose exec pg-meta psql -U admin123 -d meta -c '\dt ingestion.*'
 `transfer_table`, `drop_table`; колонки — `add_column`, `rename_column`,
 `drop_column`; данные — `append` (строк `rows`), `update` (`predicate` + `set`
 + `limit`), `delete` (`predicate`/`limit`/`cascade`), `truncate`. Готовые
-примеры батчей — в `demo/scenario.md`.
+примеры батчей — в `docs/scenario.md`.
 
 ### 3.4. DAG-и обновления источников
 
