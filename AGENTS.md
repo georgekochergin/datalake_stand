@@ -2,7 +2,7 @@
 
 ## Контекст и архитектура
 - Стенд КХД/DLH: Trino, Spark, Nessie, Airflow, SILO, Postgres. Источники — `sydafa`.
-- Каркас: `ingestion/` (весь код процесса загрузки в git: `conf/` — YAML-манифесты, `generator/` — генератор DAG-ов, `operators.py`, `meta.py` — pg-meta, `iceberg.py`, `sources/` — диалекты СУБД и JDBC, `spark/` — Spark-приложения, в контейнерах `/opt/python/ingestion` + `PYTHONPATH=/opt/python` и `/opt/spark-jobs`), `airflow/` `trino/` (пользовательский код в git через allowlist `.gitignore`), `conf/` (как запущен стенд), `test/` (демо + e2e), `docs/` (документация: сценарий демонстрации, настройка graphify).
+- Каркас: `ingestion/` (весь код процесса загрузки в git: `conf/` — YAML-манифесты, `generator/` — генератор DAG-ов, `operators.py`, `meta.py` — pg-meta, `iceberg.py`, `sources/` — диалекты СУБД и JDBC, `spark/` — Spark-приложения, в контейнерах `/opt/python/ingestion` + `PYTHONPATH=/opt/python` и `/opt/spark-jobs`), `airflow/` `trino/` (пользовательский код в git через allowlist `.gitignore`), `conf/` (как запущен стенд), `test/` (демо + e2e), `docs/` (документация: сценарий демонстрации, настройка graphify и Spec Kit).
 - Конфигурация источников sydafa: через `sources.json` (`conf/sydafa/sources.json` на живом стенде, `test/sydafa/sources.json` в тестах).
 - Читатель источников: `sydafa`/`sydafa` (только SELECT). Админ снаружи недоступен.
 - Внутренние DNS-имена СУБД (риг именует контейнеры `sydafa-src-<тип>-<source_id>`): `sydafa-src-mssql-bank:1433`, `sydafa-src-oracle-broker:1521`.
@@ -19,6 +19,12 @@
   - **перестроение с LLM** — семантически значимые изменения: граф отсутствует (первичное построение), появились новые модули или контракты между компонентами, крупный рефакторинг с переносом логики между слоями: `. ~/.config/graphify/env && graphify extract . --backend openai && graphify cluster-only`. Если переменные окружения не настроены — сообщи пользователю и выполни локальный `update` как фоллбэк.
 - Промежуточные перестроения не коммить: обновлённый `graphify-out/graph.json` входит финальным коммитом PR (процедура — скилл `pull-request`); в описании PR отражай состояние графа, включая пропущенный семантический слой из-за не настроенного окружения.
 - Если графа нет или он заметно устарел относительно кода — сообщи пользователю. Установка утилиты и переменные окружения — `docs/graphify.md`.
+
+## Спецификации изменений (GitHub Spec Kit)
+- Функциональные доработки ведутся спек-циклом Spec Kit: constitution → specify → clarify → plan → tasks → analyze → implement → converge. Конституция проекта — `.specify/memory/constitution.md`, артефакты цикла — `specs/<NNN-имя>/` (в git наравне с кодом).
+- Команды цикла доступны в обоих агентах: opencode — `/speckit.<имя>` (например, `/speckit.specify`), zcode — `$speckit-<имя>` (например, `$speckit-specify`). Текущая фича — машинно-локальный указатель `.specify/feature.json`; состояние цикла хранится в файлах репозитория, поэтому работу можно переключать между агентами без дополнительных действий.
+- Все артефакты спек-цикла пиши на русском языке.
+- Спек-цикл не отменяет остальные правила: анализ кода — через граф, тестирование — скилл `e2e-testing`, финализация — скилл `pull-request`. Установка и инструкция для разработчика — `docs/speckit.md`.
 
 ## Контроль веток и Pull Request (Git Workflow)
 - Новые рабочие ветки — с префиксом `<github-login>/`, где логин активного аккаунта GitHub CLI определяется через `gh api user --jq .login` после проверки `gh auth status`. Не использовать фиксированный префикс `kodik/`, имя пользователя ОС или `git user.name`. Не коммитить в `main`. Обязателен Pull Request.
