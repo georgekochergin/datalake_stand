@@ -17,8 +17,8 @@ constitution → specify → clarify → plan → checklist → tasks → analyz
 
 Всё состояние цикла — файлы в репозитории: артефакты фич в
 `specs/<NNN-имя>/`, принципы в `.specify/memory/constitution.md`. Цикл
-выполняется в opencode (подтверждён) или интерактивно в ZCode Desktop
-(раздел 12).
+выполняется в opencode (подтверждены обнаружение команд и выполнение шага
+specify) или интерактивно в ZCode Desktop (раздел 12).
 
 Правила применения в этом репозитории — раздел «Спецификации изменений
 (GitHub Spec Kit)» в `AGENTS.md`: артефакты пишутся на русском, спек-цикл
@@ -356,8 +356,21 @@ specify integration upgrade opencode
 отдельном временном клоне и не затрагивает рабочий каталог, конституцию и
 указатель текущей фичи:
 
-1. **Изолированный клон** проверяемого коммита:
-   `git clone <репозиторий> /tmp/speckit-zcode-check && cd /tmp/speckit-zcode-check`.
+1. **Изолированный клон проверяемого коммита.** До мержа проверяйте ветку
+   PR: возьмите SHA её головы (`gh pr view 35 --json headRefOid --jq
+   .headRefOid`; после мержа — SHA мерж-коммита или HEAD `main`), затем
+   клонируйте ветку и переключитесь на этот SHA:
+
+   ```bash
+   git clone --branch georgekochergin/speckit-setup \
+     <репозиторий> /tmp/speckit-zcode-check
+   cd /tmp/speckit-zcode-check
+   git checkout <SHA>
+   git rev-parse HEAD   # должно совпасть с выбранным SHA
+   ```
+
+   Проверку продолжайте только в этом клоне; основное рабочее дерево не
+   трогайте.
 2. **Новая сессия** ZCode открыта в каталоге клона — скиллы загружаются при
    старте сессии; модель выбрана в UI (в интерактиве ошибка выбора модели не
    возникает).
