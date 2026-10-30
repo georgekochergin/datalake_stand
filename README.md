@@ -168,7 +168,7 @@ requirements соответствующих образов):
 | Кластер Spark (executors) | 3.10 | Spark 3.5.5 + Iceberg 1.8.1 |
 | test-runner | 3.12 | PyYAML 6.0.3 (остальное — stdlib) |
 | Генератор DAG-ов (хост/CI) | 3.11+ | PyYAML ≥ 6 |
-| Юнит-тесты на хосте | 3.11+ | — (unittest) |
+| Юнит-тесты на хосте | 3.11+ | PyYAML ≥ 6 (unittest) |
 
 Рассинхрон Python 3.11 (Airflow) и 3.10 (Spark) не мешает JDBC/DataFrame-
 загрузкам: Python-worker'ы на executors не запускаются; Python UDF/RDD
@@ -370,7 +370,8 @@ orphan-контейнеры по меткам родительского про�
 - Driver properties: `SSL=true;SSLVerification=NONE`;
 - JDBC URL: `jdbc:trino://localhost:8443/raw?SSL=true&SSLVerification=NONE`.
 
-Обзор озера и типовые запросы к raw-таблицам — в разделах 4.3 и 4.4.
+Обзор озера и типовые запросы к raw-таблицам — `docs/architecture.md`,
+разделы 4–5.
 
 ### 2.5. Подключение к pg-meta (DBeaver)
 
@@ -419,8 +420,10 @@ docker compose exec pg-meta psql -U admin123 -d meta -c '\dt ingestion.*'
 2. **Память.** `docker info | grep "Total Memory"` — не меньше 16 GiB
    (раздел 1.4); при нехватке OOM-killer роняет СУБД-источники и Trino
    посреди загрузок.
-3. **Лог планировщика.** `docker compose logs airflow-scheduler 2>&1 | tail -50`
-   — без traceback; видно, как DagFileProcessor обрабатывает каталог `dags/`.
+3. **Логи Airflow.** `docker compose logs airflow-dag-processor 2>&1 | tail -50`
+   — парсинг каталога `dags/` без ошибок (в Airflow 3 парсингом занимается
+   отдельный сервис dag-processor, а не scheduler);
+   `docker compose logs airflow-scheduler 2>&1 | tail -50` — без traceback.
 4. **DAG-и в UI.** В Airflow (раздел 2.3) шесть DAG-ов: два `update_source_*`
    и четыре `ingest__rdbms__*`; красный Triggerer на Health-странице —
    ожидаемо. Сгенерированные DAG-и не появились — выполните генерацию
@@ -432,9 +435,10 @@ docker compose exec pg-meta psql -U admin123 -d meta -c '\dt ingestion.*'
    наполнение raw через Trino: `count(*)`, число порций по
    `__process_id`/`__batch_id` (готовые запросы — `docs/architecture.md`,
    раздел 4).
-7. **Контур целиком.** `./test/test.sh --verify` — быстрые smoke-проверки на
-   уже поднятом стенде (раздел 5.2); полный изолированный прогон —
-   `./test/test.sh`.
+7. **Контур целиком.** Полный изолированный e2e-прогон — `./test/test.sh`
+   (поднимает отдельный тестовый контур `dlh-test` и гасит его, раздел 5.2).
+   Живой стенд (`dlh-poc`) этим скриптом не проверяется: шаги 1–6 выше —
+   его ручная проверка.
 
 ---
 
@@ -644,8 +648,9 @@ architecture.md.
 За проведение тестирования агентом отвечает скилл **`e2e-testing`**
 (`.agents/skills/e2e-testing/SKILL.md`): он описывает принципы, устройство
 тестового контура и траблшутинг. Правило кодовой базы: любой новый или
-изменённый функционал пайплайнов, операторов и интеграций сопровождается
-тестами (модульными или e2e) с проверкой краевых случаев.
+изменённый функционал пайплайнов, операторов и интеграций обязан
+сопровождаться проверками в сценарии e2e-тестирования; чистые функции
+дополнительно покрываются юнит-тестами с проверкой краевых случаев.
 
 ### 5.1. Юнит-тесты
 
@@ -658,7 +663,9 @@ python3 -m unittest discover -s test/unit
 позиции и диалектные SQL-кодеки инкремента, реестр партий (при заданной
 переменной окружения `EXTRACTION_TEST_DSN` — также интеграционные тесты
 против одноразового Postgres), guard-ы стиля кода (запрет комментариев `#` в
-Python) и DDL pg-meta (запрет триггеров). Нужен только Python 3.11+ на хосте.
+Python) и DDL pg-meta (запрет триггеров). На хосте нужны Python 3.11+ и
+PyYAML, например в изолированном окружении:
+`python3 -m venv .venv && .venv/bin/pip install 'PyYAML>=6'`.
 
 ### 5.2. Полный e2e-прогон
 
@@ -697,6 +704,9 @@ Python) и DDL pg-meta (запрет триггеров). Нужен тольк�
 
 Опции: `TEST_SKIP_BUILD=1 ./test/test.sh` — полный сценарий без повторной
 сборки образов (использовать только после сборки текущих Dockerfile/конфигов);
-`./test/test.sh --verify` — быстрые проверки на уже поднятом живом стенде.
+`./test/test.sh --verify` — повторные runtime-проверки на уже поднятом
+**тестовом** контуре `dlh-test` (например, при отладке после полного прогона:
+скрипт требует существующий `test/.workspace` и работает только внутри
+изолированного тестового проекта; живой стенд им не проверяется).
 
 Версии Python по компонентам и их рассинхрон — раздел 1.4.
