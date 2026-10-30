@@ -66,6 +66,14 @@ chmod 600 ~/.config/graphify/env
 | `OPENAI_BASE_URL` | да | Адрес OpenAI-совместимого API (поддерживаются и внешние сервисы, и self-hosted серверы) |
 | `OPENAI_MODEL` | да | Имя модели для семантического извлечения и именования сообществ |
 
+Префикс `OPENAI_` — имя протокола (OpenAI Chat Completions API), а не вендора:
+`extract --backend openai` работает с любым OpenAI-совместимым сервисом при его
+собственном ключе и адресе — конфигурация выше указывает на API z.ai (GLM),
+проверено живым прогоном. Из API используется только `chat/completions`;
+Embeddings-эндпоинт не требуется. Anthropic-совместимые шлюзы подключаются
+отдельным бэкендом: `--backend claude` с переменными `ANTHROPIC_BASE_URL`,
+`ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`.
+
 Агент подключает файл командой `. ~/.config/graphify/env` перед запуском
 `extract` (переменные не глобальные, живут в рамках команды).
 
