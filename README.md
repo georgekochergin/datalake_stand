@@ -191,6 +191,10 @@ requirements соответствующих образов):
 | `conf/sydafa` | `sources.json` — декларативный манифест источников: схема таблиц, правила генерации, внешние порты |
 | `docs/` | Документация: `architecture.md` (устройство загрузки и хранения), `demo.md` (сценарий демонстрации, самодостаточен), `backlog.md` (отложенные задачи), `graphify.md` и `speckit.md` (тулинг ИИ-агентов) |
 | `test/` | e2e-тесты (`test.sh`, `run_flow.py`, `check_extraction.py`, `schema_evolution.py`, `temporal_extraction.py`) и юнит-тесты (`unit/`) |
+| `.agents/skills/` | Рукописные скиллы команды (`e2e-testing`, `pull-request`, `backlog`); стандартный каталог Agent Skills — его нативно читают оба агента |
+| `.specify/` | Общая инфраструктура Spec Kit: шаблоны, bash-скрипты, конституция (`memory/constitution.md`), состояние интеграций |
+| `.zcode/skills/` | Скиллы для zcode (speckit-цикл); ставит и обновляет `specify` |
+| `.opencode/commands/` | Команды для opencode (speckit-цикл); ставит и обновляет `specify` |
 | `docker-compose.yaml` | Каркас стенда (проект `dlh-poc`) |
 | `.env` | `STAND_USER` / `STAND_PASSWORD` (по умолчанию `admin123` / `admin123`) |
 
@@ -200,6 +204,15 @@ requirements соответствующих образов):
 доставляется в контейнеры Airflow томом `./ingestion:/opt/python/ingestion:ro`
 (импорт через `PYTHONPATH=/opt/python`), а его подкаталог `spark/` — ещё и в
 кластер Spark как `/opt/spark-jobs`.
+
+Каталоги ИИ-агентов разделены по владельцу и формату, а не дублируют друг
+друга. `.agents/skills/` — единственный общий для обоих агентов каталог
+(стандарт Agent Skills читают и opencode, и zcode), поэтому в нём живут
+рукописные скиллы команды. У каждого агента свой формат команд Spec Kit
+(скиллы у zcode, команды у opencode), поэтому `specify` раскладывает их по
+`.zcode/skills/` и `.opencode/commands/` и ведёт эти файлы по манифестам —
+вручную они не переносятся; общая инфраструктура цикла — в `.specify/`.
+Таблица владельцев и следствия для обновлений — `docs/speckit.md`, раздел 5.
 
 ### 1.6. Статус и планы
 
