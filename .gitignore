@@ -36,6 +36,5 @@ test/.workspace/**
 graphify-out/*
 !graphify-out/graph.json
 
-# Сессионные планы ZCode — машинно-локальные; спек-скиллы Spec Kit
-# в .zcode/skills/ коммитятся (см. docs/speckit.md)
+# Сессионные планы приложения ZCode — машинно-локальные (см. docs/speckit.md)
 .zcode/plans/

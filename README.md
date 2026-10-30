@@ -49,7 +49,7 @@ SQL через Trino (DBeaver, BI) и Spark.
 - **Append-only.** Каждая загрузка дописывает новую порцию строк; строки в raw
   никогда не обновляются и не удаляются на месте. Полная история всех загрузок
   сохраняется как данные. Семантика — at-least-once: сбой после фиксации данных,
-  но до фиксации водяного знака может привести к повторной записи порции при
+  но до фиксации watermark может привести к повторной записи порции при
   повторе (`docs/architecture.md`, разделы 4 и 7).
 - **Устойчивость к эволюции схемы источника.** Новые колонки источника
   добавляются в таблицу озера автоматически, исчезнувшие заполняются NULL,
@@ -182,7 +182,7 @@ requirements соответствующих образов):
 | `ingestion/spark/` | Spark-приложения загрузки по слоям и типам источников: `ingestion/spark/raw/rdbms/load_entity.py` — append-загрузчик одной сущности RDBMS (JDBC → Iceberg); compose монтирует каталог как `/opt/spark-jobs` |
 | `ingestion/sources/` | Диалекты СУБД и общий JDBC-слой: `sources/rdbms/positions.py` — типизированные позиции инкремента, `sources/rdbms/dialects/` — адаптеры MSSQL/Oracle (URL, quoting, литералы, temporal-выражения), `sources/rdbms/registry.py` — реестр диалектов по conn_type/JDBC URL, `sources/rdbms/jdbc.py` — соединения и метаданные |
 | `trino/` | Пользовательский SQL (каркас) |
-| `ingestion/` | Единый дом процесса загрузки: `conf/` — манифесты источников (`sources.yaml`), пайплайнов (`pipelines/**/*.yaml`) и технические настройки (`settings.yaml`); `generator/` — генератор DAG-ов и валидация манифестов (`generate_dags.py`, `manifest.py`, `naming.py`, запуск `python3 -m ingestion.generator.generate_dags`); `operators.py` — операторы Airflow; `meta.py` — клиент pg-meta (партии и водяные знаки); `iceberg.py` — DDL целевых raw-таблиц. Пакет целиком доставляется в контейнеры Airflow и Spark-драйвер (том + `PYTHONPATH=/opt/python`) |
+| `ingestion/` | Единый дом процесса загрузки: `conf/` — манифесты источников (`sources.yaml`), пайплайнов (`pipelines/**/*.yaml`) и технические настройки (`settings.yaml`); `generator/` — генератор DAG-ов и валидация манифестов (`generate_dags.py`, `manifest.py`, `naming.py`, запуск `python3 -m ingestion.generator.generate_dags`); `operators.py` — операторы Airflow; `meta.py` — клиент pg-meta (партии и watermark); `iceberg.py` — DDL целевых raw-таблиц. Пакет целиком доставляется в контейнеры Airflow и Spark-драйвер (том + `PYTHONPATH=/opt/python`) |
 | `conf/airflow` | Dockerfile и requirements образа Airflow (+ Spark, JDK, JDBC-драйверы), генератор паролей |
 | `conf/spark` | Dockerfile и `spark-defaults.conf` (каталог `raw`: нативный NessieCatalog + S3FileIO в silo) |
 | `conf/trino` | Конфигурация Trino: HTTPS + password-authenticator, каталог `raw` |
@@ -193,7 +193,6 @@ requirements соответствующих образов):
 | `test/` | e2e-тесты (`test.sh`, `run_flow.py`, `check_extraction.py`, `schema_evolution.py`, `temporal_extraction.py`) и юнит-тесты (`unit/`) |
 | `.agents/skills/` | Рукописные скиллы команды (`e2e-testing`, `pull-request`, `backlog`); стандартный каталог Agent Skills — его нативно читают оба агента |
 | `.specify/` | Общая инфраструктура Spec Kit: шаблоны, bash-скрипты, конституция (`memory/constitution.md`), состояние интеграций |
-| `.zcode/skills/` | Скиллы для zcode (speckit-цикл); ставит и обновляет `specify` |
 | `.opencode/commands/` | Команды для opencode (speckit-цикл); ставит и обновляет `specify` |
 | `docker-compose.yaml` | Каркас стенда (проект `dlh-poc`) |
 | `.env` | `STAND_USER` / `STAND_PASSWORD` (по умолчанию `admin123` / `admin123`) |
@@ -206,13 +205,11 @@ requirements соответствующих образов):
 кластер Spark как `/opt/spark-jobs`.
 
 Каталоги ИИ-агентов разделены по владельцу и формату, а не дублируют друг
-друга. `.agents/skills/` — единственный общий для обоих агентов каталог
-(стандарт Agent Skills читают и opencode, и zcode), поэтому в нём живут
-рукописные скиллы команды. У каждого агента свой формат команд Spec Kit
-(скиллы у zcode, команды у opencode), поэтому `specify` раскладывает их по
-`.zcode/skills/` и `.opencode/commands/` и ведёт эти файлы по манифестам —
-вручную они не переносятся; общая инфраструктура цикла — в `.specify/`.
-Таблица владельцев и следствия для обновлений — `docs/speckit.md`, раздел 5.
+друга. `.agents/skills/` — общий каталог стандарта Agent Skills: его читают
+все агенты, поддерживающие стандарт, поэтому в нём живут рукописные скиллы
+команды. `.opencode/commands/` — команды Spec Kit, их ставит и обновляет
+`specify` по манифестам, вручную файлы не переносятся; общая инфраструктура
+цикла — в `.specify/`. Состав артефактов — `docs/speckit.md`, раздел 5.
 
 ### 1.6. Статус и планы
 
@@ -629,7 +626,7 @@ YAML-манифесты (`ingestion/conf/`) в готовые файлы `airflo
 Раздел 6 architecture.md.
 
 **Инкремент.** Строго типизированные позиции (целые, `decimal(p,0)`, дата,
-моменты с точностью 0–9), окно `lower < col <= upper`, lookback; водяные знаки
+моменты с точностью 0–9), окно `lower < col <= upper`, lookback; watermark
 и партии — в pg-meta с CAS-защитой от повторов и конкуренции; ручной полный
 снимок — через Configuration JSON в диалоге запуска DAG-а. Раздел 7
 architecture.md.
@@ -690,7 +687,7 @@ PyYAML, например в изолированном окружении:
    инкрементальный гейт (повторная загрузка без изменений источника не пишет
    ни одной строки), дельта после обновления источника;
 5. в `airflow-scheduler` (`check_extraction.py`): инварианты реестра партий —
-   заморозка границ, повторы, no-op без Spark, защита водяного знака от
+   заморозка границ, повторы, no-op без Spark, защита watermark от
    регрессии и конкурирующих исполнителей, аудит ручной миграции;
 6. отдельные Spark-приложения: эволюция схемы Iceberg (add/drop/rename колонок,
    честный отказ при несовместимом типе) и контракты temporal-инкремента
