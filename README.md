@@ -17,7 +17,7 @@ SQL через Trino (DBeaver, BI) и Spark.
 |---|---|---|
 | `README.md` (этот файл) | Эксплуатация: архитектура и состав стенда, запуск и проверки, источники sydafa, обзор логики загрузки, тестирование; статус и планы проекта | поднять стенд, подключиться, проверить работу |
 | [`docs/architecture.md`](docs/architecture.md) | Устройство: слои данных (raw/ods/dds), механика загрузки (манифесты, DAG-и, партии, инкремент), типы и гарантии, известные ограничения | понять, как устроена загрузка и где её границы |
-| [`docs/scenario.md`](docs/scenario.md) | Пошаговый сценарий демонстрации с готовыми SQL- и JSON-запросами; документ самодостаточен и читается без остальной документации | показать стенд или познакомиться с ним быстро |
+| [`docs/demo.md`](docs/demo.md) | Пошаговый сценарий демонстрации с готовыми SQL- и JSON-запросами; документ самодостаточен и читается без остальной документации | показать стенд или познакомиться с ним быстро |
 | [`docs/backlog.md`](docs/backlog.md) | Проработанные отложенные задачи | узнать открытые проблемы и согласованные решения |
 | [`docs/graphify.md`](docs/graphify.md), [`docs/speckit.md`](docs/speckit.md) | Тулинг ИИ-агентов: граф кодовой базы; спек-цикл Spec Kit | настроить graphify / спек-цикл изменений |
 | [`AGENTS.md`](AGENTS.md) | Правила для ИИ-агентов: маршруты по скиллам, зоны документов, git-процесс, стандарты кода | понять, по каким правилам агент работает с репозиторием |
@@ -189,7 +189,7 @@ requirements соответствующих образов):
 | `conf/silo` | `init-bucket.sh` — создание bucket `datalake` |
 | `conf/pg-meta` | `init/01_ingestion.sql` — DDL операционной схемы загрузки (применяется контейнером при первом старте на пустом томе) |
 | `conf/sydafa` | `sources.json` — декларативный манифест источников: схема таблиц, правила генерации, внешние порты |
-| `docs/` | Документация: `architecture.md` (устройство загрузки и хранения), `scenario.md` (сценарий демонстрации, самодостаточен), `backlog.md` (отложенные задачи), `graphify.md` и `speckit.md` (тулинг ИИ-агентов) |
+| `docs/` | Документация: `architecture.md` (устройство загрузки и хранения), `demo.md` (сценарий демонстрации, самодостаточен), `backlog.md` (отложенные задачи), `graphify.md` и `speckit.md` (тулинг ИИ-агентов) |
 | `test/` | e2e-тесты (`test.sh`, `run_flow.py`, `check_extraction.py`, `schema_evolution.py`, `temporal_extraction.py`) и юнит-тесты (`unit/`) |
 | `docker-compose.yaml` | Каркас стенда (проект `dlh-poc`) |
 | `.env` | `STAND_USER` / `STAND_PASSWORD` (по умолчанию `admin123` / `admin123`) |
@@ -511,7 +511,7 @@ docker compose exec pg-meta psql -U admin123 -d meta -c '\dt ingestion.*'
 `transfer_table`, `drop_table`; колонки — `add_column`, `rename_column`,
 `drop_column`; данные — `append` (строк `rows`), `update` (`predicate` + `set`
 + `limit`), `delete` (`predicate`/`limit`/`cascade`), `truncate`. Готовые
-примеры батчей — в `docs/scenario.md`.
+примеры батчей — в `docs/demo.md`.
 
 ### 3.4. DAG-и обновления источников
 
