@@ -137,8 +137,8 @@ flowchart TB
 источник через sydafa → таск `load` отправляет spark-job в Spark → job читает
 таблицу источника по JDBC, фиксирует границы извлечения в pg-meta **до**
 чтения, дописывает порцию строк в Iceberg (физически — новые Parquet-файлы в
-silo, метаданные таблицы — коммит в Nessie) и атомарно финализирует водяной
-знак в pg-meta. Аналитик видит результат через Trino.
+silo, метаданные таблицы — коммит в Nessie) и атомарно финализирует watermark
+в pg-meta. Аналитик видит результат через Trino.
 
 ### 1.4. Требования к среде
 
@@ -182,7 +182,7 @@ requirements соответствующих образов):
 | `ingestion/spark/` | Spark-приложения загрузки по слоям и типам источников: `ingestion/spark/raw/rdbms/load_entity.py` — append-загрузчик одной сущности RDBMS (JDBC → Iceberg); compose монтирует каталог как `/opt/spark-jobs` |
 | `ingestion/sources/` | Диалекты СУБД и общий JDBC-слой: `sources/rdbms/positions.py` — типизированные позиции инкремента, `sources/rdbms/dialects/` — адаптеры MSSQL/Oracle (URL, quoting, литералы, temporal-выражения), `sources/rdbms/registry.py` — реестр диалектов по conn_type/JDBC URL, `sources/rdbms/jdbc.py` — соединения и метаданные |
 | `trino/` | Пользовательский SQL (каркас) |
-| `ingestion/` | Единый дом процесса загрузки: `conf/` — манифесты источников (`sources.yaml`), пайплайнов (`pipelines/**/*.yaml`) и технические настройки (`settings.yaml`); `generator/` — генератор DAG-ов и валидация манифестов (`generate_dags.py`, `manifest.py`, `naming.py`, запуск `python3 -m ingestion.generator.generate_dags`); `operators.py` — операторы Airflow; `meta.py` — клиент pg-meta (партии и watermark); `iceberg.py` — DDL целевых raw-таблиц. Пакет целиком доставляется в контейнеры Airflow и Spark-драйвер (том + `PYTHONPATH=/opt/python`) |
+| `ingestion/` | Единый пакет процесса загрузки: `conf/` — манифесты источников (`sources.yaml`), пайплайнов (`pipelines/**/*.yaml`) и технические настройки (`settings.yaml`); `generator/` — генератор DAG-ов и валидация манифестов (`generate_dags.py`, `manifest.py`, `naming.py`, запуск `python3 -m ingestion.generator.generate_dags`); `operators.py` — операторы Airflow; `meta.py` — клиент pg-meta (партии и watermark); `iceberg.py` — DDL целевых raw-таблиц. Пакет целиком доставляется в контейнеры Airflow и Spark-драйвер (том + `PYTHONPATH=/opt/python`) |
 | `conf/airflow` | Dockerfile и requirements образа Airflow (+ Spark, JDK, JDBC-драйверы), генератор паролей |
 | `conf/spark` | Dockerfile и `spark-defaults.conf` (каталог `raw`: нативный NessieCatalog + S3FileIO в silo) |
 | `conf/trino` | Конфигурация Trino: HTTPS + password-authenticator, каталог `raw` |
@@ -417,7 +417,7 @@ docker compose exec pg-meta psql -U admin123 -d meta -c '\dt ingestion.*'
    airflow-postgres, sydafa. One-shot сервис `airflow-init` завершается
    (exit 0) — это норма.
 2. **Память.** `docker info | grep "Total Memory"` — не меньше 16 GiB
-   (раздел 1.4); при нехватке OOM-killer роняет СУБД-источники и Trino
+   (раздел 1.4); при нехватке OOM-killer останавливает СУБД-источники и Trino
    посреди загрузок.
 3. **Логи Airflow.** `docker compose logs airflow-dag-processor 2>&1 | tail -50`
    — парсинг каталога `dags/` без ошибок (в Airflow 3 парсингом занимается
