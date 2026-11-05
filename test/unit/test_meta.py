@@ -95,7 +95,7 @@ class PostgresTests(unittest.TestCase):
     def tearDownClass(cls):
         """Remove only the database created by this test class."""
         with cls.admin.cursor() as cur:
-            cur.execute(cls.sql.SQL("DROP DATABASE {}").format(sql.Identifier(cls.database)))
+            cur.execute(cls.sql.SQL("DROP DATABASE {}").format(cls.sql.Identifier(cls.database)))
         cls.admin.close()
 
     @classmethod
