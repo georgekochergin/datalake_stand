@@ -1,9 +1,10 @@
 """Append JDBC data to Iceberg with persisted, typed extraction batches.
 
-Managed Airflow execution plans fixed source bounds in pg-meta, preserves
-batch identity across retries and atomically finalizes its watermark.
-Repeated appends remain valid at-least-once behavior. Pure helpers import
-without Spark; managed execution uses the shared ingestion package.
+Managed Airflow execution is the only load path: fixed source bounds are
+planned in pg-meta, batch identity survives retries and the watermark is
+finalized atomically. Repeated appends remain valid at-least-once behavior.
+Pure helpers import without Spark; managed execution uses the shared
+ingestion package.
 """
 
 import argparse
@@ -26,7 +27,6 @@ from ingestion.sources.rdbms import registry as dialects
 from ingestion.sources.rdbms.contracts import parse_source_table
 
 COLUMN_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-WATERMARK_PATTERN = re.compile(r"^[0-9]+$")
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse and validate the loader CLI arguments."""
@@ -40,8 +40,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--target-table", required=True)
     parser.add_argument("--process-id", required=True, type=int)
     parser.add_argument("--incremental-column")
-    parser.add_argument("--watermark-value")
-    parser.add_argument("--partition-column")
     parser.add_argument("--num-partitions", type=int, default=4)
     parser.add_argument("--no-parallelism", action="store_true")
     parser.add_argument("--source-id")
@@ -57,12 +55,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError(f"--process-id must be a positive integer (got {args.process_id})")
     if args.num_partitions <= 0:
         raise ValueError(f"--num-partitions must be a positive integer (got {args.num_partitions})")
-    for name in ("incremental_column", "partition_column"):
-        value = getattr(args, name)
-        if value is not None and not COLUMN_NAME_PATTERN.match(value):
-            raise ValueError(
-                f"--{name.replace('_', '-')} must be a column identifier (got {value!r})"
-            )
+    if args.incremental_column is not None and not COLUMN_NAME_PATTERN.match(args.incremental_column):
+        raise ValueError(
+            f"--incremental-column must be a column identifier (got {args.incremental_column!r})"
+        )
     return args
 
 
@@ -84,54 +80,12 @@ def render_source_table(dialect, source_table: str, allow_expression: bool = Fal
     return dialect.render_table(parts)
 
 
-def build_read_query(
-    source_table: str,
-    incremental_column: str | None,
-    watermark_value: str | None,
-    jdbc_url: str,
-) -> str:
-    """Build the JDBC dbtable expression: bare table, or an incremental subquery."""
-    dialect = dialects.by_jdbc_url(jdbc_url)
-    table = render_source_table(dialect, source_table)
-    if incremental_column is None:
-        return table
-    if not COLUMN_NAME_PATTERN.match(incremental_column):
-        raise ValueError(f"invalid incremental column: {incremental_column!r}")
-    if watermark_value is None:
-        return table
-    if not WATERMARK_PATTERN.match(watermark_value):
-        raise ValueError(
-            f"watermark must be a plain integer (got {watermark_value!r}); "
-            "quoted/ISO watermarks are not supported"
-        )
-    column = dialect.quote_identifier(incremental_column)
-    return f"(SELECT * FROM {table} WHERE {column} > {watermark_value}) q"
-
-
 def pick_partition_column(dialect, candidates: list[tuple[str, str]]) -> str | None:
     """Return the first candidate column the dialect allows for partitioning, else None."""
     for name, jdbc_type in candidates:
         if dialect.is_partition_type(jdbc_type):
             return name
     return None
-
-
-def validate_incremental_column(schema, incremental_column: str) -> None:
-    """Raise ValueError unless the incremental column exists and is integral."""
-    field = next((f for f in schema.fields if f.name == incremental_column), None)
-    if field is None:
-        raise ValueError(
-            f"incremental column {incremental_column!r} not found in source schema"
-        )
-    data_type = field.dataType
-    type_name = data_type.typeName()
-    if type_name not in ("byte", "short", "integer", "long", "date", "timestamp", "timestamp_ntz") and not (
-        type_name == "decimal" and data_type.scale == 0
-    ):
-        raise ValueError(
-            f"incremental column {incremental_column!r} has unsupported type "
-            f"{type_name!r}: numeric (integral) incremental columns are required"
-        )
 
 
 def _jdbc_reader(spark, args, read_query):
@@ -176,68 +130,15 @@ def _read_bounds(spark, args, read_query, column) -> tuple:
 
 def main(argv: list[str] | None = None) -> None:
     """Load one entity from a JDBC source into the raw layer."""
-    import pyspark.sql.functions as F
+    args = parse_args(argv)
+    if not args.source_id:
+        raise ValueError("--source-id is required: extraction runs only as a managed Airflow batch")
+    validate_target_table(args.target_table)
     from pyspark.sql import SparkSession
 
-    args = parse_args(argv)
-    namespace, _ = validate_target_table(args.target_table)
     spark = SparkSession.builder.appName(f"ingest-{args.target_table}").getOrCreate()
     try:
-        if args.source_id:
-            managed_load(spark, args)
-            return
-        spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{namespace}")
-        read_query = build_read_query(
-            args.source_table, args.incremental_column, args.watermark_value, args.jdbc_url
-        )
-        print(
-            f"load started table={args.source_table} target={args.target_table} "
-            f"process_id={args.process_id}"
-        )
-        partition_column = None if args.no_parallelism else args.partition_column or args.incremental_column
-        if not args.no_parallelism and partition_column is None:
-            dialect = dialects.by_jdbc_url(args.jdbc_url)
-            partition_column = pick_partition_column(
-                dialect,
-                jdbc.key_columns(
-                    spark._jvm, dialect, args.jdbc_url,
-                    args.jdbc_user, args.jdbc_password, args.source_table,
-                ),
-            )
-        reader = _jdbc_reader(spark, args, read_query)
-        if partition_column is not None:
-            lower_bound, upper_bound = _read_bounds(spark, args, read_query, partition_column)
-            if lower_bound is not None and upper_bound is not None and lower_bound != upper_bound:
-                reader = (
-                    reader.option("partitionColumn", partition_column)
-                    .option("lowerBound", _bound_literal(lower_bound))
-                    .option("upperBound", _bound_literal(upper_bound))
-                    .option("numPartitions", args.num_partitions)
-                )
-        source_frame = reader.load()
-        if args.incremental_column is not None:
-            validate_incremental_column(source_frame.schema, args.incremental_column)
-        create_sql = build_create_table_sql(args.target_table, schema_columns(source_frame.schema))
-        frame = (
-            source_frame.withColumn(METADATA_DTTM, F.current_timestamp())
-            .withColumn(METADATA_PID, F.lit(args.process_id).cast("long"))
-            .cache()
-        )
-        if not spark.catalog.tableExists(args.target_table):
-            spark.sql(create_sql)
-        frame.writeTo(args.target_table).option("mergeSchema", "true").option(
-            "check-ordering", "false"
-        ).append()
-        rows = frame.count()
-        message = (
-            f"load finished table={args.source_table} target={args.target_table} "
-            f"process_id={args.process_id} rows_appended={rows}"
-        )
-        if args.incremental_column is not None:
-            new_watermark = frame.agg(F.max(args.incremental_column)).collect()[0][0]
-            message = f"{message} new_watermark={new_watermark}"
-        print(message)
-        frame.unpersist()
+        managed_load(spark, args)
     finally:
         spark.stop()
 
@@ -275,22 +176,23 @@ def source_position(spark, args, inspect_only=False):
 
 
 
-def managed_load(spark, args):
-    """Execute a persisted batch with at-least-once append and atomic pg-meta finalization."""
-    import pyspark.sql.functions as F
-    import psycopg2
+def _plan_batch(spark, args, connect):
+    """Resolve this DAG run's persisted batch or plan a fresh one with frozen bounds.
 
+    A retry first re-reads the existing batch so every attempt replays the
+    same window; source inspection then only re-validates the frozen
+    contract. The returned batch may already be SUCCEEDED, which the caller
+    skips as a completed no-op.
+    """
     from ingestion import meta
 
-    dialect = dialects.by_jdbc_url(args.jdbc_url)
-    connect = lambda: psycopg2.connect("")
     batch = meta.get_batch(dag_id=args.dag_id, run_id=args.run_id, source_id=args.source_id,
                            entity_fqn=args.source_table, db_connect=connect)
     if batch and (batch["process_id"] != args.process_id or batch["target_table"] != args.target_table
                   or batch["incremental_column"] != args.incremental_column):
         raise ValueError("Persisted batch identity or extraction contract changed")
     if batch and batch["status"] == "SUCCEEDED":
-        return
+        return batch
     kind = batch["incremental_type"] if batch else None
     upper = None
     empty = False
@@ -304,101 +206,136 @@ def managed_load(spark, args):
             raise ValueError("NULL incremental value in source")
         positions.lower_bound(upper, kind, args.lookback_size, args.lookback_unit,
                               specified=args.lookback_given)
-    if batch is None:
-        def calculate_lower(value):
-            """Reject source resets before persisting an incremental window."""
-            if value is not None and not args.force_full:
-                if empty or positions.maximum(value, upper, kind) != upper:
-                    raise ValueError("SOURCE_POSITION_REGRESSION: explicit reset/bootstrap required")
-            return positions.lower_bound(value, kind, args.lookback_size, args.lookback_unit,
-                                         specified=args.lookback_given)
+    if batch is not None:
+        return batch
 
-        batch = meta.plan_batch(
-            process_id=args.process_id, dag_id=args.dag_id, run_id=args.run_id,
-            source_id=args.source_id, entity_fqn=args.source_table, target_table=args.target_table,
-            incremental_column=args.incremental_column, incremental_type=kind,
-            upper_bound=upper, empty_at_plan=empty, force_full=args.force_full,
-            lookback_size=args.lookback_size, lookback_unit=args.lookback_unit,
-            reason_text=args.reason, db_connect=connect,
-            calculate_lower=calculate_lower,
-            compare_positions=lambda left, right: (
-                0 if positions.canonical(left, kind) == positions.canonical(right, kind)
-                else 1 if positions.maximum(left, right, kind) == positions.canonical(left, kind) else -1
-            ),
-        )
-    elif batch["incremental_column"] != args.incremental_column or batch["incremental_type"] != kind:
-        raise ValueError("Extraction contract changed; migrate pg-meta and start a new DagRun")
-    batch_id = batch["batch_id"]
-    if empty_incremental_window(batch):
-        meta.finalize_batch(batch_id=batch_id, row_count=0, observed_max=None,
-                                db_connect=connect)
+    def calculate_lower(value):
+        """Reject source resets before persisting an incremental window."""
+        if value is not None and not args.force_full:
+            if empty or positions.maximum(value, upper, kind) != upper:
+                raise ValueError("SOURCE_POSITION_REGRESSION: explicit reset/bootstrap required")
+        return positions.lower_bound(value, kind, args.lookback_size, args.lookback_unit,
+                                     specified=args.lookback_given)
+
+    return meta.plan_batch(
+        process_id=args.process_id, dag_id=args.dag_id, run_id=args.run_id,
+        source_id=args.source_id, entity_fqn=args.source_table, target_table=args.target_table,
+        incremental_column=args.incremental_column, incremental_type=kind,
+        upper_bound=upper, empty_at_plan=empty, force_full=args.force_full,
+        lookback_size=args.lookback_size, lookback_unit=args.lookback_unit,
+        reason_text=args.reason, db_connect=connect,
+        calculate_lower=calculate_lower,
+        compare_positions=lambda left, right: (
+            0 if positions.canonical(left, kind) == positions.canonical(right, kind)
+            else 1 if positions.maximum(left, right, kind) == positions.canonical(left, kind) else -1
+        ),
+    )
+
+
+def _read_extract_frame(spark, args, batch, kind):
+    """Read the frozen batch window over JDBC into a cached frame.
+
+    The frame mirrors the source columns and carries the exact typed
+    extraction position as the __extract_position column.
+    """
+    dialect = dialects.by_jdbc_url(args.jdbc_url)
+    filters = []
+    column = dialect.quote_identifier(args.incremental_column) if args.incremental_column else None
+    for key, op in (("lower_bound", ">"), ("upper_bound", "<=")):
+        if batch[key] is not None:
+            filters.append(
+                f"{column} {op} {dialect.position_literal(positions.canonical(batch[key], kind), kind)}"
+            )
+    if batch["empty_at_plan"]:
+        filters.append("1=0")
+    source_table = render_source_table(dialect, args.source_table, allow_expression=True)
+    select = "extract_source.*"
+    projection = jdbc.compatibility_projection(
+        spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, source_table
+    )
+    if projection is not None:
+        select = ", ".join(projection)
+    if column:
+        select += f', {dialect.position_expression(column, kind)} AS "__extract_position"'
+    query = (
+        f"(SELECT {select} FROM (SELECT * FROM "
+        f"{source_table}) extract_source"
+        + (" WHERE " + " AND ".join(filters) if filters else "")
+        + ") extract_batch"
+    )
+    reader = _jdbc_reader(spark, args, query)
+    if not args.no_parallelism and (not kind or not kind.startswith("timestamp")):
+        partition_column = args.incremental_column or pick_partition_column(
+            dialect, jdbc.key_columns(
+                spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table))
+        if partition_column:
+            low, high = _read_bounds(spark, args, query, partition_column)
+            if low is not None and high is not None and low != high:
+                reader = reader.option("partitionColumn", partition_column).option(
+                    "lowerBound", _bound_literal(low)).option("upperBound", _bound_literal(high)).option(
+                    "numPartitions", args.num_partitions)
+    return reader.load().cache()
+
+
+def _append_raw(spark, args, batch, frame, kind):
+    """Append the read window to the raw table; return (row_count, observed_max).
+
+    The target table is created on first load from the actually read schema;
+    an empty window still verifies the schema without writing rows.
+    """
+    import pyspark.sql.functions as F
+
+    summary = frame.agg(F.count("*").alias("n"), *(
+        [F.max("__extract_position").alias("position")] if args.incremental_column else []
+    )).first()
+    rows = int(summary["n"])
+    observed = positions.canonical(summary["position"], kind) if args.incremental_column else None
+    clean = frame.drop("__extract_position") if args.incremental_column else frame
+    if any(field.name in (METADATA_BATCH, METADATA_PID, METADATA_DTTM) for field in clean.schema.fields):
+        raise ValueError("Source column collides with ingestion metadata")
+    namespace, _ = validate_target_table(args.target_table)
+    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{namespace}")
+    if not spark.catalog.tableExists(args.target_table):
+        spark.sql(build_create_table_sql(args.target_table, schema_columns(clean.schema)))
+    if rows:
+        portion = clean.withColumn(METADATA_DTTM, F.current_timestamp()).withColumn(
+            METADATA_PID, F.lit(args.process_id).cast("long")).withColumn(
+            METADATA_BATCH, F.lit(batch["batch_id"]).cast("long"))
+        portion.writeTo(args.target_table).option("mergeSchema", "true").option("check-ordering", "false").append()
+    return rows, observed
+
+
+def managed_load(spark, args):
+    """Execute a persisted batch with at-least-once append and atomic pg-meta finalization."""
+    import psycopg2
+
+    from ingestion import meta
+
+    connect = lambda: psycopg2.connect("")
+    batch = _plan_batch(spark, args, connect)
+    if batch["status"] == "SUCCEEDED":
         return
-    meta.start_batch(batch_id=batch_id, db_connect=connect)
+    kind = batch["incremental_type"]
+    if empty_incremental_window(batch):
+        meta.finalize_batch(batch_id=batch["batch_id"], row_count=0, observed_max=None,
+                            db_connect=connect)
+        return
+    meta.start_batch(batch_id=batch["batch_id"], db_connect=connect)
     try:
-        filters = []
-        column = dialect.quote_identifier(args.incremental_column) if args.incremental_column else None
-        for key, op in (("lower_bound", ">"), ("upper_bound", "<=")):
-            if batch[key] is not None:
-                filters.append(
-                    f"{column} {op} {dialect.position_literal(positions.canonical(batch[key], kind), kind)}"
-                )
-        if batch["empty_at_plan"]:
-            filters.append("1=0")
-        source_table = render_source_table(dialect, args.source_table, allow_expression=True)
-        select = "extract_source.*"
-        projection = jdbc.compatibility_projection(
-            spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, source_table
-        )
-        if projection is not None:
-            select = ", ".join(projection)
-        if column:
-            select += f', {dialect.position_expression(column, kind)} AS "__extract_position"'
-        query = (
-            f"(SELECT {select} FROM (SELECT * FROM "
-            f"{source_table}) extract_source"
-            + (" WHERE " + " AND ".join(filters) if filters else "")
-            + ") extract_batch"
-        )
-        reader = _jdbc_reader(spark, args, query)
-        if not args.no_parallelism and (not kind or not kind.startswith("timestamp")):
-            partition_column = args.incremental_column or pick_partition_column(
-                dialect, jdbc.key_columns(
-                    spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table))
-            if partition_column:
-                low, high = _read_bounds(spark, args, query, partition_column)
-                if low is not None and high is not None and low != high:
-                    reader = reader.option("partitionColumn", partition_column).option(
-                        "lowerBound", _bound_literal(low)).option("upperBound", _bound_literal(high)).option(
-                        "numPartitions", args.num_partitions)
-        source = reader.load().cache()
+        source = _read_extract_frame(spark, args, batch, kind)
         try:
-            summary = source.agg(F.count("*").alias("n"), *(
-                [F.max("__extract_position").alias("position")] if column else []
-            )).first()
-            rows = int(summary["n"])
-            observed = positions.canonical(summary["position"], kind) if column else None
-            clean = source.drop("__extract_position") if column else source
-            if any(field.name in (METADATA_BATCH, METADATA_PID, METADATA_DTTM) for field in clean.schema.fields):
-                raise ValueError("Source column collides with ingestion metadata")
-            namespace, _ = validate_target_table(args.target_table)
-            spark.sql(f"CREATE NAMESPACE IF NOT EXISTS raw.{namespace}")
-            if not spark.catalog.tableExists(args.target_table):
-                spark.sql(build_create_table_sql(args.target_table, schema_columns(clean.schema)))
-            if rows:
-                frame = clean.withColumn(METADATA_DTTM, F.current_timestamp()).withColumn(
-                    METADATA_PID, F.lit(args.process_id).cast("long")).withColumn(
-                    METADATA_BATCH, F.lit(batch_id).cast("long"))
-                frame.writeTo(args.target_table).option("mergeSchema", "true").option("check-ordering", "false").append()
+            rows, observed = _append_raw(spark, args, batch, source, kind)
             watermark = batch["watermark_before"]
             if args.incremental_column and batch["reason"] != "manual_full":
                 watermark = positions.maximum(watermark, observed, kind)
-            meta.finalize_batch(batch_id=batch_id, row_count=rows, observed_max=observed,
-                                    watermark_after=watermark, db_connect=connect)
+            meta.finalize_batch(batch_id=batch["batch_id"], row_count=rows, observed_max=observed,
+                                watermark_after=watermark, db_connect=connect)
         finally:
             source.unpersist()
     except Exception:
         try:
-            meta.fail_batch(batch_id=batch_id, error="Extraction execution failed; see task logs", db_connect=connect)
+            meta.fail_batch(batch_id=batch["batch_id"], error="Extraction execution failed; see task logs",
+                            db_connect=connect)
         except Exception:
             logging.getLogger(__name__).warning("Unable to persist batch failure")
         raise
