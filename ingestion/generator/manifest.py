@@ -61,8 +61,11 @@ def _read_yaml(path) -> object:
         return yaml.safe_load(stream)
 
 
-def _mapping(value, allowed: set[str], label: str) -> dict:
-    """Validate a nested configuration mapping and reject unknown keys."""
+def _strict_object(value, allowed: set[str], label: str) -> dict:
+    """Validate a nested configuration object and reject unknown keys.
+
+    Enforces that value is a dict with only keys from the allowlist.
+    """
     if not isinstance(value, dict):
         raise ValueError(f"{label}: must be a mapping")
     unknown = set(value) - allowed
@@ -80,10 +83,77 @@ def _positive_integer(value, label: str) -> int:
 
 def load_settings(path) -> IngestionSettings:
     """Load strict, explicit JDBC execution defaults."""
-    raw = _mapping(_read_yaml(path), {"spark"}, "settings")
-    spark = _mapping(raw.get("spark"), {"jdbc"}, "settings.spark")
-    jdbc = _mapping(spark.get("jdbc"), {"num_partitions"}, "settings.spark.jdbc")
+    raw = _strict_object(_read_yaml(path), {"spark"}, "settings")
+    spark = _strict_object(raw.get("spark"), {"jdbc"}, "settings.spark")
+    jdbc = _strict_object(spark.get("jdbc"), {"num_partitions"}, "settings.spark.jdbc")
     return IngestionSettings(_positive_integer(jdbc.get("num_partitions"), "num_partitions"))
+
+
+def _parse_entity(entity: dict, position: int) -> EntityConfig:
+    """Parse and validate a single entity from a pipeline manifest.
+
+    Args:
+        entity: Raw entity dict from YAML.
+        position: 1-based position in the entities list for error messages.
+
+    Returns:
+        EntityConfig with fully validated fields.
+
+    Raises:
+        ValueError: If the entity is invalid.
+    """
+    if not isinstance(entity, dict):
+        raise ValueError(f"entity #{position}: must be a mapping")
+    unknown = set(entity) - _ALLOWED_ENTITY_KEYS
+    if unknown:
+        raise ValueError(f"entity #{position}: unknown keys {sorted(unknown)}")
+
+    fqn = entity.get("fqn")
+    if not isinstance(fqn, str) or not fqn:
+        raise ValueError(f"entity #{position}: fqn must be a non-empty string")
+
+    incremental_column = None
+    lookback_size = 0
+    lookback_unit = None
+    lookback_specified = False
+    if "incremental" in entity:
+        incremental = _strict_object(entity["incremental"], {"source_column", "lookback"}, "incremental")
+        incremental_column = incremental.get("source_column")
+        if not isinstance(incremental_column, str) or not _COLUMN_PATTERN.fullmatch(incremental_column):
+            raise ValueError("incremental.source_column must be a lowercase identifier")
+        if "lookback" in incremental:
+            lookback = _strict_object(incremental["lookback"], {"size", "unit"}, "incremental.lookback")
+            lookback_size = lookback.get("size")
+            if type(lookback_size) is not int or not 0 <= lookback_size < 10 ** 38:
+                raise ValueError("lookback.size must be a non-negative integer below 10^38")
+            lookback_unit = lookback.get("unit")
+            if "unit" in lookback and lookback_unit not in ("h", "d"):
+                raise ValueError("lookback.unit must be h or d")
+            lookback_specified = True
+
+    spark = _strict_object(entity.get("spark", {}), {"parallelism"}, f"entity {fqn!r}.spark")
+    parallelism = spark.get("parallelism", True)
+    if type(parallelism) is not bool:
+        raise ValueError(f"entity {fqn!r}: spark.parallelism must be a boolean")
+
+    airflow = _strict_object(entity.get("airflow", {}), {"pool"}, f"entity {fqn!r}.airflow")
+    pool = _strict_object(airflow.get("pool", {}), {"name", "slots"}, f"entity {fqn!r}.airflow.pool")
+    pool_name = pool.get("name", "default_pool")
+    if not isinstance(pool_name, str) or not pool_name.strip():
+        raise ValueError(f"entity {fqn!r}: pool.name must be a non-empty string")
+    slots = _positive_integer(pool.get("slots", 1), "pool.slots")
+
+    return EntityConfig(
+        fqn=fqn,
+        target_table=naming.resolve_target_table_name(fqn),
+        incremental_column=incremental_column,
+        parallelism=parallelism,
+        pool=pool_name,
+        pool_slots=slots,
+        lookback_size=lookback_size,
+        lookback_unit=lookback_unit,
+        lookback_specified=lookback_specified,
+    )
 
 
 def load_sources(path) -> dict[str, SourceConfig]:
@@ -138,61 +208,16 @@ def load_pipeline(path) -> PipelineManifest:
     entities_raw = raw.get("entities")
     if not isinstance(entities_raw, list) or not entities_raw:
         raise ValueError("pipeline manifest: entities must be a non-empty list")
+
     entities: list[EntityConfig] = []
     seen_fqns: set[str] = set()
-    for position, entity in enumerate(entities_raw):
-        if not isinstance(entity, dict):
-            raise ValueError(f"entity #{position + 1}: must be a mapping")
-        unknown = set(entity) - _ALLOWED_ENTITY_KEYS
-        if unknown:
-            raise ValueError(f"entity #{position + 1}: unknown keys {sorted(unknown)}")
-        fqn = entity.get("fqn")
-        if not isinstance(fqn, str) or not fqn:
-            raise ValueError(f"entity #{position + 1}: fqn must be a non-empty string")
-        if fqn in seen_fqns:
-            raise ValueError(f"duplicate entity FQN: {fqn!r}")
-        seen_fqns.add(fqn)
-        incremental_column = None
-        lookback_size = 0
-        lookback_unit = None
-        lookback_specified = False
-        if "incremental" in entity:
-            incremental = _mapping(entity["incremental"], {"source_column", "lookback"}, "incremental")
-            incremental_column = incremental.get("source_column")
-            if not isinstance(incremental_column, str) or not _COLUMN_PATTERN.fullmatch(incremental_column):
-                raise ValueError("incremental.source_column must be a lowercase identifier")
-            if "lookback" in incremental:
-                lookback = _mapping(incremental["lookback"], {"size", "unit"}, "incremental.lookback")
-                lookback_size = lookback.get("size")
-                if type(lookback_size) is not int or not 0 <= lookback_size < 10 ** 38:
-                    raise ValueError("lookback.size must be a non-negative integer below 10^38")
-                lookback_unit = lookback.get("unit")
-                if "unit" in lookback and lookback_unit not in ("h", "d"):
-                    raise ValueError("lookback.unit must be h or d")
-                lookback_specified = True
-        spark = _mapping(entity.get("spark", {}), {"parallelism"}, f"entity {fqn!r}.spark")
-        parallelism = spark.get("parallelism", True)
-        if type(parallelism) is not bool:
-            raise ValueError(f"entity {fqn!r}: spark.parallelism must be a boolean")
-        airflow = _mapping(entity.get("airflow", {}), {"pool"}, f"entity {fqn!r}.airflow")
-        pool = _mapping(airflow.get("pool", {}), {"name", "slots"}, f"entity {fqn!r}.airflow.pool")
-        pool_name = pool.get("name", "default_pool")
-        if not isinstance(pool_name, str) or not pool_name.strip():
-            raise ValueError(f"entity {fqn!r}: pool.name must be a non-empty string")
-        slots = _positive_integer(pool.get("slots", 1), "pool.slots")
-        entities.append(
-            EntityConfig(
-                fqn=fqn,
-                target_table=naming.resolve_target_table_name(fqn),
-                incremental_column=incremental_column,
-                parallelism=parallelism,
-                pool=pool_name,
-                pool_slots=slots,
-                lookback_size=lookback_size,
-                lookback_unit=lookback_unit,
-                lookback_specified=lookback_specified,
-            )
-        )
+    for position, entity_raw in enumerate(entities_raw):
+        entity = _parse_entity(entity_raw, position + 1)
+        if entity.fqn in seen_fqns:
+            raise ValueError(f"duplicate entity FQN: {entity.fqn!r}")
+        seen_fqns.add(entity.fqn)
+        entities.append(entity)
+
     naming.assert_unique_targets([entity.fqn for entity in entities])
     return PipelineManifest(
         source_id=source_id,

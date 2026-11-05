@@ -85,8 +85,8 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
         source_table=table, target_table=f"raw.e2e_contract.{target}",
         source_id=f"e2e_{source}", incremental_column=column,
-        partition_column=None, no_parallelism=True, num_partitions=1,
-        watermark_value=None, dag_id="e2e_temporal_extraction", run_id=None,
+        no_parallelism=True, num_partitions=1,
+        dag_id="e2e_temporal_extraction", run_id=None,
         process_id=None, force_full=False, reason=None, lookback_size=1, lookback_unit="d",
         lookback_given=True,
     )
@@ -209,8 +209,8 @@ def check_post_append_retry(spark, hook, jdbc, token):
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
         source_table="(SELECT CAST(1 AS bigint) AS position) retry_fixture",
         target_table="raw.e2e_contract.post_append_retry", source_id="e2e_retry",
-        incremental_column="position", partition_column=None, no_parallelism=True,
-        num_partitions=1, watermark_value=None, dag_id="e2e_post_append_retry",
+        incremental_column="position", no_parallelism=True,
+        num_partitions=1, dag_id="e2e_post_append_retry",
         run_id=token, process_id=meta.get_or_create_process_id(
             dag_id="e2e_post_append_retry", run_id=token, db_connect=hook.get_conn),
         force_full=False, reason=None, lookback_size=0, lookback_unit=None, lookback_given=False,

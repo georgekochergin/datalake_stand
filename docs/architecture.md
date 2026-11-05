@@ -659,7 +659,228 @@ SELECT batch_id, process_id, entity_fqn, mode, reason, lower_bound, upper_bound,
 FROM ingestion.extraction_batches ORDER BY batch_id DESC LIMIT 15;
 ```
 
-## 9. Типы данных и гарантии
+## 9. Как расширять стенд
+
+Стенд построен на трёх архитектурных осях: **JDBC-диалекты** (для новых RDB),
+**типы источников** (для потоковых/альтернативных протоколов) и **слои данных**
+(ODS, DDS, витрины). Каждая ось расширяется отдельно, без пересечений и заимствований.
+
+### 9.1. Добавление JDBC-диалекта (ClickHouse, Greenplum, Teradata)
+
+Диалект определяет, как конкретная RDB встраивается в JDBC-абстракцию: URL,
+цитирование идентификаторов, типы позиций инкремента и SQL-выражения для
+lossless-чтения временных меток.
+
+**Шаг 1:** Создать наследник `RdbmsDialect` в новом файле
+`ingestion/sources/rdbms/dialects/<dbms_name>.py`:
+
+```python
+from ..contracts import (
+    RdbmsDialect, ConnectionSpec, normalize_type_name,
+    integer_kind, decimal_kind, fractional_kind,
+)
+
+class ClickhouseDialect(RdbmsDialect):
+    conn_type_aliases = ("clickhouse",)
+    url_prefixes = ("jdbc:ch:",)
+    default_port = 8123
+    driver_class = "com.clickhouse.jdbc.ClickHouseDriver"
+
+    def build_jdbc_url(self, spec: ConnectionSpec) -> str:
+        return f"jdbc:ch://{spec.host}:{spec.port or self.default_port}/{spec.database}"
+
+    def quote_identifier(self, name: str) -> str:
+        return f'`{name.replace("`", "``")}`'
+
+    def position_kind(self, type_name, precision, scale) -> str:
+        name = normalize_type_name(type_name)
+        if name in ("INT8", "INT16", "INT32", "INT64"):
+            return integer_kind(name.replace("INT", ""))
+        if name == "DATE":
+            return "date"
+        if name.startswith("DATETIME"):
+            return f"timestamp_local({fractional_kind(3, 7)})"
+        raise ValueError(f"Unsupported ClickHouse position type: {name}")
+
+    def _typed_literal(self, text: str, family: str, precision: int) -> str:
+        if family == "date":
+            return f"parseDateISO8601('{text}')"
+        return f"parseDateTime64BestEffort('{text}')"
+
+    def position_expression(self, column: str, kind: str) -> str:
+        return column
+```
+
+**Шаг 2:** Зарегистрировать диалект в кортеже `_DIALECTS` в
+`ingestion/sources/rdbms/registry.py`:
+
+```python
+from .dialects.clickhouse import ClickhouseDialect
+
+_DIALECTS: tuple[RdbmsDialect, ...] = (
+    MssqlDialect(),
+    OracleDialect(),
+    ClickhouseDialect(),
+)
+```
+
+**Шаг 3:** Добавить тесты в `test/unit/test_dialects.py`:
+
+```python
+class ClickhouseDialectTests(unittest.TestCase):
+    def setUp(self):
+        self.dialect = ClickhouseDialect()
+
+    def test_conn_type(self):
+        self.assertIn("clickhouse", self.dialect.conn_type_aliases)
+
+    def test_position_kind_int(self):
+        self.assertEqual(self.dialect.position_kind("INT64", None, None), "bigint")
+
+    def test_quote_identifier(self):
+        self.assertEqual(self.dialect.quote_identifier("col_name"), "`col_name`")
+```
+
+**Нарушение контракта запрещено:** диалект может переопределить
+`position_expression` (для вывода позиции инкремента из СУБД без потери точности),
+но не может добавлять новые колонки в DataFrame, менять JDBC-читатель или
+взаимодействовать с Iceberg. Всё остальное — ответственность другой оси (см. ниже).
+
+### 9.2. Добавление типа источника (Kafka, S3, Files)
+
+Тип источника — это полностью новый канал доставки данных, отличный от JDBC.
+Kafka не расширяет `RdbmsDialect`; это **отдельная стопка** с собственными
+контрактами чтения и гарантиями.
+
+**Особенность:** файл `ingestion/generator/manifest.py` **явно отвергает**
+`type: kafka` (см. строку 103–104, проверка `if source_type == "kafka"`).
+Это временный barricade; здесь принимается решение, требующее планирования и одного PR на новый тип.
+
+Процесс (кратко):
+
+1. **Определить контракт.** Kafka — streaming (лучше batch для фиксации watermark):
+   что такое watermark? Партиция + offset? Timestamp? Как гарантировать
+   «одни и те же строки при повторе»?
+
+2. **Создать новую подсистему** `ingestion/sources/kafka/`:
+   - `contracts.py` — контракт Kafka-подключения и чтения
+   - `reader.py` — чтение партиций в DataFrame
+   - тесты в `test/unit/test_kafka.py`
+
+3. **Добавить оператор Airflow** (или расширить `IngestAppendOperator`):
+   - новый путь `ingestion/spark/raw/kafka/load_entity.py` для Spark-job
+   - валидация в генераторе DAG-ов
+
+4. **Зарегистрировать тип** в `manifest.py`: `if source_type == "kafka":`
+   вместо отвержения — вызвать специальную валидацию.
+
+5. **Обновить README** про Kafka и раздел 11 «Известные ограничения» в этом документе.
+
+**Почему отдельно от dialects:**
+
+- Kafka не имеет SQL; watermark — это не `MAX(column)`, а смещение/временная метка
+- Чтение streaming-протокола кардинально отличается от JDBC-запросов
+- Batch vs. streaming — выбор, пока не реализован; документация не должна его фиксировать
+
+### 9.3. Добавление слоя данных (ODS, DDS, витрины)
+
+Слой — это трансформационный уровень озера, построенный поверх предыдущего.
+Raw, ODS, DDS, DMA — это иерархия, не настройка. Каждый слой имеет свои
+каталоги Iceberg, правила наполнения и операции Spark.
+
+**Общая структура:**
+
+```
+ingestion/
+├── iceberg.py        (текущее: build_create_table_sql и schema_columns)
+├── spark/
+│   ├── raw/
+│   │   ├── rdbms/
+│   │   │   └── load_entity.py
+│   │   └── kafka/     (будущее, при добавлении Kafka)
+│   │       └── load_entity.py
+│   └── ods/           (новое, при добавлении ODS)
+│       ├── __init__.py
+│       └── load_entity.py (idempotent merge по ключу/версии)
+trino/
+├── ods/               (новое, при добавлении ODS: VIEW или SQL-логика)
+    └── entities/      (по мере добавления таблиц)
+```
+
+**Слой Raw (текущее состояние):**
+- Каталог: `raw` в Iceberg
+- Режим: append-only (полный снапшот или инкремент)
+- Гарантия: at-least-once; история всех состояний
+- DAG-ов: автоматически генерируются генератором из манифестов
+- Spark-job: `ingestion/spark/raw/rdbms/load_entity.py` (и будущее `kafka/`)
+
+**Слой ODS (планируется):**
+- Каталог: `ods` в Iceberg (отдельный каталог, не raw)
+- Режим: **идемпотентный merge** по (`source_id`, ключ сущности, версия)
+- Гарантия: актуальное состояние каждой записи (дедупликация за счёт merge)
+- DAG-ов: **не генерируются автоматически**
+- Пример конфига (в `ingestion/conf/pipelines/ods/` — новая папка):
+
+```yaml
+bank.yaml:
+  source_id: ods_bank_raw
+  schedule: "0 3 * * *"
+  entities:
+    - raw_fqn: retail_bank.clients
+      ods_table: ods.bank.retail_bank__clients
+      key_columns:
+        - client_id
+      order_by_columns:
+        - __load_dttm DESC
+```
+
+- Spark-job: `ingestion/spark/ods/load_entity.py` — новый скрипт с идемпотентным
+  merge (использует Iceberg `DELETE/MERGE` вместо `overwrite`). Пример:
+
+```python
+def load_ods_entity(spark, source_table, target_table, process_id, key_cols):
+    df = spark.read.table(source_table)
+
+    deduplicated = df.window(
+        partitionBy(key_cols),
+        orderBy("__load_dttm", "__process_id"),
+    ).filter(row_number() == 1)
+
+    deduplicated.write.format("iceberg") \
+        .mode("merge") \
+        .option("merge-on-read", "false") \
+        .save(target_table)
+```
+
+- Никакой автоматической генерации; DAG-ы пишутся вручную, как в продакшене.
+
+**Слои DDS и DMA (дальнейшее развитие):**
+- Следуют тому же паттерну: отдельные каталоги, собственные Spark-job'ы
+- DAG-ы пишут бизнес-аналитики; никаких генераторов
+
+**Почему правило 3 иерархично:**
+
+- Raw — зеркало источника (фреймворк). Не трогать при добавлении ODS.
+- ODS — дебюрократизация raw-сокровища. Может вырасти до своего слоя (каталога).
+- DDS и витрины — бизнес-логика. Живут вне фреймворка raw-инжесшена.
+
+Добавляя ODS, **не переименовывать** raw и **не обобщать** `iceberg.py`. Каждый
+слой — свой файл `load_entity.py` с собственной логикой идемпотентности.
+
+### 9.4. Инварианты расширения
+
+| Ось | Где код | Регистрация | Тесты | DAG-генерация |
+|---|---|---|---|---|
+| Диалект JDBC | `sources/rdbms/dialects/<name>.py` | Кортеж `_DIALECTS` в `registry.py` | В `test/unit/test_dialects.py` | Без изменений (вызывает `by_conn_type`) |
+| Тип источника | `sources/<type>/*.py` | Валидация в `manifest.py` (убрать отвержение) | `test/unit/test_<type>.py` | Может потребовать фреймворка или DAG-шаблона |
+| Слой данных | `spark/<layer>/load_entity.py` + `trino/<layer>/` | Новый DAG YAML или пусть Airflow | В `test/unit/test_load_<layer>.py` | Ручные DAG-ы (нет автогенератора для non-raw) |
+
+**Проверка:**
+- Новый диалект не влечёт изменений в `load_entity.py` и Kafka не появляется в `RdbmsDialect`
+- Новый тип источника не трогает `rdbms/` и не создаёт пустые каталоги в git
+- Новый слой не переписывает `iceberg.py` и не обобщает `raw/`
+
+## 10. Типы данных и гарантии
 
 Путь типа при загрузке: СУБД источника → JDBC → PySpark (Spark JDBC reader,
 у обоих диалектов включён `preferTimestampNTZ=true`) → Iceberg DDL. Схема
@@ -707,7 +928,7 @@ Oracle timezone-типов и строгую типизацию позиции �
   `ALTER TABLE`
   (раздел 5).
 
-## 10. Известные ограничения
+## 11. Известные ограничения
 
 | Ограничение | Где подробнее |
 |---|---|
