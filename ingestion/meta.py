@@ -5,7 +5,23 @@ Airflow nor any database driver. Connections are owned per call: one short
 transaction, commit or rollback, then close.
 """
 
+from __future__ import annotations
+
 from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Callable
+
+
+@dataclass(frozen=True)
+class _IncrementalConfig:
+    """Configuration for incremental extraction bounds computation."""
+
+    column: str | None
+    type: str | None
+    lookback_size: int
+    lookback_unit: str | None
+    calculate_lower: Callable | None
+    compare_positions: Callable | None
 
 
 @contextmanager
@@ -157,8 +173,7 @@ def _batch_mode_and_reason(incremental_column, watermark, force_full):
     return mode, reason
 
 
-def _incremental_bounds(mode, watermark, upper_bound, empty_at_plan, lookback_size, lookback_unit,
-                        force_full, incremental_column, calculate_lower, compare_positions):
+def _incremental_bounds(mode, watermark, upper_bound, empty_at_plan, force_full, incremental_config):
     """Compute incremental bounds and detect regressions without database access.
 
     Returns (lower, upper_bound, empty_at_plan, lookback_size, lookback_unit) tuple with validated bounds.
@@ -166,14 +181,15 @@ def _incremental_bounds(mode, watermark, upper_bound, empty_at_plan, lookback_si
     """
     lower = None
     if mode == "incremental":
-        if upper_bound is not None and compare_positions is not None and compare_positions(upper_bound, watermark) < 0:
+        if upper_bound is not None and incremental_config.compare_positions is not None and \
+                incremental_config.compare_positions(upper_bound, watermark) < 0:
             raise ValueError("Source maximum regressed below the committed watermark")
-        if lookback_size and calculate_lower is None:
+        if incremental_config.lookback_size and incremental_config.calculate_lower is None:
             raise ValueError("Nonzero lookback requires calculate_lower")
-        lower = calculate_lower(watermark) if calculate_lower else watermark
-        return lower, upper_bound, empty_at_plan, lookback_size, lookback_unit
+        lower = incremental_config.calculate_lower(watermark) if incremental_config.calculate_lower else watermark
+        return lower, upper_bound, empty_at_plan, incremental_config.lookback_size, incremental_config.lookback_unit
     else:
-        if force_full or incremental_column is None:
+        if force_full or incremental_config.column is None:
             upper_bound, empty_at_plan = None, False
         return None, upper_bound, empty_at_plan, 0, None
 
@@ -195,6 +211,14 @@ def plan_batch(*, process_id, dag_id, run_id, source_id,
     if force_full and (not isinstance(reason_text, str) or not reason_text.strip()):
         raise ValueError("Manual full snapshot requires reason_text")
     configured_mode = "incremental" if incremental_column is not None else "full_snapshot"
+    incremental_config = _IncrementalConfig(
+        column=incremental_column,
+        type=incremental_type,
+        lookback_size=lookback_size,
+        lookback_unit=lookback_unit,
+        calculate_lower=calculate_lower,
+        compare_positions=compare_positions,
+    )
     with connection(db_connect) as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO ingestion.extraction_state "
@@ -218,8 +242,7 @@ def plan_batch(*, process_id, dag_id, run_id, source_id,
         watermark = state["watermark"]
         mode, reason = _batch_mode_and_reason(incremental_column, watermark, force_full)
         lower, upper_bound, empty_at_plan, lookback_size, lookback_unit = _incremental_bounds(
-            mode, watermark, upper_bound, empty_at_plan, lookback_size, lookback_unit,
-            force_full, incremental_column, calculate_lower, compare_positions
+            mode, watermark, upper_bound, empty_at_plan, force_full, incremental_config
         )
         cur.execute(
             "INSERT INTO ingestion.extraction_batches "
