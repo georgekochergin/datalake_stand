@@ -29,13 +29,6 @@ def _row(cursor):
     return dict(zip((column[0] for column in cursor.description), row)) if row is not None else None
 
 
-def next_process_id(*, db_connect):
-    """Allocate an identifier for legacy callers."""
-    with connection(db_connect) as conn, conn.cursor() as cur:
-        cur.execute("SELECT nextval('ingestion.process_id_seq')")
-        return int(cur.fetchone()[0])
-
-
 def get_or_create_process_id(dag_id=None, run_id=None, execution_date=None, *, db_connect):
     """Allocate one process and start event per DagRun, including concurrent retries."""
     with connection(db_connect) as conn, conn.cursor() as cur:

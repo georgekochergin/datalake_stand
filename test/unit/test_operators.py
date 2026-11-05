@@ -170,7 +170,7 @@ class TestIngestOperator(unittest.TestCase):
         self.assertEqual([call.kwargs["run_id"] for call in self.module.meta.get_or_create_process_id.call_args_list], [
             "run_a", "run_a", "run_b", "run_b"
         ])
-        self.module.meta.next_process_id.assert_not_called()
+
 
 
 class TestRunConfValidation(unittest.TestCase):
