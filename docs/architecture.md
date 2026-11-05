@@ -685,13 +685,13 @@ class ClickhouseDialect(RdbmsDialect):
     url_prefixes = ("jdbc:ch:",)
     default_port = 8123
     driver_class = "com.clickhouse.jdbc.ClickHouseDriver"
-    
+
     def build_jdbc_url(self, spec: ConnectionSpec) -> str:
         return f"jdbc:ch://{spec.host}:{spec.port or self.default_port}/{spec.database}"
-    
+
     def quote_identifier(self, name: str) -> str:
         return f'`{name.replace("`", "``")}`'
-    
+
     def position_kind(self, type_name, precision, scale) -> str:
         name = normalize_type_name(type_name)
         if name in ("INT8", "INT16", "INT32", "INT64"):
@@ -701,12 +701,12 @@ class ClickhouseDialect(RdbmsDialect):
         if name.startswith("DATETIME"):
             return f"timestamp_local({fractional_kind(3, 7)})"
         raise ValueError(f"Unsupported ClickHouse position type: {name}")
-    
+
     def _typed_literal(self, text: str, family: str, precision: int) -> str:
         if family == "date":
             return f"parseDateISO8601('{text}')"
         return f"parseDateTime64BestEffort('{text}')"
-    
+
     def position_expression(self, column: str, kind: str) -> str:
         return column
 ```
@@ -730,13 +730,13 @@ _DIALECTS: tuple[RdbmsDialect, ...] = (
 class ClickhouseDialectTests(unittest.TestCase):
     def setUp(self):
         self.dialect = ClickhouseDialect()
-    
+
     def test_conn_type(self):
         self.assertIn("clickhouse", self.dialect.conn_type_aliases)
-    
+
     def test_position_kind_int(self):
         self.assertEqual(self.dialect.position_kind("INT64", None, None), "bigint")
-    
+
     def test_quote_identifier(self):
         self.assertEqual(self.dialect.quote_identifier("col_name"), "`col_name`")
 ```
@@ -840,12 +840,12 @@ bank.yaml:
 ```python
 def load_ods_entity(spark, source_table, target_table, process_id, key_cols):
     df = spark.read.table(source_table)
-    
+
     deduplicated = df.window(
         partitionBy(key_cols),
         orderBy("__load_dttm", "__process_id"),
     ).filter(row_number() == 1)
-    
+
     deduplicated.write.format("iceberg") \
         .mode("merge") \
         .option("merge-on-read", "false") \

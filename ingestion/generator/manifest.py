@@ -63,7 +63,7 @@ def _read_yaml(path) -> object:
 
 def _strict_object(value, allowed: set[str], label: str) -> dict:
     """Validate a nested configuration object and reject unknown keys.
-    
+
     Enforces that value is a dict with only keys from the allowlist.
     """
     if not isinstance(value, dict):
@@ -91,14 +91,14 @@ def load_settings(path) -> IngestionSettings:
 
 def _parse_entity(entity: dict, position: int) -> EntityConfig:
     """Parse and validate a single entity from a pipeline manifest.
-    
+
     Args:
         entity: Raw entity dict from YAML.
         position: 1-based position in the entities list for error messages.
-    
+
     Returns:
         EntityConfig with fully validated fields.
-    
+
     Raises:
         ValueError: If the entity is invalid.
     """
@@ -107,11 +107,11 @@ def _parse_entity(entity: dict, position: int) -> EntityConfig:
     unknown = set(entity) - _ALLOWED_ENTITY_KEYS
     if unknown:
         raise ValueError(f"entity #{position}: unknown keys {sorted(unknown)}")
-    
+
     fqn = entity.get("fqn")
     if not isinstance(fqn, str) or not fqn:
         raise ValueError(f"entity #{position}: fqn must be a non-empty string")
-    
+
     incremental_column = None
     lookback_size = 0
     lookback_unit = None
@@ -130,19 +130,19 @@ def _parse_entity(entity: dict, position: int) -> EntityConfig:
             if "unit" in lookback and lookback_unit not in ("h", "d"):
                 raise ValueError("lookback.unit must be h or d")
             lookback_specified = True
-    
+
     spark = _strict_object(entity.get("spark", {}), {"parallelism"}, f"entity {fqn!r}.spark")
     parallelism = spark.get("parallelism", True)
     if type(parallelism) is not bool:
         raise ValueError(f"entity {fqn!r}: spark.parallelism must be a boolean")
-    
+
     airflow = _strict_object(entity.get("airflow", {}), {"pool"}, f"entity {fqn!r}.airflow")
     pool = _strict_object(airflow.get("pool", {}), {"name", "slots"}, f"entity {fqn!r}.airflow.pool")
     pool_name = pool.get("name", "default_pool")
     if not isinstance(pool_name, str) or not pool_name.strip():
         raise ValueError(f"entity {fqn!r}: pool.name must be a non-empty string")
     slots = _positive_integer(pool.get("slots", 1), "pool.slots")
-    
+
     return EntityConfig(
         fqn=fqn,
         target_table=naming.resolve_target_table_name(fqn),
@@ -208,7 +208,7 @@ def load_pipeline(path) -> PipelineManifest:
     entities_raw = raw.get("entities")
     if not isinstance(entities_raw, list) or not entities_raw:
         raise ValueError("pipeline manifest: entities must be a non-empty list")
-    
+
     entities: list[EntityConfig] = []
     seen_fqns: set[str] = set()
     for position, entity_raw in enumerate(entities_raw):
@@ -217,7 +217,7 @@ def load_pipeline(path) -> PipelineManifest:
             raise ValueError(f"duplicate entity FQN: {entity.fqn!r}")
         seen_fqns.add(entity.fqn)
         entities.append(entity)
-    
+
     naming.assert_unique_targets([entity.fqn for entity in entities])
     return PipelineManifest(
         source_id=source_id,
