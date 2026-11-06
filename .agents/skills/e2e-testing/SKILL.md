@@ -47,9 +47,9 @@ description: Use when developing, extending, or debugging e2e and unit tests in 
 - **Изоляция СУБД**: `SYDAFA_CONTAINER_PREFIX` вычисляется скриптом из имени
   проекта, контейнеры источников тестового контура не пересекаются с живыми.
 - **`test/.workspace/`**: перед полным прогоном скрипт собирает изолированное
-  рабочее дерево (актуальные `conf/`, `airflow/`, `ingestion/`, `trino/`),
-  монтируемое override-файлом во все сервисы; по завершении (включая аварию и
-  прерывание по trap) дерево удаляется. В git не попадает.
+  рабочее дерево (актуальные `conf/`, `airflow/`, `ingestion/`, `trino/`,
+  `test/unit/`), монтируемое override-файлом во все сервисы; по завершении
+  (включая аварию и прерывание по trap) дерево удаляется. В git не попадает.
 
 ---
 
@@ -95,7 +95,9 @@ TEST_SKIP_BUILD=1 ./test/test.sh
    один `__process_id` на запуск, удвоение снапшотов при повторе,
    инкрементальный гейт, дельта после миграций источника, ручной полный
    снимок через conf запуска;
-6. в `airflow-scheduler`: инварианты реестра партий (`e2e_check_extraction.py`)
+6. в `airflow-scheduler`: инварианты реестра партий (`e2e_check_extraction.py`),
+   интеграционные `PostgresTests` клиента pg-meta против реального Postgres
+   (`test/unit/test_meta.py` с `EXTRACTION_TEST_DSN`; одноразовые БД на pg-meta)
    и отдельные Spark-приложения эволюции схемы и temporal-инкремента;
 7. гашение стека и очистка только принадлежащих контуру ресурсов (при неудаче
    логи Airflow выгружаются в `TEST_FAILURE_LOG_DIR`).

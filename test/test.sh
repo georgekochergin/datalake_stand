@@ -58,12 +58,16 @@ fi
 
 # ==================== ШАГ 2 (verify): Запуск на работающем стенде ====================
 run_runtime_checks() {
-  if [ ! -f "$TEST_WS/ingestion/spark/e2e_schema_evolution.py" ] || [ ! -f "$TEST_WS/ingestion/spark/e2e_temporal_extraction.py" ]; then
-    echo "FAIL: Отсутствуют workspace Spark e2e apps; сначала выполните полный запуск."
+  if [ ! -f "$TEST_WS/ingestion/spark/e2e_schema_evolution.py" ] || [ ! -f "$TEST_WS/ingestion/spark/e2e_temporal_extraction.py" ] || [ ! -f "$TEST_WS/test/unit/test_meta.py" ]; then
+    echo "FAIL: Отсутствуют workspace-артефакты runtime-проверок (Spark e2e apps, unit-тесты pg-meta); сначала выполните полный запуск."
     return 1
   fi
   "${COMPOSE[@]}" run --rm --no-deps test-runner python -u /app/run_flow.py
   "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler python /opt/airflow/plugins/e2e_check_extraction.py
+  # PostgresTests (test/unit/test_meta.py) против реального pg-meta: psycopg2 уже
+  # в образе Airflow, креды берутся из окружения сервиса; каждая проверка создаёт
+  # и удаляет собственную одноразовую БД, не трогая базу meta.
+  "${COMPOSE[@]}" exec -T airflow-scheduler bash -c 'EXTRACTION_TEST_DSN="host=pg-meta port=5432 dbname=meta user=$STAND_USER password=$STAND_PASSWORD" python /workspace/test/unit/test_meta.py -v'
   "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler spark-submit --master spark://spark-master:7077 --deploy-mode client /opt/spark-jobs/e2e_schema_evolution.py
   "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler spark-submit --master spark://spark-master:7077 --deploy-mode client /opt/spark-jobs/e2e_temporal_extraction.py
 }
@@ -141,6 +145,8 @@ cp -R "$PROJECT_ROOT/airflow/." "$TEST_WS/airflow/"
 cp "$PROJECT_ROOT/test/check_extraction.py" "$TEST_WS/airflow/plugins/e2e_check_extraction.py"
 cp "$PROJECT_ROOT/test/schema_evolution.py" "$TEST_WS/ingestion/spark/e2e_schema_evolution.py"
 cp "$PROJECT_ROOT/test/temporal_extraction.py" "$TEST_WS/ingestion/spark/e2e_temporal_extraction.py"
+mkdir -p "$TEST_WS/test/unit"
+cp "$PROJECT_ROOT"/test/unit/*.py "$TEST_WS/test/unit/"
 if [ -d "$PROJECT_ROOT/trino" ]; then
   cp -R "$PROJECT_ROOT/trino/." "$TEST_WS/trino/"
 fi
