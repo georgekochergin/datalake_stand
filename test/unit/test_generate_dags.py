@@ -182,6 +182,24 @@ class TestCheckMode(unittest.TestCase):
             output = Path(tmp) / "generated"
             self.assertTrue(compute_drift({"a.py": "x = 1\n"}, output))
 
+    def test_changed_content_is_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            (output / "a.py").write_text("x = 2\n", encoding="utf-8")
+            self.assertEqual(compute_drift({"a.py": "x = 1\n"}, output), ["differs: " + str(output / "a.py")])
+
+
+class TestGenerateAllValidation(unittest.TestCase):
+    """Pipeline tree and rendering preconditions."""
+
+    def test_empty_pipelines_dir_rejected(self):
+        from ingestion.generator.manifest import load_sources
+
+        repo_root = Path(__file__).resolve().parents[2]
+        sources = load_sources(repo_root / "ingestion" / "conf" / "sources.yaml")
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(ValueError, "no pipeline manifests"):
+            generate_all(sources, Path(tmp))
+
 
 if __name__ == "__main__":
     unittest.main()

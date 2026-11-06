@@ -270,5 +270,76 @@ class TestTableLogOperator(unittest.TestCase):
         self.assertFalse(self.events)
 
 
+class TestDagrunCallbacks(unittest.TestCase):
+    """DAG-level callbacks append END/FAILED for the run's allocated process."""
+
+    def setUp(self):
+        self.module = load_operators()
+
+    def context(self):
+        return {"dag_run": types.SimpleNamespace(dag_id="dag", run_id="run")}
+
+    def test_success_appends_end_event(self):
+        self.module.meta.find_process_id.return_value = 7
+        self.module.dagrun_success_callback(self.context())
+        kwargs = self.module.meta.log_dagrun.call_args.kwargs
+        self.assertEqual((kwargs["process_id"], kwargs["dag_id"], kwargs["status"]), (7, "dag", "END"))
+
+    def test_failure_appends_failed_event(self):
+        self.module.meta.find_process_id.return_value = 7
+        self.module.dagrun_failure_callback(self.context())
+        self.assertEqual(self.module.meta.log_dagrun.call_args.kwargs["status"], "FAILED")
+
+    def test_callback_without_process_id_is_noop(self):
+        self.module.meta.find_process_id.return_value = None
+        self.module.dagrun_success_callback(self.context())
+        self.module.dagrun_failure_callback(self.context())
+        self.module.meta.log_dagrun.assert_not_called()
+
+
+class TestTaskFailure(unittest.TestCase):
+    """The load on-failure callback logs FAILED only with an allocated process."""
+
+    def setUp(self):
+        self.module = load_operators()
+
+    def context(self, process_id):
+        context = {"ti": MagicMock()}
+        context["ti"].xcom_pull.return_value = process_id
+        return context
+
+    def test_failure_logs_task_event(self):
+        self.module.log_task_failed(self.context(42), "bank", "s.t", "raw.bank.s__t")
+        kwargs = self.module.meta.log_task.call_args.kwargs
+        self.assertEqual({key: value for key, value in kwargs.items() if key != "db_connect"}, {
+            "process_id": 42, "source_id": "bank", "entity_fqn": "s.t",
+            "datalake_table": "raw.bank.s__t", "status": "FAILED",
+        })
+        self.assertTrue(callable(kwargs["db_connect"]))
+
+    def test_failure_without_process_id_is_silent(self):
+        self.module.log_task_failed(self.context(None), "bank", "s.t", "raw.bank.s__t")
+        self.module.meta.log_task.assert_not_called()
+
+
+class TestMetaConnect(unittest.TestCase):
+    """pg-meta connections resolve through the Airflow Postgres provider."""
+
+    def test_hook_connection_forwarded(self):
+        module = load_operators()
+        hook = MagicMock()
+        modules = {}
+        for name in (
+            "airflow", "airflow.providers", "airflow.providers.postgres",
+            "airflow.providers.postgres.hooks", "airflow.providers.postgres.hooks.postgres",
+        ):
+            modules[name] = types.ModuleType(name)
+        modules["airflow.providers.postgres.hooks.postgres"].PostgresHook = hook
+        with patch.dict(sys.modules, modules):
+            module._meta_connect("custom_meta")
+        hook.assert_called_once_with(postgres_conn_id="custom_meta")
+        hook.return_value.get_conn.assert_called_once_with()
+
+
 if __name__ == "__main__":
     unittest.main()

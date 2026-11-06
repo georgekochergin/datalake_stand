@@ -138,5 +138,58 @@ class TestCompatibilityProjection(unittest.TestCase):
         self.assertIsNone(projection)
 
 
+class TestFirstRow(unittest.TestCase):
+    """First-row rendering as strings with owned statement lifecycle."""
+
+    def test_renders_each_column_as_string(self):
+        _, connection = fake_jvm()
+        statement = connection.createStatement.return_value
+        result = statement.executeQuery.return_value
+        result.getMetaData.return_value.getColumnCount.return_value = 3
+        result.getString.side_effect = ["10", "5", "5"]
+        self.assertEqual(jdbc.first_row(connection, "SELECT MAX(id) FROM t"), ["10", "5", "5"])
+        statement.executeQuery.assert_called_once_with("SELECT MAX(id) FROM t")
+        result.close.assert_called_once()
+        statement.close.assert_called_once()
+
+    def test_result_close_still_closes_statement(self):
+        _, connection = fake_jvm()
+        statement = connection.createStatement.return_value
+        statement.executeQuery.return_value.close.side_effect = RuntimeError("boom")
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            jdbc.first_row(connection, "SELECT 1")
+        statement.close.assert_called_once()
+
+
+class TestOrderedKeyColumns(unittest.TestCase):
+    """Primary keys order by KEY_SEQ; unique indexes add their columns."""
+
+    def metadata(self, primary_rows=(), index_rows=()):
+        metadata = MagicMock()
+        primary_keys = metadata.getPrimaryKeys.return_value
+        primary_keys.next.side_effect = [True] * len(primary_rows) + [False]
+        primary_keys.getInt.side_effect = [seq for seq, _ in primary_rows]
+        primary_keys.getString.side_effect = [name for _, name in primary_rows]
+        indexes = metadata.getIndexInfo.return_value
+        indexes.next.side_effect = [True] * len(index_rows) + [False]
+        indexes.getBoolean.return_value = False
+        indexes.getString.side_effect = list(index_rows)
+        return metadata
+
+    def test_primary_keys_sorted_by_sequence(self):
+        metadata = self.metadata(primary_rows=[(2, "b"), (1, "a")])
+        self.assertEqual(jdbc._ordered_key_columns(metadata, MetadataLocation(None, "s", "t")), ["a", "b"])
+        metadata.getPrimaryKeys.return_value.close.assert_called_once()
+        metadata.getIndexInfo.return_value.close.assert_called_once()
+
+    def test_unique_index_columns_appended_once(self):
+        metadata = self.metadata(primary_rows=[(1, "id")], index_rows=["uk"])
+        self.assertEqual(jdbc._ordered_key_columns(metadata, MetadataLocation(None, "s", "t")), ["id", "uk"])
+
+    def test_null_index_column_skipped(self):
+        metadata = self.metadata(index_rows=[None])
+        self.assertEqual(jdbc._ordered_key_columns(metadata, MetadataLocation(None, "s", "t")), [])
+
+
 if __name__ == "__main__":
     unittest.main()

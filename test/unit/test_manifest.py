@@ -230,6 +230,45 @@ class TestLoadPipeline(unittest.TestCase):
             manifest.load_pipeline(path)
 
 
+@unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
+class TestManifestShapeRejections(unittest.TestCase):
+    """Strict rejection of malformed manifest shapes."""
+
+    def load_sources(self, content):
+        return manifest.load_sources(write_temp_yaml(content))
+
+    def load_pipeline(self, content):
+        return manifest.load_pipeline(write_temp_yaml(content))
+
+    def test_source_config_not_mapping(self):
+        with self.assertRaisesRegex(ValueError, "config must be a mapping"):
+            self.load_sources("bank: bank_source\n")
+
+    def test_source_type_not_rdbms(self):
+        with self.assertRaisesRegex(ValueError, "type must be 'rdbms'"):
+            self.load_sources("bank:\n  type: files\n  airflow_conn_id: c\n")
+
+    def test_pipeline_not_mapping(self):
+        with self.assertRaisesRegex(ValueError, "must be a mapping"):
+            self.load_pipeline("- bank\n")
+
+    def test_pipeline_source_id_not_string(self):
+        with self.assertRaisesRegex(ValueError, "source_id"):
+            self.load_pipeline("source_id: 7\nentities:\n  - fqn: s.t\n")
+
+    def test_pipeline_catchup_not_boolean(self):
+        with self.assertRaisesRegex(ValueError, "catchup"):
+            self.load_pipeline("source_id: bank\ncatchup: 1\nentities:\n  - fqn: s.t\n")
+
+    def test_pipeline_tags_not_string_list(self):
+        with self.assertRaisesRegex(ValueError, "tags"):
+            self.load_pipeline("source_id: bank\ntags: [1]\nentities:\n  - fqn: s.t\n")
+
+    def test_entity_not_mapping(self):
+        with self.assertRaisesRegex(ValueError, "entity #1: must be a mapping"):
+            self.load_pipeline("source_id: bank\nentities:\n  - s.t\n")
+
+
 class TestValidatePipeline(unittest.TestCase):
     """Cross-validation of a pipeline manifest against the sources registry."""
 

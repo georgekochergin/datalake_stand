@@ -92,6 +92,10 @@ class TestPositions(unittest.TestCase):
             ("2026-10-26T00:00:00", "timestamp_instant(0)"),
             ("0001-01-01T00:00:00+01:00", "timestamp_instant(0)"),
             ("2026-10-26'; DROP TABLE x", "date"),
+            (datetime(2026, 10, 26, 12, 0), "date"),
+            (5, "timestamp_local(0)"),
+            ("yesterday", "timestamp_local(0)"),
+            ("2026-10-26 12:00", "timestamp_local(0)"),
         ):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 positions.canonical(value, kind)
