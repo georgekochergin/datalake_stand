@@ -67,6 +67,7 @@ services:
       - ./test/.workspace/ingestion:/opt/python/ingestion:ro
       - ./test/.workspace/ingestion/spark:/opt/spark-jobs:ro
       - ./test/.workspace/trino:/opt/airflow/sql:ro
+      - ./test/.workspace:/workspace:ro
       - airflow_logs:/opt/airflow/logs
 
   airflow-dag-processor:

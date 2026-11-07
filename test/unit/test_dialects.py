@@ -7,7 +7,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from ingestion.sources.rdbms import positions, registry
-from ingestion.sources.rdbms.contracts import ConnectionSpec, MetadataLocation
+from ingestion.sources.rdbms.contracts import (
+    ConnectionSpec,
+    MetadataLocation,
+    RdbmsDialect,
+    parse_source_table,
+)
 
 MSSQL = registry.by_conn_type("mssql")
 ORACLE = registry.by_conn_type("oracle")
@@ -264,6 +269,53 @@ class TestPartitionTypes(unittest.TestCase):
             for type_name in ("int8", "nvarchar", "varchar2", "", "rowversion", "datetimeoffset"):
                 with self.subTest(dialect=dialect.conn_type_aliases, type_name=type_name):
                     self.assertFalse(dialect.is_partition_type(type_name))
+
+
+class TestOracleIntegerKinds(unittest.TestCase):
+    """Oracle integer type names map onto the persisted integral kinds."""
+
+    def test_integer_family(self):
+        for name, expected in (
+            ("SMALLINT", "smallint"), ("INT", "integer"),
+            ("INTEGER", "integer"), ("BIGINT", "bigint"),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(ORACLE.position_kind(name, 19, 0), expected)
+
+
+class TestBaseDialectContract(unittest.TestCase):
+    """The base adapter declares the dialect surface without implementing it."""
+
+    def test_abstract_methods_rejected(self):
+        dialect = RdbmsDialect()
+        spec = ConnectionSpec(host="h", port=1, database="d", user="u", password="p")
+        for call in (
+            lambda: dialect.build_jdbc_url(spec),
+            lambda: dialect.quote_identifier("c"),
+            lambda: dialect.position_kind("INT", 10, 0),
+            lambda: dialect._typed_literal("2026-01-01", "date", 0),
+        ):
+            with self.assertRaises(NotImplementedError):
+                call()
+
+    def test_position_expression_passthrough(self):
+        self.assertEqual(RdbmsDialect().position_expression("[id]", "bigint"), "[id]")
+
+
+class TestParseSourceTable(unittest.TestCase):
+    """Reference grammar edge cases beyond quoting."""
+
+    def test_trailing_dot_rejected(self):
+        with self.assertRaises(ValueError):
+            parse_source_table("schema.")
+
+    def test_single_fragment_rejected(self):
+        with self.assertRaises(ValueError):
+            parse_source_table("only")
+
+    def test_leading_dot_rejected(self):
+        with self.assertRaises(ValueError):
+            parse_source_table(".table")
 
 
 if __name__ == "__main__":

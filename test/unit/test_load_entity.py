@@ -6,7 +6,7 @@ import types
 import unittest
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -222,6 +222,543 @@ class TestEmptyIncrementalWindow(unittest.TestCase):
                         {"mode": "full_snapshot"}, {"mode": "full_snapshot", "lower": None, "upper": None}):
             with self.subTest(changes=changes):
                 self.assertFalse(load_entity.empty_incremental_window(self.batch(**changes)))
+
+
+def fake_pyspark_types():
+    """A pyspark.sql.types double with sibling temporal classes, as upstream."""
+    module = types.ModuleType("pyspark.sql.types")
+    for name in (
+        "BinaryType", "BooleanType", "ByteType", "DateType", "DecimalType",
+        "DoubleType", "FloatType", "IntegerType", "LongType", "ShortType",
+        "StringType", "TimestampNTZType", "TimestampType",
+    ):
+        setattr(module, name, type(name, (), {}))
+    return module
+
+
+class RecordingReader:
+    """A JDBC reader double recording option calls and returning itself."""
+
+    def __init__(self, collected=None):
+        self.options = {}
+        self.collected = collected
+
+    def format(self, _):
+        """Accept the format step."""
+        return self
+
+    def option(self, key, value):
+        """Record one option and keep chaining."""
+        self.options[key] = value
+        return self
+
+    def load(self):
+        """Return the frame double."""
+        return self
+
+    def cache(self):
+        """Return the cached frame double."""
+        return self
+
+    def collect(self):
+        """Return the prepared rows."""
+        return self.collected
+
+
+class TestRenderSourceTable(unittest.TestCase):
+    """Dialect-quoted rendering of the source table reference."""
+
+    def test_mssql_brackets(self):
+        dialect = registry.by_conn_type("mssql")
+        self.assertEqual(
+            load_entity.render_source_table(dialect, "retail_bank.clients"),
+            "[retail_bank].[clients]",
+        )
+
+    def test_oracle_quotes_preserve_case(self):
+        dialect = registry.by_conn_type("oracle")
+        self.assertEqual(
+            load_entity.render_source_table(dialect, 'retail_bank."Clients"'),
+            '"retail_bank"."Clients"',
+        )
+
+    def test_expression_passthrough_only_when_allowed(self):
+        dialect = registry.by_conn_type("mssql")
+        expression = "(SELECT * FROM s.t WHERE 1=0)"
+        self.assertEqual(
+            load_entity.render_source_table(dialect, expression, allow_expression=True),
+            expression,
+        )
+        with self.assertRaises(ValueError):
+            load_entity.render_source_table(dialect, expression)
+
+    def test_malformed_reference_rejected(self):
+        with self.assertRaises(ValueError):
+            load_entity.render_source_table(registry.by_conn_type("mssql"), "a..b")
+
+
+class TestJdbcReader(unittest.TestCase):
+    """Reader construction from CLI arguments and dialect options."""
+
+    def test_mssql_reader_options(self):
+        spark = MagicMock()
+        reader = RecordingReader()
+        spark.read.format.return_value = reader
+        args = load_entity.parse_args(build_argv())
+        built = load_entity._jdbc_reader(spark, args, "(SELECT 1) q")
+        self.assertIs(built, reader)
+        self.assertEqual(reader.options, {
+            "url": MSSQL_URL, "dbtable": "(SELECT 1) q", "user": "sydafa",
+            "password": "secret", "driver": "com.microsoft.sqlserver.jdbc.SQLServerDriver",
+            "preferTimestampNTZ": "true",
+        })
+
+    def test_oracle_driver_selected_by_url(self):
+        spark = MagicMock()
+        reader = RecordingReader()
+        spark.read.format.return_value = reader
+        args = load_entity.parse_args(build_argv("--jdbc-url", ORACLE_URL))
+        load_entity._jdbc_reader(spark, args, "q")
+        self.assertEqual(reader.options["driver"], "oracle.jdbc.OracleDriver")
+
+
+class TestReadBounds(unittest.TestCase):
+    """MIN/MAX probing over the read query."""
+
+    def test_query_shape_and_tuple(self):
+        spark = MagicMock()
+        args = load_entity.parse_args(build_argv())
+        reader = RecordingReader(collected=[(1, 100)])
+        with patch.object(load_entity, "_jdbc_reader", return_value=reader) as builder:
+            self.assertEqual(load_entity._read_bounds(spark, args, "(SELECT 1) q", "client_id"), (1, 100))
+        query = builder.call_args.args[2]
+        self.assertEqual(
+            query,
+            "(SELECT MIN([client_id]) AS lower_bound, MAX([client_id]) AS upper_bound "
+            "FROM (SELECT 1) q) bounds",
+        )
+
+
+class TestSourcePosition(unittest.TestCase):
+    """Source-side incremental inspection over a stubbed JDBC layer."""
+
+    def args(self, **extra):
+        argv = build_argv("--incremental-column", "_batch_id", *sum(([k, v] for k, v in extra.items()), []))
+        return load_entity.parse_args(argv)
+
+    def inspect(self, metadata, row, inspect_only=False):
+        spark = MagicMock()
+        with patch.object(load_entity.jdbc, "connection") as managed, patch.object(
+            load_entity.jdbc, "column_metadata", return_value=metadata
+        ) as columns, patch.object(load_entity.jdbc, "first_row", return_value=row) as first:
+            result = load_entity.source_position(spark, self.args(), inspect_only=inspect_only)
+        managed.assert_called_once()
+        self.assertIn("FROM [retail_bank].[clients]", columns.call_args.args[1])
+        return result, first.call_args.args[1]
+
+    def test_regular_inspection(self):
+        result, sql = self.inspect([("_batch_id", "bigint", 19, 0)], ["10", "5", "5"])
+        self.assertEqual(result, ("bigint", "10", False, False))
+        self.assertEqual(sql, "SELECT MAX([_batch_id]), COUNT(*), COUNT([_batch_id]) FROM [retail_bank].[clients]")
+
+    def test_empty_and_null_diagnostics(self):
+        self.assertEqual(self.inspect([("_batch_id", "bigint", 19, 0)], ["0", "0", "0"])[0][2:], (True, False))
+        self.assertEqual(self.inspect([("_batch_id", "bigint", 19, 0)], ["5", "5", "4"])[0][2:], (False, True))
+
+    def test_inspect_only_probes_without_max(self):
+        _, sql = self.inspect([("_batch_id", "bigint", 19, 0)], ["0", "0", "0"], inspect_only=True)
+        self.assertTrue(sql.startswith("SELECT NULL, COUNT(*)"))
+
+    def test_oracle_temporal_kind(self):
+        spark = MagicMock()
+        args = load_entity.parse_args(build_argv("--jdbc-url", ORACLE_URL, "--incremental-column", "_batch_id"))
+        with patch.object(load_entity.jdbc, "connection"), patch.object(
+            load_entity.jdbc, "column_metadata", return_value=[("_batch_id", "TIMESTAMP(6) WITH TIME ZONE", 0, 6)]
+        ), patch.object(load_entity.jdbc, "first_row", return_value=["2026-01-01T00:00:00.000000Z", "3", "3"]) as first:
+            result = load_entity.source_position(spark, args)
+        self.assertEqual(result[0], "timestamp_instant(6)")
+        self.assertIn("TO_CHAR", first.call_args.args[1])
+
+
+class TestPlanBatch(unittest.TestCase):
+    """Batch resolution and planning before any source window is read."""
+
+    def setUp(self):
+        from ingestion import meta
+
+        self.meta = meta
+        self.spark = MagicMock()
+
+    def args(self, *extra):
+        argv = build_argv("--source-id", "bank", "--dag-id", "dag", "--run-id", "run", *extra)
+        return load_entity.parse_args(argv)
+
+    def plan(self, batch, planned=None, position=None, args=None):
+        with patch.object(self.meta, "get_batch", return_value=batch) as got, patch.object(
+            self.meta, "plan_batch", return_value=planned
+        ) as plan, patch.object(load_entity, "source_position", return_value=position):
+            result = load_entity._plan_batch(self.spark, args or self.args(), lambda: None)
+        return result, got, plan
+
+    def test_snapshot_entity_plans_new_batch(self):
+        planned = {"batch_id": 1, "status": "PLANNED"}
+        result, got, plan = self.plan(None, planned=planned)
+        self.assertIs(result, planned)
+        self.assertEqual(plan.call_args.kwargs["incremental_column"], None)
+        self.assertIsNone(plan.call_args.kwargs["incremental_type"])
+        self.assertIsNone(plan.call_args.kwargs["upper_bound"])
+        self.assertFalse(plan.call_args.kwargs["empty_at_plan"])
+        self.assertEqual((got.call_args.kwargs["dag_id"], got.call_args.kwargs["entity_fqn"]), ("dag", "retail_bank.clients"))
+
+    def test_incremental_entity_captures_detected_position(self):
+        planned = {"batch_id": 1}
+        args = self.args("--incremental-column", "_batch_id")
+        result, _, plan = self.plan(None, planned=planned,
+                                    position=("bigint", "10", False, False), args=args)
+        self.assertIs(result, planned)
+        self.assertEqual(
+            (plan.call_args.kwargs["incremental_type"], plan.call_args.kwargs["upper_bound"],
+             plan.call_args.kwargs["empty_at_plan"]),
+            ("bigint", "10", False),
+        )
+
+    def test_succeeded_batch_short_circuits(self):
+        batch = {"process_id": 42, "target_table": "raw.bank.retail_bank__clients",
+                 "incremental_column": None, "status": "SUCCEEDED"}
+        result, _, plan = self.plan(batch)
+        self.assertIs(result, batch)
+        plan.assert_not_called()
+
+    def test_existing_batch_identity_mismatch_rejected(self):
+        base = {"process_id": 42, "target_table": "raw.bank.retail_bank__clients",
+                "incremental_column": None, "status": "PLANNED"}
+        for changes in ({"process_id": 43}, {"target_table": "raw.bank.other"},
+                        {"incremental_column": "_batch_id"}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "identity or extraction contract"):
+                self.plan(base | changes)
+
+    def test_existing_batch_revalidated_and_returned(self):
+        batch = {"process_id": 42, "target_table": "raw.bank.retail_bank__clients",
+                 "incremental_column": "_batch_id", "incremental_type": "bigint",
+                 "status": "RUNNING"}
+        args = self.args("--incremental-column", "_batch_id")
+        result, _, plan = self.plan(batch, position=("bigint", "10", False, False), args=args)
+        self.assertIs(result, batch)
+        plan.assert_not_called()
+
+    def test_existing_batch_type_change_rejected(self):
+        batch = {"process_id": 42, "target_table": "raw.bank.retail_bank__clients",
+                 "incremental_column": "_batch_id", "incremental_type": "decimal(18,0)",
+                 "status": "RUNNING"}
+        args = self.args("--incremental-column", "_batch_id")
+        with self.assertRaisesRegex(ValueError, "type changed"):
+            self.plan(batch, position=("bigint", "10", False, False), args=args)
+
+    def test_null_incremental_value_rejected_unless_forced(self):
+        batch = {"process_id": 42, "target_table": "raw.bank.retail_bank__clients",
+                 "incremental_column": "_batch_id", "incremental_type": "bigint",
+                 "status": "PLANNED"}
+        args = self.args("--incremental-column", "_batch_id")
+        with self.assertRaisesRegex(ValueError, "NULL incremental"):
+            self.plan(batch, position=("bigint", "10", False, True), args=args)
+        forced = self.args("--incremental-column", "_batch_id", "--force-full", "--reason", "repair")
+        result, _, _ = self.plan(batch, position=("bigint", "10", False, True), args=forced)
+        self.assertIs(result, batch)
+
+    def test_calculate_lower_rejects_regression(self):
+        _, _, plan = self.plan(None, planned={"batch_id": 1},
+                               position=("bigint", "10", False, False),
+                               args=self.args("--incremental-column", "_batch_id"))
+        calculate_lower = plan.call_args.kwargs["calculate_lower"]
+        with self.assertRaisesRegex(ValueError, "SOURCE_POSITION_REGRESSION"):
+            calculate_lower("12")
+        self.assertEqual(calculate_lower("8"), "8")
+
+    def test_calculate_lower_regression_ignored_when_empty_or_forced(self):
+        args = self.args("--incremental-column", "_batch_id", "--force-full", "--reason", "r")
+        _, _, plan = self.plan(None, planned={"batch_id": 1},
+                               position=("bigint", "10", True, False), args=args)
+        self.assertEqual(plan.call_args.kwargs["calculate_lower"]("12"), "12")
+
+    def test_invalid_lookback_rejected_before_planning(self):
+        args = self.args("--incremental-column", "_batch_id", "--lookback-size", "1",
+                         "--lookback-unit", "h", "--lookback-given")
+        with self.assertRaisesRegex(ValueError, "forbids a unit"):
+            self.plan(None, position=("bigint", "10", False, False), args=args)
+
+
+class TestReadExtractFrame(unittest.TestCase):
+    """Frozen-window query assembly and optional partition discovery."""
+
+    def setUp(self):
+        self.spark = MagicMock()
+
+    def frame(self, args, batch, kind, projection=None, keys=(), bounds=(1, 100)):
+        reader = RecordingReader()
+        with patch.object(load_entity.jdbc, "compatibility_projection", return_value=projection), patch.object(
+            load_entity.jdbc, "key_columns", return_value=keys
+        ) as key_call, patch.object(load_entity, "_read_bounds", return_value=bounds) as probe, patch.object(
+            load_entity, "_jdbc_reader", return_value=reader
+        ) as builder:
+            result = load_entity._read_extract_frame(self.spark, args, batch, kind)
+        return result, reader, builder.call_args.args[2], key_call
+
+    def test_snapshot_without_keys_reads_single_partition(self):
+        args = load_entity.parse_args(build_argv())
+        batch = {"mode": "full_snapshot", "lower_bound": None, "upper_bound": None, "empty_at_plan": False}
+        result, reader, query, key_call = self.frame(args, batch, None, keys=[])
+        self.assertIs(result, reader)
+        self.assertEqual(
+            query,
+            "(SELECT extract_source.* FROM (SELECT * FROM [retail_bank].[clients]) extract_source) extract_batch",
+        )
+        key_call.assert_called_once()
+        self.assertNotIn("partitionColumn", reader.options)
+
+    def test_snapshot_with_keys_partitions_read(self):
+        args = load_entity.parse_args(build_argv())
+        batch = {"mode": "full_snapshot", "lower_bound": None, "upper_bound": None, "empty_at_plan": False}
+        _, reader, _, _ = self.frame(args, batch, None, keys=[("client_id", "int")])
+        self.assertEqual(
+            {key: reader.options[key] for key in ("partitionColumn", "lowerBound", "upperBound", "numPartitions")},
+            {"partitionColumn": "client_id", "lowerBound": "1", "upperBound": "100", "numPartitions": 4},
+        )
+
+    def test_incremental_window_filters_and_position(self):
+        args = load_entity.parse_args(build_argv("--incremental-column", "_batch_id"))
+        batch = {"mode": "incremental", "lower_bound": "5", "upper_bound": "10", "empty_at_plan": False}
+        _, reader, query, _ = self.frame(args, batch, "bigint", keys=[("_batch_id", "bigint")], bounds=(5, 10))
+        self.assertIn("[_batch_id] > 5 AND [_batch_id] <= 10", query)
+        self.assertIn(', [_batch_id] AS "__extract_position"', query)
+        self.assertEqual(reader.options["partitionColumn"], "_batch_id")
+
+    def test_empty_window_proves_no_rows(self):
+        args = load_entity.parse_args(build_argv("--incremental-column", "_batch_id"))
+        batch = {"mode": "incremental", "lower_bound": "10", "upper_bound": "10", "empty_at_plan": True}
+        _, _, query, _ = self.frame(args, batch, "bigint", keys=[])
+        self.assertIn("1=0", query)
+
+    def test_temporal_position_reads_one_partition(self):
+        args = load_entity.parse_args(build_argv("--incremental-column", "updated_at"))
+        batch = {"mode": "incremental", "lower_bound": None, "upper_bound": "2026-01-01T00:00:00Z",
+                 "empty_at_plan": False}
+        _, reader, query, _ = self.frame(
+            args, batch, "timestamp_instant(6)", keys=[("updated_at", "datetimeoffset")]
+        )
+        self.assertNotIn("1=0", query)
+        self.assertIn('"__extract_position"', query)
+        self.assertNotIn("partitionColumn", reader.options)
+
+    def test_disabled_parallelism_skips_probing(self):
+        args = load_entity.parse_args(build_argv("--no-parallelism"))
+        batch = {"mode": "full_snapshot", "lower_bound": None, "upper_bound": None, "empty_at_plan": False}
+        with patch.object(load_entity, "_jdbc_reader", return_value=RecordingReader()), patch.object(
+            load_entity.jdbc, "key_columns"
+        ) as keys, patch.object(load_entity, "_read_bounds") as probe:
+            load_entity._read_extract_frame(self.spark, args, batch, None)
+        keys.assert_not_called()
+        probe.assert_not_called()
+
+    def test_compatibility_projection_rewrites_select(self):
+        args = load_entity.parse_args(build_argv("--jdbc-url", ORACLE_URL))
+        batch = {"mode": "full_snapshot", "lower_bound": None, "upper_bound": None, "empty_at_plan": False}
+        projection = ['extract_source."a"', 'SYS_EXTRACT_UTC(extract_source."b") AS "b"']
+        _, _, query, _ = self.frame(args, batch, None, projection=projection)
+        self.assertIn('SELECT extract_source."a", SYS_EXTRACT_UTC(extract_source."b") AS "b"', query)
+        self.assertIn('FROM (SELECT * FROM "retail_bank"."clients")', query)
+
+
+class FakeSummary:
+    """A row-like aggregation result."""
+
+    def __init__(self, values):
+        self.values = values
+
+    def __getitem__(self, key):
+        """Look up one aggregated value."""
+        return self.values[key]
+
+
+class TestAppendRaw(unittest.TestCase):
+    """Raw append: aggregation, DDL bootstrap, and metadata column stamping."""
+
+    def setUp(self):
+        self.spark = MagicMock()
+
+    def functions(self):
+        module = types.ModuleType("pyspark.sql.functions")
+        for name in ("count", "max", "lit", "current_timestamp"):
+            setattr(module, name, MagicMock())
+        return module
+
+    def functions_modules(self):
+        """Register the functions and types doubles with their parent packages."""
+        root = types.ModuleType("pyspark")
+        sql = types.ModuleType("pyspark.sql")
+        functions = self.functions()
+        sql.functions = functions
+        root.sql = sql
+        return {
+            "pyspark": root,
+            "pyspark.sql": sql,
+            "pyspark.sql.functions": functions,
+            "pyspark.sql.types": fake_pyspark_types(),
+        }
+
+    def append(self, args, summary_values, fields, exists=False, incremental=True):
+        frame = MagicMock()
+        frame.agg.return_value.first.return_value = FakeSummary(summary_values)
+        clean = MagicMock()
+        doubles = self.functions_modules()
+        long_type = doubles["pyspark.sql.types"].LongType()
+        clean.schema.fields = [
+            types.SimpleNamespace(name=field, dataType=long_type)
+            if isinstance(field, str) else field
+            for field in fields
+        ]
+        frame.drop.return_value = clean
+        self.spark.catalog.tableExists.return_value = exists
+        argv = build_argv(*((["--incremental-column", "_batch_id"] if incremental else [])))
+        args = args or load_entity.parse_args(argv)
+        with patch.dict(sys.modules, doubles):
+            return load_entity._append_raw(
+                self.spark, args, {"batch_id": 7}, frame, "bigint" if incremental else None
+            ), clean
+
+    def test_rows_appended_with_metadata_columns(self):
+        result, clean = self.append(None, {"n": 5, "position": "10"}, ["client_id"])
+        self.assertEqual(result, (5, "10"))
+        first = clean.withColumn
+        second = first.return_value.withColumn
+        third = second.return_value.withColumn
+        self.assertEqual(first.call_args.args[0], "__load_dttm")
+        self.assertEqual(second.call_args.args[0], "__process_id")
+        self.assertEqual(third.call_args.args[0], "__batch_id")
+        portion = third.return_value
+        portion.writeTo.assert_called_once_with("raw.bank.retail_bank__clients")
+        write = portion.writeTo.return_value
+        self.assertEqual(write.option.call_args.args, ("mergeSchema", "true"))
+        self.assertEqual(write.option.return_value.option.call_args.args, ("check-ordering", "false"))
+        write.option.return_value.option.return_value.append.assert_called_once_with()
+        self.spark.catalog.tableExists.assert_called_once_with("raw.bank.retail_bank__clients")
+
+    def test_first_load_creates_namespace_and_table(self):
+        self.append(None, {"n": 0}, ["client_id"], exists=False, incremental=False)
+        executed = [call.args[0] for call in self.spark.sql.call_args_list]
+        self.assertEqual(executed[0], "CREATE NAMESPACE IF NOT EXISTS raw.bank")
+        self.assertTrue(executed[1].startswith("CREATE TABLE raw.bank.retail_bank__clients"))
+
+    def test_existing_table_skips_ddl(self):
+        self.append(None, {"n": 3}, ["client_id"], exists=True, incremental=False)
+        executed = [call.args[0] for call in self.spark.sql.call_args_list]
+        self.assertTrue(all("CREATE TABLE" not in sql for sql in executed))
+
+    def test_zero_rows_verify_schema_without_write(self):
+        result, clean = self.append(None, {"n": 0, "position": None}, ["client_id"])
+        self.assertEqual(result, (0, None))
+        clean.withColumn.assert_not_called()
+
+    def test_metadata_collision_rejected(self):
+        with self.assertRaisesRegex(ValueError, "collides"):
+            self.append(None, {"n": 1, "position": "1"}, ["__batch_id"])
+
+
+class TestManagedLoad(unittest.TestCase):
+    """Managed execution: planning, empty windows, finalization, and failure."""
+
+    def setUp(self):
+        from ingestion import meta
+
+        self.meta = meta
+        self.spark = MagicMock()
+        self.source = MagicMock()
+        psycopg2 = types.ModuleType("psycopg2")
+        psycopg2.connect = MagicMock(return_value=MagicMock())
+        self.psycopg2 = psycopg2
+
+    def batch(self, **changes):
+        values = {"batch_id": 7, "status": "RUNNING", "incremental_type": "bigint",
+                  "mode": "incremental", "lower_bound": "5", "upper_bound": "10",
+                  "watermark_before": None, "reason": "bootstrap"}
+        values.update(changes)
+        return values
+
+    def args(self, *extra):
+        return load_entity.parse_args(build_argv(
+            "--source-id", "bank", "--dag-id", "dag", "--run-id", "run", *extra
+        ))
+
+    def load(self, batch, args=None, appended=(5, "10"), append_error=None):
+        """Run managed_load with every collaborator patched; return the patchers' mocks."""
+        args = args or self.args("--incremental-column", "_batch_id")
+        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.object(
+            load_entity, "_plan_batch", return_value=batch
+        ), patch.object(load_entity, "_read_extract_frame", return_value=self.source) as read_frame, patch.object(
+            load_entity, "_append_raw",
+            **({"side_effect": append_error} if append_error else {"return_value": appended}),
+        ) as append, patch.object(self.meta, "start_batch") as started, patch.object(
+            self.meta, "finalize_batch"
+        ) as finalize, patch.object(self.meta, "fail_batch") as failed:
+            load_entity.managed_load(self.spark, args)
+        return types.SimpleNamespace(read_frame=read_frame, append=append, started=started,
+                                     finalize=finalize, failed=failed)
+
+    def test_succeeded_batch_is_noop(self):
+        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.object(
+            load_entity, "_plan_batch", return_value=self.batch(status="SUCCEEDED")
+        ):
+            load_entity.managed_load(self.spark, load_entity.parse_args(build_argv()))
+        self.source.unpersist.assert_not_called()
+
+    def test_provably_empty_window_finalizes_without_reading(self):
+        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.object(
+            load_entity, "_plan_batch", return_value=self.batch(lower_bound="10")
+        ), patch.object(load_entity, "_read_extract_frame") as read_frame, patch.object(
+            self.meta, "finalize_batch"
+        ) as finalize:
+            load_entity.managed_load(self.spark, load_entity.parse_args(build_argv()))
+        read_frame.assert_not_called()
+        self.assertEqual(
+            (finalize.call_args.kwargs["row_count"], finalize.call_args.kwargs["observed_max"]),
+            (0, None),
+        )
+
+    def test_success_finalizes_with_typed_maximum(self):
+        run = self.load(self.batch())
+        run.started.assert_called_once_with(batch_id=7, db_connect=ANY)
+        run.failed.assert_not_called()
+        self.assertEqual(run.finalize.call_args.kwargs["watermark_after"], "10")
+        self.source.unpersist.assert_called_once()
+
+    def test_regular_window_never_regresses_watermark(self):
+        run = self.load(self.batch(watermark_before="12", reason="regular"))
+        self.assertEqual(run.finalize.call_args.kwargs["watermark_after"], "12")
+
+    def test_manual_full_preserves_watermark(self):
+        run = self.load(self.batch(watermark_before="12", reason="manual_full"))
+        self.assertEqual(run.finalize.call_args.kwargs["watermark_after"], "12")
+
+    def test_failure_path_records_sanitized_error_and_reraises(self):
+        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.object(
+            load_entity, "_plan_batch", return_value=self.batch()
+        ), patch.object(load_entity, "_read_extract_frame", return_value=self.source), patch.object(
+            load_entity, "_append_raw", side_effect=RuntimeError("secret boom")
+        ), patch.object(self.meta, "start_batch"), patch.object(self.meta, "fail_batch") as failed:
+            with self.assertRaisesRegex(RuntimeError, "secret boom"):
+                load_entity.managed_load(self.spark, self.args("--incremental-column", "_batch_id"))
+        self.assertEqual(failed.call_args.kwargs["error"], "Extraction execution failed; see task logs")
+        self.source.unpersist.assert_called_once()
+
+    def test_failure_recording_failure_still_reraises(self):
+        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.object(
+            load_entity, "_plan_batch", return_value=self.batch()
+        ), patch.object(load_entity, "_read_extract_frame", return_value=self.source), patch.object(
+            load_entity, "_append_raw", side_effect=RuntimeError("secret boom")
+        ), patch.object(self.meta, "start_batch"), patch.object(
+            self.meta, "fail_batch", side_effect=RuntimeError("meta down")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "secret boom"), self.assertLogs("load_entity", level="WARNING"):
+                load_entity.managed_load(self.spark, self.args("--incremental-column", "_batch_id"))
 
 
 if __name__ == "__main__":
