@@ -209,8 +209,8 @@ class TestMain(unittest.TestCase):
 class TestEmptyIncrementalWindow(unittest.TestCase):
     """Only a zero-lookback window with equal typed bounds is provably empty."""
 
-    def batch(self, mode="incremental", lower="10", upper="10", lookback=0):
-        return {"mode": mode, "lower_bound": lower, "upper_bound": upper, "lookback_size": lookback}
+    def batch(self, lower="10", upper="10", lookback=0):
+        return {"lower_bound": lower, "upper_bound": upper, "lookback_size": lookback}
 
     def test_equal_bounds_with_zero_lookback_is_empty(self):
         self.assertTrue(load_entity.empty_incremental_window(self.batch()))
@@ -221,8 +221,7 @@ class TestEmptyIncrementalWindow(unittest.TestCase):
         self.assertFalse(load_entity.empty_incremental_window(self.batch(lower=None, lookback=3)))
 
     def test_strict_window_with_distinct_bounds_is_not_empty(self):
-        for changes in ({"lower": "7"}, {"upper": "12"}, {"lower": None}, {"lower": None, "upper": None},
-                        {"mode": "full_snapshot"}, {"mode": "full_snapshot", "lower": None, "upper": None}):
+        for changes in ({"lower": "7"}, {"upper": "12"}, {"lower": None}, {"lower": None, "upper": None}):
             with self.subTest(changes=changes):
                 self.assertFalse(load_entity.empty_incremental_window(self.batch(**changes)))
 
@@ -399,16 +398,11 @@ class TestPlanBatch(unittest.TestCase):
             result = load_entity._plan_batch(self.spark, args or self.args(), lambda: None)
         return result, got, plan, probe
 
-    def test_snapshot_entity_plans_new_batch(self):
-        planned = {"status": "PLANNED"}
-        result, got, plan, probe = self.plan(None, planned=planned)
-        self.assertIs(result, planned)
-        self.assertEqual(plan.call_args.kwargs["incremental_column"], None)
-        self.assertIsNone(plan.call_args.kwargs["incremental_type"])
-        self.assertIsNone(plan.call_args.kwargs["upper_bound"])
-        self.assertFalse(plan.call_args.kwargs["empty_at_plan"])
-        self.assertEqual((got.call_args.kwargs["process_id"], got.call_args.kwargs["source_id"],
-                          got.call_args.kwargs["entity_fqn"]), (42, "bank", "retail_bank.clients"))
+    def test_full_slice_entity_skips_registry(self):
+        result, got, plan, probe = self.plan(None)
+        self.assertIsNone(result)
+        got.assert_not_called()
+        plan.assert_not_called()
         probe.assert_not_called()
 
     def test_incremental_entity_captures_detected_position(self):
@@ -453,8 +447,9 @@ class TestPlanBatch(unittest.TestCase):
 
     def test_existing_batch_target_mismatch_rejected(self):
         batch = {"target_table": "raw.bank.other", "status": "PLANNED"}
+        args = self.args("--incremental-column", "_batch_id")
         with self.assertRaisesRegex(ValueError, "target does not match"):
-            self.plan(batch)
+            self.plan(batch, args=args)
 
     def test_retry_replays_frozen_window_without_source_access(self):
         batch = {"target_table": "raw.bank.retail_bank__clients",
@@ -518,7 +513,7 @@ class TestReadExtractFrame(unittest.TestCase):
 
     def test_snapshot_without_keys_reads_single_partition(self):
         args = load_entity.parse_args(build_argv())
-        batch = {"mode": "full_snapshot", "lower_bound": None, "lower_bound_op": ">",
+        batch = {"lower_bound": None, "lower_bound_op": ">",
                  "upper_bound": None, "empty_at_plan": False}
         result, reader, query, key_call = self.frame(args, batch, None, keys=[])
         self.assertIs(result, reader)
@@ -531,7 +526,7 @@ class TestReadExtractFrame(unittest.TestCase):
 
     def test_snapshot_with_keys_partitions_read(self):
         args = load_entity.parse_args(build_argv())
-        batch = {"mode": "full_snapshot", "lower_bound": None, "lower_bound_op": ">",
+        batch = {"lower_bound": None, "lower_bound_op": ">",
                  "upper_bound": None, "empty_at_plan": False}
         _, reader, _, _ = self.frame(args, batch, None, keys=[("client_id", "int")])
         self.assertEqual(
@@ -541,7 +536,7 @@ class TestReadExtractFrame(unittest.TestCase):
 
     def test_incremental_window_filters_and_position(self):
         args = load_entity.parse_args(build_argv("--incremental-column", "_batch_id"))
-        batch = {"mode": "incremental", "lower_bound": "5", "lower_bound_op": ">",
+        batch = {"lower_bound": "5", "lower_bound_op": ">",
                  "upper_bound": "10", "empty_at_plan": False}
         _, reader, query, _ = self.frame(args, batch, "bigint", keys=[("_batch_id", "bigint")], bounds=(5, 10))
         self.assertIn("[_batch_id] > 5 AND [_batch_id] <= 10", query)
@@ -550,14 +545,14 @@ class TestReadExtractFrame(unittest.TestCase):
 
     def test_aligned_lookback_lower_uses_inclusive_operator(self):
         args = load_entity.parse_args(build_argv("--incremental-column", "_batch_id"))
-        batch = {"mode": "incremental", "lower_bound": "2026-10-23T00:00:00Z",
+        batch = {"lower_bound": "2026-10-23T00:00:00Z",
                  "lower_bound_op": ">=", "upper_bound": "2026-10-26T12:34:56Z", "empty_at_plan": False}
         _, _, query, _ = self.frame(args, batch, "timestamp_instant(0)", keys=[])
         self.assertIn("[_batch_id] >= ", query)
 
     def test_missing_lower_bound_fully_dropped(self):
         args = load_entity.parse_args(build_argv("--incremental-column", "_batch_id"))
-        batch = {"mode": "incremental", "lower_bound": None, "lower_bound_op": ">=",
+        batch = {"lower_bound": None, "lower_bound_op": ">=",
                  "upper_bound": "10", "empty_at_plan": False}
         _, _, query, _ = self.frame(args, batch, "bigint", keys=[])
         self.assertNotIn(">=", query)
@@ -565,14 +560,14 @@ class TestReadExtractFrame(unittest.TestCase):
 
     def test_empty_window_proves_no_rows(self):
         args = load_entity.parse_args(build_argv("--incremental-column", "_batch_id"))
-        batch = {"mode": "incremental", "lower_bound": "10", "lower_bound_op": ">",
+        batch = {"lower_bound": "10", "lower_bound_op": ">",
                  "upper_bound": "10", "empty_at_plan": True}
         _, _, query, _ = self.frame(args, batch, "bigint", keys=[])
         self.assertIn("1=0", query)
 
     def test_temporal_position_reads_one_partition(self):
         args = load_entity.parse_args(build_argv("--incremental-column", "updated_at"))
-        batch = {"mode": "incremental", "lower_bound": None, "lower_bound_op": ">",
+        batch = {"lower_bound": None, "lower_bound_op": ">",
                  "upper_bound": "2026-01-01T00:00:00Z", "empty_at_plan": False}
         _, reader, query, _ = self.frame(
             args, batch, "timestamp_instant(6)", keys=[("updated_at", "datetimeoffset")]
@@ -583,7 +578,7 @@ class TestReadExtractFrame(unittest.TestCase):
 
     def test_disabled_parallelism_skips_probing(self):
         args = load_entity.parse_args(build_argv("--no-parallelism"))
-        batch = {"mode": "full_snapshot", "lower_bound": None, "lower_bound_op": ">",
+        batch = {"lower_bound": None, "lower_bound_op": ">",
                  "upper_bound": None, "empty_at_plan": False}
         with patch.object(load_entity, "_jdbc_reader", return_value=RecordingReader()), patch.object(
             load_entity.jdbc, "key_columns"
@@ -594,7 +589,7 @@ class TestReadExtractFrame(unittest.TestCase):
 
     def test_compatibility_projection_rewrites_select(self):
         args = load_entity.parse_args(build_argv("--jdbc-url", ORACLE_URL))
-        batch = {"mode": "full_snapshot", "lower_bound": None, "lower_bound_op": ">",
+        batch = {"lower_bound": None, "lower_bound_op": ">",
                  "upper_bound": None, "empty_at_plan": False}
         projection = ['extract_source."a"', 'SYS_EXTRACT_UTC(extract_source."b") AS "b"']
         _, _, query, _ = self.frame(args, batch, None, projection=projection)
@@ -710,7 +705,7 @@ class TestManagedLoad(unittest.TestCase):
 
     def batch(self, **changes):
         values = {"process_id": 7, "status": "RUNNING", "incremental_type": "bigint",
-                  "mode": "incremental", "lower_bound": "5", "lower_bound_op": ">",
+                  "lower_bound": "5", "lower_bound_op": ">",
                   "upper_bound": "10", "lookback_size": 0,
                   "watermark_before": None, "reason": "bootstrap"}
         values.update(changes)
@@ -742,6 +737,22 @@ class TestManagedLoad(unittest.TestCase):
         ):
             load_entity.managed_load(self.spark, load_entity.parse_args(build_argv()))
         self.source.unpersist.assert_not_called()
+
+    def test_full_slice_entity_loads_without_registry(self):
+        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.object(
+            load_entity, "_plan_batch", return_value=None
+        ), patch.object(load_entity, "_read_extract_frame", return_value=self.source) as read_frame, patch.object(
+            load_entity, "_append_raw", return_value=(7, None)
+        ) as append, patch.object(self.meta, "start_batch") as started, patch.object(
+            self.meta, "finalize_batch"
+        ) as finalize, patch.object(self.meta, "fail_batch") as failed:
+            load_entity.managed_load(self.spark, load_entity.parse_args(build_argv()))
+        read_frame.assert_called_once()
+        append.assert_called_once()
+        self.source.unpersist.assert_called_once()
+        started.assert_not_called()
+        finalize.assert_not_called()
+        failed.assert_not_called()
 
     def test_provably_empty_window_finalizes_without_reading(self):
         with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.object(

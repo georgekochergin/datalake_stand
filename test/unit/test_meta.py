@@ -57,7 +57,7 @@ class TransactionTests(unittest.TestCase):
         cur = conn.cursor.return_value.__enter__.return_value
         cur.rowcount = 0
         state = {"watermark": "9"}
-        batch = {"status": "RUNNING", "mode": "incremental", "process_id": 1,
+        batch = {"status": "RUNNING", "process_id": 1,
                  "incremental_column": "id", "source_id": "bank", "entity_fqn": "s.t",
                  "expected_revision": 1}
         with patch.object(meta, "_lock_batch", return_value=(state, batch)):
@@ -130,14 +130,14 @@ class PostgresTests(unittest.TestCase):
     def state(self):
         """Read committed state for this case."""
         with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
-            cur.execute("SELECT * FROM ingestion.extraction_state WHERE source_id = %s", (self.source,))
+            cur.execute("SELECT * FROM ingestion.incremental_state WHERE source_id = %s", (self.source,))
             return meta._row(cur)
 
     def test_bootstrap_retry_and_idempotent_success(self):
         """Bounds and IDs survive failures and success is finalized only once."""
         batch = self.plan()
-        self.assertEqual((batch["reason"], batch["mode"], batch["expected_revision"]),
-                         ("bootstrap", "incremental", 1))
+        self.assertEqual((batch["reason"], batch["expected_revision"]),
+                         ("bootstrap", 1))
         meta.start_batch(process_id=batch["process_id"], source_id=batch["source_id"],
                          entity_fqn=batch["entity_fqn"], db_connect=self.connect)
         meta.fail_batch(process_id=batch["process_id"], source_id=batch["source_id"],
@@ -172,17 +172,12 @@ class PostgresTests(unittest.TestCase):
         self.assertEqual(self.finish(batch, count=0, observed=None)["watermark_after"], "10")
         self.assertEqual(self.state()["revision"], 5)
 
-    def test_full_slice_never_touches_state(self):
-        """Full-slice entities append forever without advancing extraction state."""
-        batch = self.plan(incremental_column=None, incremental_type=None)
-        self.assertEqual((batch["reason"], batch["mode"]), ("regular", "full_snapshot"))
-        result = meta.finalize_batch(process_id=batch["process_id"],
-                                     source_id=batch["source_id"],
-                                     entity_fqn=batch["entity_fqn"], row_count=3,
-                                     observed_max=None, db_connect=self.connect)
-        self.assertEqual(result["watermark_after"], None)
-        self.assertEqual((self.state()["watermark"], self.state()["revision"],
-                          self.state()["last_process_id"]), (None, 1, None))
+    def test_registry_rejects_non_incremental_entities(self):
+        """Full-slice entities load outside the incremental registry."""
+        with self.assertRaisesRegex(ValueError, "requires an incremental"):
+            self.plan(incremental_column=None, incremental_type=None)
+        with self.assertRaisesRegex(ValueError, "requires an incremental"):
+            self.plan(incremental_type=None)
 
     def test_empty_bootstrap_and_lower_underflow(self):
         """Empty bootstrap is explicit and typed underflow removes the lower filter."""
@@ -204,7 +199,7 @@ class PostgresTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "contract"):
             self.plan(incremental_column="other")
         with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
-            cur.execute("UPDATE ingestion.extraction_state SET revision = revision + 1 WHERE source_id = %s",
+            cur.execute("UPDATE ingestion.incremental_state SET revision = revision + 1 WHERE source_id = %s",
                         (self.source,))
         for operation in (
             lambda: meta.get_batch(process_id=batch["process_id"], source_id=batch["source_id"],
@@ -216,7 +211,7 @@ class PostgresTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "revision"):
                 operation()
         with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
-            cur.execute("SELECT status FROM ingestion.extraction_batches "
+            cur.execute("SELECT status FROM ingestion.incremental_batches "
                         "WHERE process_id = %s AND source_id = %s AND entity_fqn = %s",
                         (batch["process_id"], batch["source_id"], batch["entity_fqn"]))
             self.assertEqual(cur.fetchone()[0], "PLANNED")
@@ -247,23 +242,24 @@ class PostgresTests(unittest.TestCase):
         with self.assertRaises(self.psycopg2.Error):
             with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE ingestion.extraction_state SET last_process_id = %s WHERE source_id = %s",
+                    "UPDATE ingestion.incremental_state SET last_process_id = %s WHERE source_id = %s",
                     (2147483647, self.source),
                 )
         self.assertIsNone(self.state()["last_process_id"])
 
-    def test_reason_check_rejects_manual_full_row(self):
-        """The target schema has no manual_full reason or reason_text slot."""
+    def test_reason_check_rejects_unknown_reasons(self):
+        """The registry knows only the bootstrap and regular reasons."""
         self.plan()
-        with self.assertRaises(self.psycopg2.Error):
-            with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO ingestion.extraction_batches "
-                    "(process_id, dag_id, run_id, source_id, entity_fqn, target_table, mode, reason, "
-                    "expected_revision, lower_bound_op) VALUES "
-                    "(999, 'dag', 'run', %s, 's.t', 'raw.s.t', 'full_snapshot', 'manual_full', 1, '>')",
-                    (self.source,),
-                )
+        for reason in ("manual_full", "scheduled_full", "full_snapshot"):
+            with self.subTest(reason=reason), self.assertRaises(self.psycopg2.Error):
+                with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO ingestion.incremental_batches "
+                        "(process_id, dag_id, run_id, source_id, entity_fqn, target_table, reason, "
+                        "expected_revision, lower_bound_op) VALUES "
+                        "(999, 'dag', 'run', %s, 's.t', 'raw.s.t', %s, 1, '>')",
+                        (self.source, reason),
+                    )
 
 
 if __name__ == "__main__":

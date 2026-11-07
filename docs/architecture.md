@@ -152,9 +152,10 @@ JDBC-параллелизм отключён).
 не metadata DB Airflow и не каталог Iceberg. В её схеме `ingestion` хранятся:
 
 - журналы DAG-запусков и задач (`airflow_dagruns_log`, `airflow_tasks_log`);
-- текущее состояние загрузки каждой сущности (`extraction_state`);
-- реестр партий — загрузок одной сущности в одном исполнении DAG-а
-  (`extraction_batches`).
+- состояние инкрементальных сущностей (`incremental_state`);
+- инкрементальный реестр — окна и watermark инкрементальных сущностей
+  (`incremental_state`, `incremental_batches`); полные срезы и снимки в
+  него не пишутся.
 
 `process_id` идентифицирует исполнение DAG-а (одна попытка задачи
 `generate_process_id` — один номер), партия одной его сущности ключуется
@@ -202,7 +203,8 @@ watermark каждой сущности однозначен.
   СУБД источника была запущена.
 - **`log_start` / `log_end`** (`TableLogOperator`) — события жизненного цикла
   сущности в `airflow_tasks_log`, без публикации Asset и управления состоянием
-  извлечения. Таблицы `ingestion.extraction_batches` и `ingestion.extraction_state`
+  извлечения. Таблицы `ingestion.incremental_batches` и
+`ingestion.incremental_state`
   обслуживает Spark-функция `managed_load()` через `ingestion.meta`;
   `incremental_column` передаётся только задаче `load`.
 - **`publish_asset`** (`EmptyOperator` с `outlets`) — отдельная задача публикации
@@ -250,12 +252,12 @@ Docker-машины), но не выделяет им CPU/память.
 **`__process_id` как ключ партии.** Исполнение DAG-а получает один
 `process_id` на все свои таблицы. Внутри исполнения каждая таблица читается
 отдельной **партией**: ещё до обращения к источнику pg-meta заводит для неё
-строку в `extraction_batches` с ключом `(process_id, source_id, entity_fqn)`
+строку в `incremental_batches` с ключом `(process_id, source_id, entity_fqn)`
 и замораживает границы чтения. Все строки, дописанные в raw этой партией,
 получают её `process_id` в `__process_id`; raw-таблица принадлежит одной
 сущности, поэтому пары (таблица, `__process_id`) достаточно, чтобы связать
 строки данных с метаданными партии: `SELECT * FROM
-ingestion.extraction_batches WHERE process_id = <значение> AND source_id =
+ingestion.incremental_batches WHERE process_id = <значение> AND source_id =
 ... AND entity_fqn = ...` показывает границы окна, режим, статус и результат
 именно этой загрузки. Если load-таск упалёт и Airflow повторит его,
 партия не создаётся заново: повтор читает то же замороженное окно тем же
@@ -299,7 +301,7 @@ Namespace проверяется при каждой исполняемой за
   раздел 7.
 
 Каждая загрузка одной таблицы = одна партия: в данных её отмечает пара
-(`__process_id`, `__load_dttm`), в pg-meta — строка `extraction_batches`
+(`__process_id`, `__load_dttm`), в pg-meta — строка `incremental_batches`
 с тем же ключом `(process_id, source_id, entity_fqn)`.
 
 **Типовые запросы (Trino):**
@@ -337,6 +339,40 @@ WHERE __load_dttm >= current_date
 Литералы без зоны (`TIMESTAMP '2026-10-26 00:00:00'`) интерпретируются в зоне
 сессии и молча сдвигают окно на часы — избегайте; пишите
 `TIMESTAMP '...' AT TIME ZONE 'UTC'`.
+
+**Актуальные данные: как читать raw без повторов попыток.** Одна партия
+(`__process_id`) может быть физически дописана больше одного раза: сбой
+после Iceberg-коммита, но до финализации pg-meta приводит к повторному
+append того же замороженного окна при retry (at-least-once). Все строки
+одной попытки несут одинаковое `__load_dttm` (`current_timestamp` фиксируется
+на старте записи), поэтому **актуальная версия партии — её последняя попытка**,
+и канонический способ получить актуальные данные — оконная функция по
+`__process_id` (окно `max(__load_dttm)` нельзя писать прямо в `WHERE`,
+поэтому подзапрос):
+
+```sql
+SELECT * FROM (
+  SELECT t.*, max(__load_dttm) OVER (PARTITION BY __process_id) AS __last_attempt
+  FROM raw.bank.retail_bank__transactions t
+) WHERE __load_dttm = __last_attempt;
+```
+
+Повторная попытка читает то же замороженное окно, но источник между попытками
+может измениться — последняя попытка и есть согласованный с финализацией
+результат; попытки старше последней отбрасываются целиком. Для инкрементальной
+таблицы «актуальные данные» — это конкатенация актуальных попыток всех партий
+(приложение `union all` по таблице); полную историю попыток по-прежнему видно
+без фильтра.
+
+Оптимизация для больших таблиц: федеративный запрос — подключить pg-meta
+в Trino JDBC-каталогом, найти в `ingestion.incremental_batches` партии с
+`attempt_count > 1` и применять оконный фильтр **только к их** `__process_id`,
+остальные порции читая как есть. На стенде JDBC-каталог pg-meta не настроен
+(отдельная настройка Trino); оптимизация касается только инкрементальных
+сущностей — у полных срезов нет строк реестра, их повторы снимаются
+каноническим оконным запросом. Прежде чем применять оптимизацию, сверьте
+масштаб: фильтр по готовому списку `process_id` выгоден, когда повторных
+партий единицы.
 
 **Гарантии и границы.** Данные озера и метаданные pg-meta фиксируются в разных
 системах: сбой после коммита Iceberg, но до финализации watermark приведёт
@@ -509,7 +545,7 @@ JDBC/DataFrame-загрузки не запускают Python-worker'ов, но
 Инкрементальная сущность задаётся выбранной колонкой источника
 (`incremental.source_column`) и необязательным отступом `lookback`
 (`size` + `unit`). **Watermark** — сохранённый максимум этой колонки среди
-успешно загруженных строк; он хранится в `extraction_state.watermark`.
+успешно загруженных строк; он хранится в `incremental_state.watermark`.
 Например, watermark `120` означает: последняя успешная обработка дошла до
 значения 120; без lookback следующий запуск ищет значения больше 120.
 Это не доказательство, что все меньшие значения уже прочитаны: поздние
@@ -617,7 +653,7 @@ YAML всегда даёт один и тот же сгенерированны�
 
 Загрузка-первичное наполнение (**bootstrap**, watermark ещё нет) читает
 строки до зафиксированного `upper`, без нижней границы и lookback; это фаза
-инкрементального потока (`mode=incremental, reason=bootstrap`), а не отдельный
+инкрементального потока (`reason=bootstrap`), а не отдельный
 режим. Если источник меняется во время загрузки, строки выше этого максимума
 относятся уже к следующему запуску. NULL в колонке инкремента блокирует
 планирование новой партии регулярной загрузки, включая bootstrap.
@@ -676,33 +712,35 @@ Lookback снижает риск пропуска поздних коммито�
 самого генератора) создаёт новое исполнение с новыми партиями. В начале
 каждой попытки load-задача пишет в лог `process_id` и составной ключ партии.
 
-`revision` — счётчик изменений строки `extraction_state`, начиная с 1.
+`revision` — счётчик изменений строки `incremental_state`, начиная с 1.
 Партия сохраняет его как `expected_revision`. При успехе оба изменения —
 watermark состояния и статус партии — фиксируются одной транзакцией pg-meta.
 Iceberg-коммит в эту транзакцию не входит.
 
-Модель партий:
+Реестр обслуживает **только инкрементальные сущности**:
 
-| Поток | mode | reason | target | Границы | Watermark |
-|---|---|---|---|---|---|
-| Инкрементальный (bootstrap) | `incremental` | `bootstrap` | raw-таблица | только upper | устанавливается (NULL → максимум) |
-| Инкрементальный (регулярный) | `incremental` | `regular` | raw-таблица | lower и upper | max(watermark, observed) |
-| Снимочный (DAG-и снимков) | `full_snapshot` | `scheduled_full` | таблица-снимок | нет | не изменяется |
-| Полный срез (сущность без инкремента) | `full_snapshot` | `regular` | raw-таблица | нет | отсутствует по контракту сущности |
+| Поток | reason | target | Границы | Watermark |
+|---|---|---|---|---|
+| Инкрементальный bootstrap (watermark NULL) | `bootstrap` | raw-таблица | только upper | устанавливается (NULL → максимум) |
+| Инкрементальный регулярный | `regular` | raw-таблица | lower и upper | max(watermark, observed) |
 
-`extraction_state` (watermark, revision, last_process_id) изменяют только
-партии `mode=incremental`; финализация полного среза в `extraction_state`
-не пишет вовсе (ревизия остаётся 1, `last_process_id` — NULL). Снимочный
-поток (`scheduled_full`) вводится доработкой DAG-ов снимков; схема реестра
-уже допускает его партии.
+Полный срез (сущность без инкрементальной колонки) и снимочный поток
+(DAG-и снимков, отдельная доработка) в реестр **не пишутся**: их загрузки
+не имеют окон и watermark, факт и свежесть загрузки читаются по данным raw
+и метаданным Iceberg, а не по pg-meta. Наличие строки `incremental_state`
+само по себе означает, что сущность инкрементальная; отдельной колонки
+режима нет.
 
-1. **План.** Driver spark-job читает партию этого исполнения
-   (`meta.get_batch()`). Если партия есть — retry: окно не пересчитывается,
+1. **План.** Сущность без инкрементальной колонки в реестр не входит:
+   `managed_load()` сразу переходит к чтению (шаг 3) без партий, заморозки
+   окна и финализации. Для инкрементальной сущности driver spark-job читает
+   партию этого исполнения (`meta.get_batch()`). Если партия есть — retry:
+   окно не пересчитывается,
    источник не трогается (тип, NULL и MAX не перепроверяются), партия со
    статусом `SUCCEEDED` закрывается сразу с выводом зафиксированного успеха
    в лог. Если партии нет — определяется тип и максимум колонки инкремента,
-   при необходимости создаётся `extraction_state` с ревизией 1 и вставляется
-   строка `extraction_batches` со статусом `PLANNED` и замороженными
+   при необходимости создаётся `incremental_state` с ревизией 1 и вставляется
+   строка `incremental_batches` со статусом `PLANNED` и замороженными
    границами. Отступ lookback применяется в фактически определённом типе
    колонки; сохраняются применённые значения и оператор нижней границы
    (`lower_bound_op`).
@@ -716,16 +754,27 @@ Iceberg-коммит в эту транзакцию не входит.
    диагностические JDBC-запросы выполнены; не выполняется чтение DataFrame
    окна и запись Iceberg. Для первичного наполнения пустого источника эта
    оптимизация не действует: нужен пустой DataFrame для создания raw-таблицы.
-3. **Исполнение.** Функция `meta.start_batch()` ставит `RUNNING`, увеличивает
-   `extraction_batches.attempt_count` на 1 и очищает `finished_at`. Затем
+3. **Исполнение.** Для инкрементальной партии `meta.start_batch()` ставит
+   `RUNNING`, увеличивает `incremental_batches.attempt_count` на 1 и
+   очищает `finished_at` (полный срез стартует без этого шага). Затем
    загрузчик строит SELECT с сохранёнными границами (оператор нижней границы —
    из `lower_bound_op`), читает его через Spark JDBC и кэширует DataFrame.
-   Агрегация считает строки и `MAX(__extract_position)`; временная позиция
-   здесь представлена точной строкой. Служебная колонка удаляется перед
-   append в raw.
+
+   **Служебная колонка `__extract_position`.** В подзапрос чтения
+   инкрементальной сущности добавляется ещё одна колонка — точное значение
+   позиции инкремента строки, отрендеренное диалектом в канонический текст.
+   Зачем она: Spark хранит timestamp с точностью до микросекунд, а позиция
+   источника бывает точнее (до наносекунд, раздел 7.1); watermark обязан
+   сохранять точность источника, поэтому позиция передаётся строкой —
+   `CONVERT`/`DATEPART(nanosecond)` в MSSQL, `TO_CHAR` с маской до `FF9`
+   в Oracle. Агрегация попытки считает число строк и
+   `MAX(__extract_position)` — это `observed_max` и новый watermark.
+   Колонка существует только в кадре чтения: перед append в raw она
+   удаляется, в целевой таблице её нет (колонка источника с таким именем
+   отвергается при создании таблицы как конфликт со служебными именами).
 4. **Финализация.** После Iceberg append функция `meta.finalize_batch()`
-   закрывает партию и — только для `mode=incremental` — в той же транзакции
-   обновляет `extraction_state`: watermark становится максимумом прежней
+   в одной транзакции закрывает партию и обновляет `incremental_state`:
+   watermark становится максимумом прежней
    позиции и фактически прочитанной, `revision` увеличивается на 1,
    `last_process_id` указывает на это исполнение, `updated_at` получает
    текущее время. Партия получает `SUCCEEDED`, `row_count`, `observed_max`,
@@ -733,9 +782,8 @@ Iceberg-коммит в эту транзакцию не входит.
    expected_revision` называется compare-and-set (CAS): записать результат
    можно лишь поверх версии состояния, с которой планировалась партия.
    Чужая финализация или миграция меняет ревизию — старая партия
-   отклоняется без частичного изменения pg-meta. Ревизионная проверка
-   касается только инкрементальных партий: партии полного среза состояние
-   не меняют и ретраятся свободно.
+   отклоняется без частичного изменения pg-meta. Полный срез этого шага
+   не имеет вовсе.
 5. **Сбой.** Ошибка может случиться на любом шаге попытки — и до, и после
    Iceberg-коммита; обработчик единый, и если он смог обратиться к pg-meta,
    отдельной короткой транзакцией партия помечается `FAILED`;
@@ -748,7 +796,7 @@ Iceberg-коммит в эту транзакцию не входит.
    Повтор начинается снова с шага 2/3 той же партии.
 
 Каждая операция pg-meta берёт `SELECT ... FOR UPDATE` сначала на строку
-`extraction_state`, затем на строку партии. Единый порядок уменьшает риск
+`incremental_state`, затем на строку партии. Единый порядок уменьшает риск
 взаимных блокировок; блокировки отпускаются при завершении короткой
 транзакции и не удерживаются всё время JDBC-чтения.
 
@@ -763,61 +811,61 @@ pg-meta не состоялась, retry повторит append с тем же 
 ошибок исполнения: они не обязаны оставлять партию со статусом `FAILED`.
 Новая партия при таком отказе может вообще не появиться.
 
-### 7.3. `extraction_state` — состояние сущности
+### 7.3. `incremental_state` — состояние сущности
 
-Одна строка на пару (источник, сущность); первичный ключ `(source_id,
-entity_fqn)`.
+Одна строка на пару (источник, сущность) — только у инкрементальных
+сущностей; первичный ключ `(source_id, entity_fqn)`. Полные срезы строк
+не имеют вовсе: факт их загрузок читается по данным raw и метаданным
+Iceberg.
 
 | Колонка | Тип | Смысл |
 |---|---|---|
 | `source_id` | text, PK | Идентификатор источника (`bank`, `broker`) |
 | `entity_fqn` | text, PK | Полное имя сущности (`retail_bank.transactions`) |
-| `configured_mode` | text | Заданный манифестом режим: `incremental` или `full_snapshot` (у снапшотных сущностей строка создаётся при первой загрузке и хранит только факт контракта) |
 | `incremental_column` | text | Имя колонки инкремента (NULL для снапшота); смена значения = смена контракта, требует миграции |
 | `incremental_type` | text | Внутреннее, независимое от СУБД имя типа позиции: `bigint`, `decimal(18,0)`, `date`, `timestamp_local(6)`, `timestamp_instant(7)`; например Oracle `DATE` отображается в `timestamp_local(0)`, MSSQL `datetime2(7)` — в `timestamp_local(7)` |
 | `watermark` | text | Каноническая позиция последней успешной загрузки (NULL до первичного наполнения); текст хранит позицию без потерь любой точности |
-| `revision` | bigint | Версия строки состояния, начиная с 1; увеличивается при успешной инкрементальной финализации и ручной миграции; сравнивается с `expected_revision` партии (раздел 7.2) |
+| `revision` | bigint | Версия строки состояния, начиная с 1; увеличивается при успешной финализации и ручной миграции; сравнивается с `expected_revision` партии (раздел 7.2) |
 | `last_process_id` | bigint | Исполнение последней успешной инкрементальной партии; составной FK `(last_process_id, source_id, entity_fqn)` на реестр партий с отложенной проверкой (один process_id обслуживает несколько сущностей — одиночная ссылка была бы неоднозначной) |
 | `updated_at` | timestamptz | Момент последнего изменения строки |
 
-CHECK-ограничение связывает режим и поля: у `incremental` колонка и тип
-обязательны, у `full_snapshot` — колонка, тип и watermark обязаны быть NULL.
+Колонки контракта `NOT NULL`: строка существует — сущность инкрементальная.
 
-### 7.4. `extraction_batches` — реестр партий
+### 7.4. `incremental_batches` — реестр партий
 
-Одна строка на сущность × исполнение; первичный ключ
+Одна строка на инкрементальную сущность × исполнение; первичный ключ
 `(process_id, source_id, entity_fqn)` — идентичность партии, стабильная
 между попытками. Суррогатный `batch_id` и прежняя уникальность
 `(dag_id, run_id, source_id, entity_fqn)` удалены: они запрещали второй
-партии нового process_id в том же DagRun после полного Clear.
+партии нового process_id в том же DagRun после полного Clear. Полные
+срезы и снимки строк здесь не имеют (раздел 7.2).
 
 | Колонка | Тип | Смысл |
 |---|---|---|
 | `process_id` | bigint, PK | Идентификатор исполнения DAG-а; же значение, что и `__process_id` в raw |
 | `dag_id`, `run_id` | text | Принадлежность DagRun (корреляция и логи, не ключ идентичности) |
-| `source_id`, `entity_fqn` | text, PK | Сущность; FK на `extraction_state` |
+| `source_id`, `entity_fqn` | text, PK | Сущность; FK на `incremental_state` |
 | `target_table` | text | Целевая raw-таблица |
-| `mode` | text | Режим исполнения: `incremental` / `full_snapshot` |
-| `reason` | text | Почему этот режим: `bootstrap` (первичное наполнение — фаза инкрементального потока), `regular` (очередное окно или полный срез сущности без инкремента), `scheduled_full` (партия снимочного потока; вводится доработкой DAG-ов снимков) |
+| `reason` | text | Фаза инкрементального потока: `bootstrap` (первичное наполнение) или `regular` (очередное окно) |
 | `incremental_column`, `incremental_type` | text | Снимок контракта инкремента на момент партии |
-| `expected_revision` | bigint | Ревизия состояния, которую инкрементальная партия вправе финализировать (для CAS); у снимочных партий записывается, но не проверяется |
+| `expected_revision` | bigint | Ревизия состояния, которую партия вправе финализировать (для CAS) |
 | `watermark_before` | text | Значение watermark до партии |
 | `lookback_size`, `lookback_unit` | numeric / text | Фактически применённый отступ (в партию попадают значения после приведения default к фактическому типу колонки) |
 | `lower_bound`, `lower_bound_op` | text | Замороженная нижняя граница окна и фактически применённый оператор (`>` / `>=`); NULL границы — её нет (bootstrap, полный срез, выход за минимум типа) |
 | `upper_bound` | text | Замороженная верхняя граница окна чтения |
-| `empty_at_plan` | boolean | Вся таблица источника была пуста при предварительной проверке перед созданием партии (подробнее ниже); для пустого bootstrap фиксирует пустую выборку через `WHERE 1=0`; у полного среза всегда false |
-| `snapshot_published` | boolean | Признак публикации таблицы-снимка; заполняется только партиями снимочного потока `scheduled_full` (минимум одна попытка выполнила перезапись), у остальных партий NULL |
+| `empty_at_plan` | boolean | Вся таблица источника была пуста при предварительной проверке перед созданием партии (подробнее ниже); для пустого bootstrap фиксирует пустую выборку через `WHERE 1=0` |
 | `status` | text | `PLANNED` → `RUNNING` → `SUCCEEDED` / `FAILED` |
 | `attempt_count` | int | Число запусков исполнения (0 у партии, закрытой без чтения) |
 | `row_count` | bigint | Дописано строк (заполняется при успехе) |
 | `observed_max` | text | Точный максимум колонки инкремента в прочитанном окне |
-| `watermark_after` | text | Значение watermark после партии (у полного среза всегда NULL) |
+| `watermark_after` | text | Значение watermark после партии |
 | `created_at`, `finished_at` | timestamptz | `created_at` задаётся DEFAULT `clock_timestamp()` при INSERT партии; `finished_at` — при SUCCEEDED или FAILED; повторный `start_batch()` очищает его |
 
-Колонки `reason_text`, `last_error` и причина `manual_full` удалены:
-ручно́й полный снимок через конфигурацию запуска исключён (раздел 3), а
-фиксированное сообщение `last_error` не содержало причины сбоя — подробности
-остаются в task logs.
+Колонки `mode`, `reason_text`, `last_error` и причины `manual_full`/
+`scheduled_full` удалены: реестр описывает только инкрементальный поток
+(раздел 7.2), ручной полный снимок через конфигурацию запуска исключён
+(раздел 3), а фиксированное сообщение `last_error` не содержало причины
+сбоя — подробности остаются в task logs.
 
 **Что фиксирует `empty_at_plan`.** До создания партии сущности с настроенным
 инкрементом `source_position()` выполняет предварительный SELECT по всей
@@ -846,37 +894,28 @@ watermark. При retry сохранённый флаг не пересчиты�
 - Если из-за lookback прочитаны только значения ниже прежнего watermark,
   `observed_max` будет меньше него, но `watermark_after` назад не сдвинется.
 - У сущности без инкрементальной колонки (полный срез) оба поля NULL:
-  финализация не меняет `extraction_state`.
+  финализация не меняет `incremental_state`.
 
 Следующая **новая** партия отсчитывает нижнюю границу от
-`extraction_state.watermark`, куда при финализации записан `watermark_after`,
+`incremental_state.watermark`, куда при финализации записан `watermark_after`,
 с применением lookback. Retry не вычисляет окно заново, а использует
 `lower_bound`, `lower_bound_op` и `upper_bound` уже созданной партии.
 
 Основные CHECK-ограничения жизненного цикла (полный DDL —
 `conf/pg-meta/init/01_ingestion.sql`):
 
-- Инкремент: колонка задана, причина `bootstrap` или `regular`; для
-  `regular` прежний watermark известен.
-- Bootstrap: режим `incremental`, колонка задана, прежнего watermark
-  и нижней границы нет. Верхняя граница при этом может быть задана.
-- Полный срез (без инкрементальной колонки): режим `full_snapshot`, причина
-  `regular`, границ и watermark нет.
-- Снимочная партия `scheduled_full`: режим `full_snapshot`, без границ и
-  watermark; признак `snapshot_published` обязателен при успехе и запрещён у остальных
-  причин.
+- Колонка и тип инкремента обязательны (NOT NULL).
+- Bootstrap: прежнего watermark и нижней границы нет; верхняя граница может
+  быть задана.
+- Regular: прежний watermark известен.
 - Успех: число строк и время завершения заполнены.
 - До успеха, включая `FAILED`: поля результата пусты.
 
 ```sql
-CHECK (mode <> 'incremental' OR
-  (incremental_column IS NOT NULL AND reason IN ('bootstrap', 'regular')));
+CHECK (reason IN ('bootstrap', 'regular'));
 CHECK (reason <> 'bootstrap' OR
-  (mode = 'incremental' AND incremental_column IS NOT NULL
-   AND watermark_before IS NULL AND lower_bound IS NULL));
-CHECK (reason <> 'scheduled_full' OR
-  (mode = 'full_snapshot' AND lower_bound IS NULL AND upper_bound IS NULL
-   AND watermark_before IS NULL AND watermark_after IS NULL));
+  (watermark_before IS NULL AND lower_bound IS NULL));
+CHECK (reason <> 'regular' OR watermark_before IS NOT NULL);
 CHECK (status <> 'SUCCEEDED' OR
   (row_count IS NOT NULL AND finished_at IS NOT NULL));
 CHECK (status = 'SUCCEEDED' OR
@@ -897,7 +936,6 @@ CHECK (status = 'SUCCEEDED' OR
    | Поле | Значение |
    |---|---|
    | `source_id`, `entity_fqn` | `bank`, `retail_bank.transactions` |
-   | `configured_mode` | `incremental` |
    | `incremental_column`, `incremental_type` | `_batch_id`, `bigint` |
    | `watermark`, `revision`, `last_process_id` | `10`, `5`, `40` |
    | `updated_at` | время предыдущего успеха |
@@ -917,19 +955,19 @@ CHECK (status = 'SUCCEEDED' OR
    | `dag_id`, `run_id` | `ingest__rdbms__bank__main`, идентификатор нового DagRun |
    | `source_id`, `entity_fqn` | `bank`, `retail_bank.transactions` |
    | `target_table` | `raw.bank.retail_bank__transactions` |
-   | `mode`, `reason` | `incremental`, `regular` |
+   | `reason` | `regular` |
    | `incremental_column`, `incremental_type` | `_batch_id`, `bigint` |
    | `expected_revision`, `watermark_before` | `5`, `10` |
    | `lookback_size`, `lookback_unit` | `0`, NULL |
    | `lower_bound`, `lower_bound_op`, `upper_bound` | `10`, `>`, `11` |
    | `empty_at_plan` | false |
    | `status`, `attempt_count` | `PLANNED`, `0` |
-   | `row_count`, `observed_max`, `watermark_after`, `snapshot_published` | NULL, NULL, NULL, NULL |
+   | `row_count`, `observed_max`, `watermark_after` | NULL, NULL, NULL |
    | `created_at`, `finished_at` | время INSERT, NULL |
 
 4. Для строки партии функция `start_batch()` меняет `status` на `RUNNING`,
    увеличивает счётчик попыток `attempt_count` с 0 до 1 и устанавливает
-   `finished_at=NULL`. Строка `ingestion.extraction_state` не меняется.
+   `finished_at=NULL`. Строка `ingestion.incremental_state` не меняется.
    SELECT читает `10 < _batch_id AND
    _batch_id <= 11`. В raw дописываются две строки с `__process_id=42`
    и временем этого append в `__load_dttm`.
@@ -954,11 +992,11 @@ CHECK (status = 'SUCCEEDED' OR
    при аварийной смерти driver обработчик не выполняется вовсе и партия
    остаётся `RUNNING`. Состояния на этот момент:
 
-   - В `ingestion.extraction_state` по ключу
+   - В `ingestion.incremental_state` по ключу
      `(bank, retail_bank.transactions)` остаются `watermark=10`,
      `revision=5`, `last_process_id=40`, прежний `updated_at`.
    - Если обработчик ошибки смог обратиться к pg-meta, в
-     `ingestion.extraction_batches` он ставит `status=FAILED`,
+     `ingestion.incremental_batches` он ставит `status=FAILED`,
      `finished_at=время регистрации ошибки`. `attempt_count=1`;
      `row_count`, `observed_max`, `watermark_after` остаются NULL.
    - Повторное исполнение load-задачи — retry таска или Clear только
@@ -972,7 +1010,7 @@ CHECK (status = 'SUCCEEDED' OR
      В raw теперь четыре строки этой партии.
    - При успешной финализации метаданные получают значения шага 5,
      а `attempt_count` остаётся 2. Значение
-     `extraction_batches.row_count=2` описывает успешную попытку,
+     `incremental_batches.row_count=2` описывает успешную попытку,
      **не все четыре физически дописанные строки**. Это следствие
      отсутствия общей транзакции Iceberg и pg-meta.
 7. **Полный Clear** (генератор и все задачи после него) уже успешного DagRun
@@ -988,7 +1026,7 @@ CHECK (status = 'SUCCEEDED' OR
    (XCom генератора не сброшен), исполнение то же: партия 42 со статусом
    `SUCCEEDED` находится, в лог выводится зафиксированный успех, load
    завершается без чтения источника, append и изменения
-   `extraction_state`.
+   `incremental_state`.
 8. **Новый DagRun** — отдельный запуск по расписанию или через Trigger,
    с другим `run_id`, а не Clear существующего. Он получает новый
    `process_id`, например 44. Если после успеха шага 5 источник не менялся,
@@ -998,10 +1036,10 @@ CHECK (status = 'SUCCEEDED' OR
    `11 < col AND col <= 11` пусто, поэтому чтение окна и append
    не выполняются. При финализации:
 
-   - В `ingestion.extraction_batches` для партии исполнения 44:
+   - В `ingestion.incremental_batches` для партии исполнения 44:
      `status=SUCCEEDED`, `attempt_count=0`, `row_count=0`,
      `observed_max=NULL`, `watermark_after=11`, `finished_at` заполнен.
-   - В `ingestion.extraction_state`: `watermark=11`, `revision=7`,
+   - В `ingestion.incremental_state`: `watermark=11`, `revision=7`,
      `last_process_id=44`, `updated_at=время новой финализации`.
 
    Новая партия фиксирует отдельную успешную проверку отсутствия новых
@@ -1010,11 +1048,17 @@ CHECK (status = 'SUCCEEDED' OR
 
 ### 7.6. Смена контракта и ручные миграции
 
-Контракт — тройка `configured_mode`, `incremental_column`, `incremental_type`.
-Смена режима, колонки или её внутреннего типа блокируется проверкой pg-meta.
-Удалённая колонка может привести к SQL-ошибке ещё до этой проверки.
-Изменение только lookback миграции не требует; уже созданная партия сохраняет
-старые границы.
+Контракт — пара `incremental_column`, `incremental_type` строки
+`incremental_state`. Смена колонки или её внутреннего типа блокируется
+проверкой pg-meta. Удалённая колонка может привести к SQL-ошибке ещё до
+этой проверки. Изменение только lookback миграции не требует; уже созданная
+партия сохраняет старые границы.
+
+Переходы между полным срезом и инкрементом миграцией не являются: отключение
+инкремента в манифесте оставляет строку состояния замороженной (watermark
+сохраняется), повторное включение той же колонки продолжает окна от старого
+watermark, а включение инкремента у сущности без строки состояния начинается
+с bootstrap при первой же загрузке.
 
 Порядок ручной миграции:
 
@@ -1037,7 +1081,7 @@ CHECK (status = 'SUCCEEDED' OR
   bootstrap; при полном режиме — обычный снапшот. Проверить результат
   и аудит до возобновления расписания.
 
-В коде **нет автоматического заполнения** `extraction_state_migrations`,
+В коде **нет автоматического заполнения** `incremental_state_migrations`,
 триггера или готовой команды миграции. Аудит вставляет администратор явно.
 Ниже шаблон PostgreSQL для существующей строки состояния. Это пример,
 не проверенная на работающем стенде процедура; старые значения и новую
@@ -1047,40 +1091,37 @@ CHECK (status = 'SUCCEEDED' OR
 BEGIN;
 DO $migration$
 DECLARE
-  old_state ingestion.extraction_state%ROWTYPE;
-  next_mode text := 'incremental';
+  old_state ingestion.incremental_state%ROWTYPE;
   next_column text := 'updated_at';
   next_type text := 'timestamp_local(7)';
 BEGIN
   SELECT * INTO STRICT old_state
-  FROM ingestion.extraction_state
+  FROM ingestion.incremental_state
   WHERE source_id = 'bank' AND entity_fqn = 'retail_bank.transactions'
   FOR UPDATE;
 
   IF old_state.revision <> 6
-     OR old_state.configured_mode IS DISTINCT FROM 'incremental'
      OR old_state.incremental_column IS DISTINCT FROM '_batch_id'
      OR old_state.incremental_type IS DISTINCT FROM 'bigint' THEN
-    RAISE EXCEPTION 'Unexpected old extraction contract or revision';
+    RAISE EXCEPTION 'Unexpected old incremental contract or revision';
   END IF;
 
-  INSERT INTO ingestion.extraction_state_migrations (
+  INSERT INTO ingestion.incremental_state_migrations (
     source_id, entity_fqn, old_revision, new_revision,
-    old_mode, new_mode, old_column, new_column, old_type, new_type,
+    old_column, new_column, old_type, new_type,
     old_watermark, new_watermark, performed_by, reason_text
   ) VALUES (
     old_state.source_id, old_state.entity_fqn,
     old_state.revision, old_state.revision + 1,
-    old_state.configured_mode, next_mode,
     old_state.incremental_column, next_column,
     old_state.incremental_type, next_type,
     old_state.watermark, NULL, current_user,
     'Переход на техническую метку изменения; повторное первичное наполнение'
   );
 
-  UPDATE ingestion.extraction_state
-  SET configured_mode = next_mode, incremental_column = next_column,
-      incremental_type = next_type, watermark = NULL, last_batch_id = NULL,
+  UPDATE ingestion.incremental_state
+  SET incremental_column = next_column,
+      incremental_type = next_type, watermark = NULL, last_process_id = NULL,
       revision = old_state.revision + 1, updated_at = clock_timestamp()
   WHERE source_id = old_state.source_id AND entity_fqn = old_state.entity_fqn;
 END
@@ -1091,24 +1132,11 @@ COMMIT;
 Один шаблон покрывает следующие случаи; меняются объявленные переменные,
 проверка старого контракта и осмысленная причина аудита:
 
-| Случай | `next_mode` | `next_column` | `next_type` | Изменение YAML |
-|---|---|---|---|---|
-| Смена/переименование колонки | `'incremental'` | `'updated_at'` | `'timestamp_local(7)'` для MSSQL datetime2(7) | новое `source_column` |
-| Смена типа той же колонки | `'incremental'` | `'_batch_id'` | `'decimal(20,0)'` для decimal(20,0) | имя прежнее; тип обнаруживается автоматически |
-| Отключение инкремента, в том числе после удаления колонки | `'full_snapshot'` | NULL | NULL | удалить блок `incremental` |
-| Включение инкремента после снапшотов | `'incremental'` | `'_batch_id'` | `'bigint'` | добавить блок `incremental`; старый контракт в проверке — full_snapshot/NULL/NULL |
-| Явный сброс позиции после подтверждённого сброса источника | прежний режим | прежняя колонка | прежний тип | без изменений; watermark сбрасывается, следующий запуск — bootstrap |
-
-Для включения после снапшотов проверка прежних полей в шаблоне должна быть:
-
-```sql
-IF old_state.revision <> 6
-   OR old_state.configured_mode IS DISTINCT FROM 'full_snapshot'
-   OR old_state.incremental_column IS NOT NULL
-   OR old_state.incremental_type IS NOT NULL THEN
-  RAISE EXCEPTION 'Unexpected old extraction contract or revision';
-END IF;
-```
+| Случай | `next_column` | `next_type` | Изменение YAML |
+|---|---|---|---|
+| Смена/переименование колонки | `'updated_at'` | `'timestamp_local(7)'` для MSSQL datetime2(7) | новое `source_column` |
+| Смена типа той же колонки | `'_batch_id'` | `'decimal(20,0)'` для decimal(20,0) | имя прежнее; тип обнаруживается автоматически |
+| Явный сброс позиции после подтверждённого сброса источника | прежняя колонка | прежний тип | без изменений; watermark сбрасывается, следующий запуск — bootstrap |
 
 Неподдерживаемый новый тип не исправляется заменой строки `incremental_type`:
 нужно выбрать другую колонку, отключить инкремент или доработать диалект.
@@ -1139,8 +1167,8 @@ Clear выделяют новое значение, retry downstream-задач 
 `source_id`, `entity_fqn`, `datalake_table`, `ts`, `status` (`START` / `END` —
 `log_start`/`log_end`; `FAILED` — колбэк неудачи `load`).
 
-**`ingestion.extraction_state_migrations`** — аудит ручных миграций контракта
-инкремента: старая/новая ревизия (обязательно +1), режим, колонка, тип и
+**`ingestion.incremental_state_migrations`** — аудит ручных миграций контракта
+инкремента: старая/новая ревизия (обязательно +1), колонка, тип и
 watermark до/после, `performed_by`, `reason_text`, `created_at`.
 
 **Запросы для просмотра артефактов** (psql; подключение — README, раздел 2.5):
@@ -1154,11 +1182,11 @@ FROM ingestion.airflow_tasks_log ORDER BY id DESC LIMIT 20;
 
 SELECT entity_fqn, configured_mode, incremental_column, incremental_type,
        watermark, revision, last_process_id, updated_at
-FROM ingestion.extraction_state ORDER BY source_id, entity_fqn;
+FROM ingestion.incremental_state ORDER BY source_id, entity_fqn;
 
 SELECT process_id, entity_fqn, mode, reason, lower_bound, lower_bound_op, upper_bound,
        status, attempt_count, row_count, watermark_after, created_at, finished_at
-FROM ingestion.extraction_batches ORDER BY process_id DESC, source_id, entity_fqn LIMIT 15;
+FROM ingestion.incremental_batches ORDER BY process_id DESC, source_id, entity_fqn LIMIT 15;
 ```
 
 ## 9. Как расширять стенд

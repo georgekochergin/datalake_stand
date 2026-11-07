@@ -150,8 +150,7 @@ def empty_incremental_window(batch) -> bool:
     equal: the aligned inclusive operator covers the range between them.
     """
     return (
-        batch["mode"] == "incremental"
-        and not batch["lookback_size"]
+        not batch["lookback_size"]
         and batch["upper_bound"] is not None
         and batch["lower_bound"] == batch["upper_bound"]
     )
@@ -180,7 +179,9 @@ def source_position(spark, args):
 def _plan_batch(spark, args, connect):
     """Resolve this execution's persisted batch or plan a fresh one with frozen bounds.
 
-    The batch identity is (process_id, source_id, entity_fqn). A retry
+    Returns None for entities without an incremental column: full-slice
+    loads run outside the incremental registry. For incremental entities the
+    batch identity is (process_id, source_id, entity_fqn). A retry
     replays the same frozen window without any source access: bounds, the
     position kind and empty_at_plan are already fixed in the batch, and a
     SUCCEEDED batch returns as a no-op with its recorded result logged.
@@ -190,6 +191,8 @@ def _plan_batch(spark, args, connect):
 
     key = (args.process_id, args.source_id, args.source_table)
     LOGGER.info("load attempt process_id=%s source_id=%s entity_fqn=%s", *key)
+    if not args.incremental_column:
+        return None
     batch = meta.get_batch(process_id=args.process_id, source_id=args.source_id,
                            entity_fqn=args.source_table, db_connect=connect)
     if batch is not None:
@@ -245,13 +248,14 @@ def _read_extract_frame(spark, args, batch, kind):
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     filters = []
     column = dialect.quote_identifier(args.incremental_column) if args.incremental_column else None
-    for key, op in (("lower_bound", batch["lower_bound_op"]), ("upper_bound", "<=")):
-        if batch[key] is not None:
-            filters.append(
-                f"{column} {op} {dialect.position_literal(positions.canonical(batch[key], kind), kind)}"
-            )
-    if batch["empty_at_plan"]:
-        filters.append("1=0")
+    if column:
+        for key, op in (("lower_bound", batch["lower_bound_op"]), ("upper_bound", "<=")):
+            if batch[key] is not None:
+                filters.append(
+                    f"{column} {op} {dialect.position_literal(positions.canonical(batch[key], kind), kind)}"
+                )
+        if batch["empty_at_plan"]:
+            filters.append("1=0")
     source_table = render_source_table(dialect, args.source_table, allow_expression=True)
     select = "extract_source.*"
     projection = jdbc.compatibility_projection(
@@ -309,13 +313,25 @@ def _append_raw(spark, args, frame, kind):
 
 
 def managed_load(spark, args):
-    """Execute a persisted batch with at-least-once append and atomic pg-meta finalization."""
+    """Execute a persisted batch with at-least-once append and atomic pg-meta finalization.
+
+    Full-slice entities (no incremental column) load outside the registry:
+    the window is read and appended with no pg-meta batch at all, and a task
+    retry simply repeats the append (at-least-once).
+    """
     import psycopg2
 
     from ingestion import meta
 
     connect = lambda: psycopg2.connect("")
     batch = _plan_batch(spark, args, connect)
+    if batch is None:
+        source = _read_extract_frame(spark, args, batch, None)
+        try:
+            _append_raw(spark, args, source, None)
+        finally:
+            source.unpersist()
+        return
     if batch["status"] == "SUCCEEDED":
         return
     key = dict(process_id=args.process_id, source_id=args.source_id,

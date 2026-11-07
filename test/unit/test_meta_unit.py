@@ -17,16 +17,16 @@ from ingestion import meta
 
 
 STATE_COLUMNS = (
-    "source_id", "entity_fqn", "configured_mode", "incremental_column",
-    "incremental_type", "watermark", "revision", "last_process_id", "updated_at",
+    "source_id", "entity_fqn", "incremental_column", "incremental_type",
+    "watermark", "revision", "last_process_id", "updated_at",
 )
 
 BATCH_COLUMNS = (
     "process_id", "dag_id", "run_id", "source_id", "entity_fqn",
-    "target_table", "mode", "reason", "incremental_column", "incremental_type",
+    "target_table", "reason", "incremental_column", "incremental_type",
     "expected_revision", "watermark_before", "lookback_size", "lookback_unit",
     "lower_bound", "lower_bound_op", "upper_bound", "empty_at_plan",
-    "snapshot_published", "status", "attempt_count", "row_count", "observed_max",
+    "status", "attempt_count", "row_count", "observed_max",
     "watermark_after", "created_at", "finished_at",
 )
 
@@ -74,54 +74,54 @@ class FakeCursor:
             self.description = [("max",)]
             self._row = (max(values) if values else None,)
             return
-        if statement.startswith("INSERT INTO ingestion.extraction_state"):
+        if statement.startswith("INSERT INTO ingestion.incremental_state"):
             source_id, entity_fqn = params[0], params[1]
             if (source_id, entity_fqn) not in self.db.state:
                 self.db.state[(source_id, entity_fqn)] = {
                     "source_id": source_id, "entity_fqn": entity_fqn,
-                    "configured_mode": params[2], "incremental_column": params[3],
-                    "incremental_type": params[4], "watermark": None,
-                    "revision": 1, "last_process_id": None, "updated_at": None,
+                    "incremental_column": params[2], "incremental_type": params[3],
+                    "watermark": None, "revision": 1,
+                    "last_process_id": None, "updated_at": None,
                 }
             self.rowcount = 1
             return
-        if statement.startswith("SELECT * FROM ingestion.extraction_state"):
+        if statement.startswith("SELECT * FROM ingestion.incremental_state"):
             state = self.db.state.get((params[0], params[1]))
             self.description = [(name,) for name in STATE_COLUMNS]
             self._row = tuple(state[name] for name in STATE_COLUMNS) if state else None
             return
-        if statement.startswith("SELECT 1 FROM ingestion.extraction_batches"):
+        if statement.startswith("SELECT 1 FROM ingestion.incremental_batches"):
             self.description = [("one",)]
             self._row = (1,) if params in self.db.batches else None
             return
-        if statement.startswith("SELECT * FROM ingestion.extraction_batches"):
+        if statement.startswith("SELECT * FROM ingestion.incremental_batches"):
             batch = self.db.batches.get(tuple(params))
             self.description = [(name,) for name in BATCH_COLUMNS]
             self._row = tuple(batch[name] for name in BATCH_COLUMNS) if batch else None
             return
-        if statement.startswith("INSERT INTO ingestion.extraction_batches"):
+        if statement.startswith("INSERT INTO ingestion.incremental_batches"):
             row = dict(zip(
                 ("process_id", "dag_id", "run_id", "source_id", "entity_fqn", "target_table",
-                 "mode", "reason", "incremental_column", "incremental_type", "expected_revision",
+                 "reason", "incremental_column", "incremental_type", "expected_revision",
                  "watermark_before", "lookback_size", "lookback_unit", "lower_bound",
                  "lower_bound_op", "upper_bound", "empty_at_plan"),
                 params,
             ))
             row.update(status="PLANNED", attempt_count=0, row_count=None,
-                       observed_max=None, watermark_after=None, snapshot_published=None,
+                       observed_max=None, watermark_after=None,
                        created_at="now", finished_at=None)
             self.db.batches[(row["process_id"], row["source_id"], row["entity_fqn"])] = row
             self.description = [(name,) for name in BATCH_COLUMNS]
             self._row = tuple(row[name] for name in BATCH_COLUMNS)
             return
-        if statement.startswith("UPDATE ingestion.extraction_batches SET status = 'RUNNING'"):
+        if statement.startswith("UPDATE ingestion.incremental_batches SET status = 'RUNNING'"):
             batch = self.db.batches[tuple(params)]
             batch.update(status="RUNNING", attempt_count=batch["attempt_count"] + 1, finished_at=None)
             self.description = [(name,) for name in BATCH_COLUMNS]
             self._row = tuple(batch[name] for name in BATCH_COLUMNS)
             self.rowcount = 1
             return
-        if statement.startswith("UPDATE ingestion.extraction_state"):
+        if statement.startswith("UPDATE ingestion.incremental_state"):
             after, process_id, source_id, entity_fqn, expected_revision = params
             state = self.db.state.get((source_id, entity_fqn))
             if state is None or state["revision"] != expected_revision:
@@ -131,17 +131,16 @@ class FakeCursor:
                          last_process_id=process_id, updated_at="now")
             self.rowcount = 1
             return
-        if statement.startswith("UPDATE ingestion.extraction_batches SET status = 'SUCCEEDED'"):
-            row_count, observed_max, watermark_after, snapshot_published, process_id, source_id, entity_fqn = params
+        if statement.startswith("UPDATE ingestion.incremental_batches SET status = 'SUCCEEDED'"):
+            row_count, observed_max, watermark_after, process_id, source_id, entity_fqn = params
             batch = self.db.batches[(process_id, source_id, entity_fqn)]
             batch.update(status="SUCCEEDED", row_count=row_count, observed_max=observed_max,
-                         watermark_after=watermark_after,
-                         snapshot_published=snapshot_published, finished_at="now")
+                         watermark_after=watermark_after, finished_at="now")
             self.description = [(name,) for name in BATCH_COLUMNS]
             self._row = tuple(batch[name] for name in BATCH_COLUMNS)
             self.rowcount = 1
             return
-        if statement.startswith("UPDATE ingestion.extraction_batches SET status = 'FAILED'"):
+        if statement.startswith("UPDATE ingestion.incremental_batches SET status = 'FAILED'"):
             batch = self.db.batches[tuple(params)]
             batch.update(status="FAILED", finished_at="now")
             self.description = [(name,) for name in BATCH_COLUMNS]
@@ -238,21 +237,20 @@ class BatchTestCase(unittest.TestCase):
 class TestPlanBatch(BatchTestCase):
     """Planning freezes bounds once and survives retries."""
 
-    def test_bootstrap_is_incremental_with_frozen_upper(self):
+    def test_bootstrap_plans_incremental_with_frozen_upper(self):
         batch = self.plan()
-        self.assertEqual((batch["reason"], batch["mode"], batch["status"]), ("bootstrap", "incremental", "PLANNED"))
+        self.assertEqual((batch["reason"], batch["status"]), ("bootstrap", "PLANNED"))
         self.assertEqual((batch["expected_revision"], batch["watermark_before"]), (1, None))
         self.assertEqual((batch["lower_bound"], batch["lower_bound_op"], batch["upper_bound"]),
                          (None, ">", "10"))
         self.assertEqual((batch["incremental_column"], batch["incremental_type"]), ("id", "bigint"))
         self.assertEqual(batch["attempt_count"], 0)
-        self.assertEqual(self.state()["configured_mode"], "incremental")
 
     def test_regular_window_applies_lookback_lower_and_op(self):
         self.finish(self.plan())
         batch = self.plan(process_id=2, run_id="run2", lookback_size=2,
                           calculate_lower=lambda value: (str(int(value) - 2), ">="))
-        self.assertEqual((batch["reason"], batch["mode"]), ("regular", "incremental"))
+        self.assertEqual(batch["reason"], "regular")
         self.assertEqual((batch["lower_bound"], batch["lower_bound_op"], batch["upper_bound"]),
                          ("8", ">=", "10"))
         self.assertEqual((batch["watermark_before"], batch["expected_revision"]), ("10", 2))
@@ -262,12 +260,10 @@ class TestPlanBatch(BatchTestCase):
         batch = self.plan(process_id=2, run_id="run2")
         self.assertEqual((batch["lower_bound"], batch["lower_bound_op"]), ("10", ">"))
 
-    def test_snapshot_entity_gets_no_bounds(self):
-        batch = self.plan(incremental_column=None, incremental_type=None)
-        self.assertEqual((batch["reason"], batch["mode"]), ("regular", "full_snapshot"))
-        self.assertEqual((batch["lower_bound"], batch["lower_bound_op"], batch["upper_bound"]),
-                         (None, ">", None))
-        self.assertIsNone(self.state()["incremental_column"])
+    def test_registry_serves_incremental_entities_only(self):
+        for changes in ({"incremental_column": None}, {"incremental_type": None}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "requires an incremental"):
+                self.plan(**changes)
 
     def test_retry_returns_frozen_batch(self):
         first = self.plan()
@@ -289,23 +285,17 @@ class TestPlanBatch(BatchTestCase):
 
     def test_contract_change_rejected_without_mutation(self):
         self.plan()
-        for changes in ({"incremental_column": "other"}, {"incremental_type": "decimal(5,0)"},
-                        {"incremental_column": None, "incremental_type": None}):
+        for changes in ({"incremental_column": "other"}, {"incremental_type": "decimal(5,0)"}):
             with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "contract"):
                 self.plan(**changes)
         self.assertEqual(len(self.db.batches), 1)
 
     def test_argument_validation(self):
         for changes in (
-            {"incremental_type": None}, {"incremental_column": None},
             {"lookback_size": "2"}, {"lookback_size": -1}, {"lookback_size": 10**38},
         ):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.plan(**changes)
-
-    def test_incremental_and_type_must_pair(self):
-        with self.assertRaisesRegex(ValueError, "together"):
-            self.plan(incremental_type=None)
 
 
 class TestBatchLifecycle(BatchTestCase):
@@ -356,7 +346,7 @@ class TestBatchLifecycle(BatchTestCase):
             **(self.key(batch) | dict(row_count=1, observed_max="9", watermark_after="10",
                                       db_connect=self.db.connect)))["watermark_after"], "10")
 
-    def test_finalize_requires_typed_strategy_for_incremental(self):
+    def test_finalize_requires_typed_strategy(self):
         self.finish(self.plan())
         batch = self.plan(process_id=2, run_id="run2")
         with self.assertRaisesRegex(ValueError, "required"):
@@ -372,14 +362,6 @@ class TestBatchLifecycle(BatchTestCase):
             self.finish(batch)
         self.assertEqual(self.db.batches[(2, "bank", "s.t")]["status"], "RUNNING")
         self.assertEqual(self.state()["watermark"], "10")
-
-    def test_finalize_full_slice_never_touches_state(self):
-        batch = self.plan(incremental_column=None, incremental_type=None)
-        result = meta.finalize_batch(**(self.key(batch) | dict(
-            row_count=3, observed_max=None, db_connect=self.db.connect)))
-        self.assertEqual((result["status"], result["watermark_after"]), ("SUCCEEDED", None))
-        self.assertEqual((self.state()["watermark"], self.state()["revision"],
-                          self.state()["last_process_id"]), (None, 1, None))
 
     def test_finalize_empty_delta_preserves_watermark(self):
         self.finish(self.plan())
@@ -432,7 +414,7 @@ class TestGetBatch(BatchTestCase):
         self.assertEqual(found, planned)
 
     def test_revision_fence_rejects_stale_executor(self):
-        batch = self.plan()
+        self.plan()
         self.state()["revision"] += 1
         with self.assertRaisesRegex(ValueError, "revision"):
             meta.get_batch(process_id=1, source_id="bank", entity_fqn="s.t",
@@ -441,16 +423,9 @@ class TestGetBatch(BatchTestCase):
             meta.start_batch(process_id=1, source_id="bank", entity_fqn="s.t",
                              db_connect=self.db.connect)
 
-    def test_full_slice_batch_escapes_revision_fence(self):
-        batch = self.plan(incremental_column=None, incremental_type=None)
-        self.state()["revision"] += 1
-        found = meta.get_batch(process_id=1, source_id="bank", entity_fqn="s.t",
-                               db_connect=self.db.connect)
-        self.assertEqual(found, batch)
-
     def test_succeeded_batch_escapes_the_fence(self):
-        batch = self.plan()
-        self.finish(batch)
+        self.plan()
+        self.finish(self.plan())
         self.state()["revision"] += 1
         found = meta.get_batch(process_id=1, source_id="bank", entity_fqn="s.t",
                                db_connect=self.db.connect)
@@ -501,7 +476,7 @@ class TestProcessAndEvents(unittest.TestCase):
 
 
 class TestPureHelpers(unittest.TestCase):
-    """Mode, reason, and bounds computation without a database."""
+    """Reason and bounds computation without a database."""
 
     def config(self, **changes):
         """Build the incremental config with overrides."""
@@ -510,23 +485,17 @@ class TestPureHelpers(unittest.TestCase):
         values.update(changes)
         return meta._IncrementalConfig(**values)
 
-    def test_mode_and_reason_matrix(self):
-        cases = (
-            ("id", None, "bootstrap", "incremental"),
-            ("id", "5", "regular", "incremental"),
-            (None, None, "regular", "full_snapshot"),
-        )
-        for column, watermark, reason, mode in cases:
-            with self.subTest(column=column, watermark=watermark):
-                self.assertEqual(meta._batch_mode_and_reason(column, watermark), (mode, reason))
+    def test_reason_matrix(self):
+        self.assertEqual(meta._batch_reason(None), "bootstrap")
+        self.assertEqual(meta._batch_reason("5"), "regular")
 
     def test_incremental_bounds_regular(self):
-        bounds = meta._incremental_bounds("incremental", "5", "10", False, self.config())
+        bounds = meta._incremental_bounds("5", "10", False, self.config())
         self.assertEqual(bounds, ("5", ">", "10", False, 0, None))
 
     def test_incremental_bounds_lookback(self):
         bounds = meta._incremental_bounds(
-            "incremental", "5", "10", False,
+            "5", "10", False,
             self.config(lookback_size=2, lookback_unit=None,
                         calculate_lower=lambda value: (str(int(value) - 2), ">=")),
         )
@@ -535,20 +504,13 @@ class TestPureHelpers(unittest.TestCase):
     def test_incremental_bounds_regression_rejected(self):
         with self.assertRaisesRegex(ValueError, "regressed"):
             meta._incremental_bounds(
-                "incremental", "10", "9", False,
+                "10", "9", False,
                 self.config(compare_positions=lambda left, right: int(left) - int(right)),
             )
 
     def test_incremental_bounds_lookback_needs_calculator(self):
         with self.assertRaisesRegex(ValueError, "calculate_lower"):
-            meta._incremental_bounds("incremental", "5", "10", False,
-                                     self.config(lookback_size=1))
-
-    def test_full_snapshot_bounds(self):
-        self.assertEqual(
-            meta._incremental_bounds("full_snapshot", None, "10", True, self.config(column=None)),
-            (None, ">", None, False, 0, None),
-        )
+            meta._incremental_bounds("5", "10", False, self.config(lookback_size=1))
 
 
 if __name__ == "__main__":

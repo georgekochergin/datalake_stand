@@ -104,21 +104,21 @@ def check_registry_recovery():
     connection = PostgresHook(postgres_conn_id="ingestion_meta").get_conn()
     try:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT revision FROM ingestion.extraction_state WHERE source_id = %s FOR UPDATE", (source,))
+            cursor.execute("SELECT revision FROM ingestion.incremental_state WHERE source_id = %s FOR UPDATE", (source,))
             revision = cursor.fetchone()[0]
-            cursor.execute("UPDATE ingestion.extraction_batches SET status = 'FAILED', "
+            cursor.execute("UPDATE ingestion.incremental_batches SET status = 'FAILED', "
                            "finished_at = clock_timestamp() WHERE process_id = %s AND source_id = %s "
                            "AND entity_fqn = 'synthetic.transactions'", (stale["process_id"], source))
             cursor.execute(
-                "INSERT INTO ingestion.extraction_state_migrations "
-                "(source_id, entity_fqn, old_revision, new_revision, old_mode, new_mode, "
+                "INSERT INTO ingestion.incremental_state_migrations "
+                "(source_id, entity_fqn, old_revision, new_revision, "
                 "old_column, new_column, old_type, new_type, old_watermark, new_watermark, performed_by, reason_text) "
-                "VALUES (%s, %s, %s, %s, 'incremental', 'incremental', 'position', 'other_position', "
+                "VALUES (%s, %s, %s, %s, 'position', 'other_position', "
                 "'bigint', 'bigint', '12', NULL, current_user, 'e2e stopped synthetic executor migration')",
                 (source, "synthetic.transactions", revision, revision + 1),
             )
             cursor.execute(
-                "UPDATE ingestion.extraction_state SET incremental_column = 'other_position', "
+                "UPDATE ingestion.incremental_state SET incremental_column = 'other_position', "
                 "watermark = NULL, revision = revision + 1 WHERE source_id = %s AND revision = %s",
                 (source, revision),
             )
@@ -128,14 +128,13 @@ def check_registry_recovery():
                                                     execution_date=None, db_connect=connect)
         migrated = meta.plan_batch(**dict(arguments(migrated_process), incremental_column="other_position",
                                           upper_bound="90000"))
-        require(migrated["reason"] == "bootstrap" and migrated["mode"] == "incremental"
-                and migrated["watermark_before"] is None,
-                "migrated contract reboots from null watermark as incremental bootstrap")
+        require(migrated["reason"] == "bootstrap" and migrated["watermark_before"] is None,
+                "migrated contract reboots from null watermark as bootstrap")
         meta.start_batch(**key(migrated))
         finalized = meta.finalize_batch(**dict(key(migrated), row_count=1, observed_max="90000"))
         require(finalized["watermark_after"] == "90000", "new contract bootstrap advances independently")
         with connection.cursor() as cursor:
-            cursor.execute("SELECT count(*) FROM ingestion.extraction_state_migrations WHERE source_id = %s", (source,))
+            cursor.execute("SELECT count(*) FROM ingestion.incremental_state_migrations WHERE source_id = %s", (source,))
             require(cursor.fetchone()[0] == 1, "manual migration audit retained exactly once")
     finally:
         connection.close()
@@ -146,13 +145,16 @@ def main():
     connection = PostgresHook(postgres_conn_id="ingestion_meta").get_conn()
     try:
         with connection.cursor() as cursor:
-            states = records(cursor, "SELECT * FROM ingestion.extraction_state WHERE source_id IN ('bank', 'broker')")
+            states = records(cursor, "SELECT * FROM ingestion.incremental_state WHERE source_id IN ('bank', 'broker')")
             batches = records(
                 cursor,
-                "SELECT * FROM ingestion.extraction_batches WHERE source_id IN ('bank', 'broker') "
+                "SELECT * FROM ingestion.incremental_batches WHERE source_id IN ('bank', 'broker') "
                 "ORDER BY process_id, source_id, entity_fqn",
             )
-            require(len(states) == 8, "eight source entities have extraction state")
+            require(len(states) == 2, "only the two incremental entities have registry state")
+            registered = {state["entity_fqn"] for state in states}
+            require(registered == {"retail_bank.transactions", "trading_core.transactions"},
+                    "registry tracks exactly the transactions entities")
             require(bool(batches), "extraction batches exist")
             identities = {(b["process_id"], b["source_id"], b["entity_fqn"]) for b in batches}
             require(len(identities) == len(batches), "one stable batch identity per execution and entity")
@@ -168,22 +170,18 @@ def main():
                 require(batch["process_id"] > 0, label + " has positive process id")
                 if batch["row_count"]:
                     require(batch["attempt_count"] >= 1, label + " records execution attempt")
-                if batch["mode"] == "incremental":
-                    require(batch["upper_bound"] is not None or batch["empty_at_plan"],
-                            label + " has frozen upper bound")
-                    if batch["observed_max"] is not None:
-                        require(int(batch["observed_max"]) <= int(batch["upper_bound"]),
-                                label + " observed max within bound")
-                    if batch["reason"] == "regular":
-                        require(batch["watermark_before"] is not None, label + " regular has watermark")
-                        if not batch["lookback_size"]:
-                            require(batch["lower_bound"] == batch["watermark_before"],
-                                    label + " zero-lookback lower bound")
-                            require(batch["lower_bound_op"] == ">", label + " zero-lookback strict operator")
-                else:
-                    require(batch["lower_bound"] is None and batch["upper_bound"] is None,
-                            label + " snapshot has no window filters")
-                if batch["run_id"].startswith(("e2e-ingest2-",)) and batch["mode"] == "incremental":
+                require(batch["upper_bound"] is not None or batch["empty_at_plan"],
+                        label + " has frozen upper bound")
+                if batch["observed_max"] is not None:
+                    require(int(batch["observed_max"]) <= int(batch["upper_bound"]),
+                            label + " observed max within bound")
+                if batch["reason"] == "regular":
+                    require(batch["watermark_before"] is not None, label + " regular has watermark")
+                    if not batch["lookback_size"]:
+                        require(batch["lower_bound"] == batch["watermark_before"],
+                                label + " zero-lookback lower bound")
+                        require(batch["lower_bound_op"] == ">", label + " zero-lookback strict operator")
+                if batch["run_id"].startswith(("e2e-ingest2-",)):
                     require(batch["row_count"] == 0 and batch["observed_max"] is None,
                             label + " no-op records zero rows")
                     require(batch["watermark_after"] == batch["watermark_before"],
@@ -194,24 +192,17 @@ def main():
                 history = grouped[state["source_id"], state["entity_fqn"]]
                 label = f"{state['source_id']}/{state['entity_fqn']}"
                 require(bool(history), label + " has batch history")
-                if state["configured_mode"] == "incremental":
-                    require(state["incremental_column"] == "_batch_id" and state["watermark"] is not None,
-                            label + " incremental contract retained")
-                    require(state["last_process_id"] == history[-1]["process_id"],
-                            label + " points at latest succeeded batch")
-                    require(state["watermark"] == history[-1]["watermark_after"],
-                            label + " state matches final watermark")
-                    require(state["revision"] == history[-1]["expected_revision"] + 1,
-                            label + " revision finalized once")
-                    require(all(right["expected_revision"] == left["expected_revision"] + 1
-                                for left, right in zip(history, history[1:])),
-                            label + " batch revisions contiguous")
-                else:
-                    require(state["watermark"] is None and state["incremental_column"] is None
-                            and state["incremental_type"] is None,
-                            label + " snapshot has no incremental state")
-                    require(state["last_process_id"] is None and state["revision"] == 1,
-                            label + " full-slice batches never touch extraction state")
+                require(state["incremental_column"] == "_batch_id" and state["watermark"] is not None,
+                        label + " incremental contract retained")
+                require(state["last_process_id"] == history[-1]["process_id"],
+                        label + " points at latest succeeded batch")
+                require(state["watermark"] == history[-1]["watermark_after"],
+                        label + " state matches final watermark")
+                require(state["revision"] == history[-1]["expected_revision"] + 1,
+                        label + " revision finalized once")
+                require(all(right["expected_revision"] == left["expected_revision"] + 1
+                            for left, right in zip(history, history[1:])),
+                        label + " batch revisions contiguous")
         check_registry_recovery()
         print("PASS extraction metadata checks; FAIL=0")
     finally:

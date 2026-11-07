@@ -28,7 +28,7 @@ def metadata_row(hook, table, source_id, entity_fqn):
     connection = hook.get_conn()
     try:
         with connection.cursor() as cursor:
-            order = " ORDER BY process_id DESC LIMIT 1" if table == "extraction_batches" else ""
+            order = " ORDER BY process_id DESC LIMIT 1" if table == "incremental_batches" else ""
             cursor.execute(
                 f"SELECT * FROM ingestion.{table} WHERE source_id = %s AND entity_fqn = %s" + order,
                 (source_id, entity_fqn),
@@ -89,7 +89,7 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
         dag_id="e2e_temporal_extraction", run_id=None,
         process_id=None, lookback_size=0, lookback_unit=None, lookback_given=False,
     )
-    require(metadata_row(hook, "extraction_state", args.source_id, table) is None,
+    require(metadata_row(hook, "incremental_state", args.source_id, table) is None,
             target + " starts with fresh isolated metadata")
     require(not spark.catalog.tableExists(args.target_table), target + " starts with fresh raw table")
     kind, upper, empty, has_null = load_entity.source_position(spark, args)
@@ -122,8 +122,8 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
             require(expected_count > 0, target + " lookback includes overlapping source rows")
             require(lower_op == ">=", target + " temporal lookback uses the inclusive aligned operator")
         load_entity.managed_load(spark, args)
-        batch = metadata_row(hook, "extraction_batches", args.source_id, table)
-        state = metadata_row(hook, "extraction_state", args.source_id, table)
+        batch = metadata_row(hook, "incremental_batches", args.source_id, table)
+        state = metadata_row(hook, "incremental_state", args.source_id, table)
         label = f"{target}/{phase}"
         require(batch is not None and state is not None, label + " persisted batch and state")
         require(batch["run_id"] == args.run_id and batch["process_id"] == args.process_id,
@@ -138,7 +138,7 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
         require(batch["lower_bound_op"] == lower_op, label + " persisted applied lower operator")
         require(batch["watermark_before"] == watermark, label + " retains previous watermark")
         reason = "bootstrap" if phase == "bootstrap" else "regular"
-        require(batch["reason"] == reason and batch["mode"] == "incremental",
+        require(batch["reason"] == reason,
                 label + " bootstrap is the opening phase of the incremental stream")
         require(batch["row_count"] == expected_count, label + " row count matches exact JDBC predicate")
         require(batch["observed_max"] == (upper if expected_count else None),
@@ -150,7 +150,7 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
         require(state["revision"] == revision + 1 and batch["expected_revision"] == revision,
                 label + " advances one state revision")
         require(state["last_process_id"] == batch["process_id"], label + " state points to latest batch")
-        require(state["configured_mode"] == "incremental" and state["incremental_column"] == column,
+        require(state["incremental_column"] == column,
                 label + " preserves configured incremental contract")
         total += expected_count
         frame = spark.table(args.target_table)
@@ -160,10 +160,10 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
         require(frame.filter(frame["__process_id"].isNull()).count() == 0,
                 label + " every raw row has a process identity")
         load_entity.managed_load(spark, args)
-        retried = metadata_row(hook, "extraction_batches", args.source_id, table)
+        retried = metadata_row(hook, "incremental_batches", args.source_id, table)
         require(retried == batch and spark.table(args.target_table).count() == total,
                 label + " successful retry neither appends nor mutates persisted batch")
-        require(metadata_row(hook, "extraction_state", args.source_id, table) == state,
+        require(metadata_row(hook, "incremental_state", args.source_id, table) == state,
                 label + " successful retry preserves state revision")
 
 
@@ -217,12 +217,12 @@ def check_post_append_retry(spark, hook, jdbc, token):
         else:
             raise AssertionError("fault injection must fail the first execution")
     require(spark.table(args.target_table).count() == 1, "first append survives metadata failure")
-    require(metadata_row(hook, "extraction_state", args.source_id, args.source_table)["watermark"] is None,
+    require(metadata_row(hook, "incremental_state", args.source_id, args.source_table)["watermark"] is None,
             "metadata failure does not advance watermark")
-    failed = metadata_row(hook, "extraction_batches", args.source_id, args.source_table)
+    failed = metadata_row(hook, "incremental_batches", args.source_id, args.source_table)
     require(failed["status"] == "FAILED", "ordinary failed batch permits retry")
     load_entity.managed_load(spark, args)
-    finished = metadata_row(hook, "extraction_batches", args.source_id, args.source_table)
+    finished = metadata_row(hook, "incremental_batches", args.source_id, args.source_table)
     require(finished["process_id"] == failed["process_id"] and finished["attempt_count"] == 2,
             "post-append retry retains batch identity")
     require(finished["status"] == "SUCCEEDED" and finished["row_count"] == 1,

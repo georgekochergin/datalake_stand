@@ -279,19 +279,21 @@ FROM ingestion.airflow_dagruns_log ORDER BY id DESC LIMIT 10;
 SELECT process_id, entity_fqn, status, ts
 FROM ingestion.airflow_tasks_log ORDER BY id DESC LIMIT 20;
 
-SELECT entity_fqn, configured_mode, incremental_column, incremental_type,
+SELECT entity_fqn, incremental_column, incremental_type,
        watermark, revision, last_process_id
-FROM ingestion.extraction_state ORDER BY source_id, entity_fqn;
+FROM ingestion.incremental_state ORDER BY source_id, entity_fqn;
 
-SELECT process_id, entity_fqn, mode, reason, status, attempt_count, row_count,
+SELECT process_id, entity_fqn, reason, status, attempt_count, row_count,
        watermark_before, watermark_after, lower_bound, lower_bound_op, upper_bound
-FROM ingestion.extraction_batches ORDER BY process_id DESC LIMIT 16;
+FROM ingestion.incremental_batches ORDER BY process_id DESC LIMIT 16;
 ```
 
-**Что рассказать:** у `transactions` первая партия — `bootstrap` (первичное
-наполнение, без нижней границы) с зафиксированным `watermark_after`; у
-снапшотных сущностей — партии `reason=regular` в режиме `full_snapshot` без
-watermark. Границы окна заморозились **до** чтения источника.
+**Что рассказать:** реестр хранит только инкрементальные сущности — здесь
+это `transactions` двух источников; их первая партия — `bootstrap`
+(первичное наполнение, без нижней границы) с зафиксированным
+`watermark_after`. Границы окна заморозились **до** чтения источника;
+полные срезы (справочники, сделки) в реестр не пишутся — их свежесть
+видна по `__process_id`/`__load_dttm` в raw.
 
 ## Шаг 5. Повторный раунд: полный снапшот против инкремента
 
@@ -322,7 +324,7 @@ FROM raw.bank.retail_bank__transactions GROUP BY 1 ORDER BY 1;
 
 ```sql
 SELECT process_id, reason, row_count, watermark_before, watermark_after, status
-FROM ingestion.extraction_batches
+FROM ingestion.incremental_batches
 WHERE entity_fqn = 'retail_bank.transactions' ORDER BY process_id;
 ```
 
@@ -492,7 +494,7 @@ GROUP BY 1 ORDER BY 1;
 
 ```sql
 SELECT process_id, entity_fqn, reason, status, row_count, finished_at
-FROM ingestion.extraction_batches ORDER BY process_id DESC LIMIT 8;
+FROM ingestion.incremental_batches ORDER BY process_id DESC LIMIT 8;
 ```
 
 Все партии загрузок после эволюции — `SUCCEEDED`: смена схемы источника не
