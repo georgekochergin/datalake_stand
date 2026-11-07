@@ -148,7 +148,7 @@ def generate_dag_source(
         f'        source="{source.source_id}",',
         f"        ttl_minutes={ACTIVATE_TTL_MINUTES},",
         "    )",
-        '    generate_process_id = GenerateProcessIdOperator(task_id="generate_process_id", entities=' + repr([entity.fqn for entity in pipeline.entities]) + ')',
+        '    generate_process_id = GenerateProcessIdOperator(task_id="generate_process_id")',
         '    with TaskGroup(group_id="ingest_group") as ingest_group:',
     ]
     for entity in pipeline.entities:

@@ -48,7 +48,8 @@ class TestGenerateDagSource(unittest.TestCase):
     def test_pre_pipeline_tasks(self):
         self.assertIn('source="bank"', self.source)
         self.assertIn("ttl_minutes=15", self.source)
-        self.assertIn('GenerateProcessIdOperator(task_id="generate_process_id", entities=', self.source)
+        self.assertIn('GenerateProcessIdOperator(task_id="generate_process_id")', self.source)
+        self.assertNotIn("entities=", self.source)
         self.assertIn("generate_process_id >> activate_source >> ingest_group", self.source)
 
     def test_no_dag_params(self):
@@ -97,12 +98,26 @@ class TestGenerateDagSource(unittest.TestCase):
     def test_schedule_literal_rendered(self):
         pipeline = PipelineManifest(
             source_id="bank",
-            schedule="@daily",
+            schedule="30 2 * * *",
             catchup=False,
             tags=(),
             entities=(EntityConfig("retail_bank.clients", "retail_bank__clients", None),),
         )
-        self.assertIn("schedule='@daily'", generate_dag_source(BANK, pipeline))
+        self.assertIn("schedule='30 2 * * *'", generate_dag_source(BANK, pipeline))
+
+    def test_default_lookback_baked_for_incremental_entity(self):
+        pipeline = PipelineManifest(
+            source_id="bank",
+            schedule=None,
+            catchup=False,
+            tags=(),
+            entities=(EntityConfig("retail_bank.transactions", "retail_bank__transactions",
+                                   "_batch_id", lookback_size=3, lookback_unit="d"),),
+        )
+        source = generate_dag_source(BANK, pipeline)
+        self.assertIn("lookback_size=3", source)
+        self.assertIn("lookback_unit='d'", source)
+        self.assertIn("lookback_specified=False", source)
 
     def test_deterministic(self):
         self.assertEqual(self.source, generate_dag_source(BANK, PIPELINE))
@@ -140,6 +155,8 @@ class TestGenerateAll(unittest.TestCase):
         self.assertIn('incremental_column="_batch_id"', broker)
         self.assertIn('entity_fqn="trading_core.transactions"', broker)
         self.assertIn('Asset("raw://broker/trading_core.deals")', broker)
+        self.assertIn("lookback_size=3", broker)
+        self.assertIn("lookback_unit='d'", broker)
 
     def test_bank_mixed_modes(self):
         bank = self.generated["ingest__rdbms__bank__main.py"]

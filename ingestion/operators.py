@@ -45,22 +45,6 @@ def _validate_process_id(value) -> int:
     raise ValueError("process_id must be a positive integer from generate_process_id")
 
 
-def validate_run_conf(conf, entities):
-    """Validate manual overrides before source activation, including API triggers."""
-    conf = conf or {}
-    if not isinstance(conf, dict) or set(conf) - {"force_full_snapshot_fqns", "reason"}:
-        raise ValueError("unknown or invalid ingestion run configuration")
-    fqns = conf.get("force_full_snapshot_fqns", [])
-    reason = conf.get("reason", "")
-    if not isinstance(fqns, list) or any(not isinstance(fqn, str) for fqn in fqns):
-        raise ValueError("force_full_snapshot_fqns must be an array of FQNs")
-    if len(set(fqns)) != len(fqns) or set(fqns) - set(entities):
-        raise ValueError("duplicate or unknown FQN in force_full_snapshot_fqns")
-    if not isinstance(reason, str) or (fqns and not reason.strip()):
-        raise ValueError("manual full snapshot requires a non-empty reason")
-    return fqns, reason
-
-
 def log_task_failed(
     context,
     source_id: str,
@@ -83,17 +67,19 @@ def log_task_failed(
 
 
 class GenerateProcessIdOperator(BaseOperator):
-    """Allocate the run's __process_id, log dagrun START, push XCom."""
+    """Allocate this execution's process_id, log dagrun START, push XCom.
 
-    def __init__(self, task_id="generate_process_id", pg_conn_id="ingestion_meta", entities=(), **kwargs):
+    Every execution, including a retry of this task itself, allocates a fresh
+    process_id: a retried task reuses the value from XCom instead.
+    """
+
+    def __init__(self, task_id="generate_process_id", pg_conn_id="ingestion_meta", **kwargs):
         super().__init__(task_id=task_id, **kwargs)
         self.pg_conn_id = pg_conn_id
-        self.entities = entities
 
     def execute(self, context):
         dag_run = context["dag_run"]
-        validate_run_conf(dag_run.conf, self.entities)
-        return meta.get_or_create_process_id(
+        return meta.allocate_process_id(
             dag_id=dag_run.dag_id, run_id=dag_run.run_id,
             execution_date=dag_run.logical_date,
             db_connect=partial(_meta_connect, self.pg_conn_id),
@@ -245,7 +231,6 @@ class IngestAppendOperator(SparkSubmitOperator):
         if not self.parallelism:
             application_args.append("--no-parallelism")
         dag_run = context["dag_run"]
-        conf = dag_run.conf or {}
         meta = BaseHook.get_connection(self.pg_conn_id)
         self.env_vars = dict(self.env_vars or {}, PGHOST=meta.host, PGPORT=str(meta.port or 5432),
                              PGDATABASE=meta.schema, PGUSER=meta.login, PGPASSWORD=meta.password)
@@ -255,8 +240,6 @@ class IngestAppendOperator(SparkSubmitOperator):
             application_args += ["--lookback-unit", self.lookback_unit]
         if self.lookback_specified:
             application_args.append("--lookback-given")
-        if self.fqn in conf.get("force_full_snapshot_fqns", []):
-            application_args += ["--force-full", "--reason", conf["reason"]]
         if self.incremental_column:
             application_args += ["--incremental-column", self.incremental_column]
         self.application_args = application_args

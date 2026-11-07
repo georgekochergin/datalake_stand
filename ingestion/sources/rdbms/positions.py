@@ -126,31 +126,58 @@ def canonical(value, kind):
     return _format(_parse(value, kind), kind)
 
 
-def lower_bound(watermark, kind, size=0, unit=None, specified=False):
-    """Subtract lookback; return NULL instead of excluding the type minimum.
+def window_bounds(watermark, kind, size=0, unit=None):
+    """Subtract lookback with hour/day alignment; return (lower, op).
 
-    specified marks a configured lookback: temporal kinds then require a unit
-    even at size 0, matching manifest validation that cannot know the type.
+    The lower bound is the start of the hour (unit h) or day (unit d) reached
+    by the subtraction, computed in the value's own calendar: instants align
+    on the UTC grid, local positions on the wall-clock grid of their naive
+    digits. Underflow below the type minimum drops the lower filter (None).
+    op is '>=' for an aligned temporal lookback and '>' otherwise; at size 0
+    the unit is ignored entirely, without validation.
     """
     family, _, bounds = kind_info(kind)
     if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= 10**38 - 1:
         raise ValueError("Lookback size must be an integer in 0..10^38-1")
     if family == "integral":
-        if unit is not None:
+        if unit is not None and size:
             raise ValueError("Integral lookback forbids a unit")
-        delta, minimum = size, bounds[0]
-    else:
-        allowed = ("d",) if family == "date" else ("h", "d")
-        if unit is not None and unit not in allowed:
+        step, delta, minimum, op = 1, size, bounds[0], ">"
+    elif family == "date":
+        if size and unit != "d":
             raise ValueError("Temporal lookback requires a valid unit")
-        if unit is None and (specified or size):
-            raise ValueError("Temporal lookback requires a unit")
-        delta = size if family == "date" else size * (3600 if unit == "h" else 86400) * _NS
-        minimum = 1 if family == "date" else 0
+        step, delta, minimum, op = 1, size, 1, ">=" if size else ">"
+    else:
+        if size and unit not in ("h", "d"):
+            raise ValueError("Temporal lookback requires a valid unit")
+        step = _DAY if unit == "d" else 3600 * _NS
+        delta, minimum, op = size * step, 0, ">=" if size else ">"
     parsed = _parse(watermark, kind)
     if parsed is None or parsed - delta < minimum:
-        return None
-    return _format(parsed - delta, kind)
+        return None, op
+    aligned = parsed - delta
+    if size and step > 1:
+        aligned -= aligned % step
+    return _format(aligned, kind), op
+
+
+def resolve_lookback(kind, size, unit, specified):
+    """Apply the schedule-derived default to the runtime-discovered kind.
+
+    Generator bakes one temporal default (3 h or 3 d by DAG schedule) into
+    the DAG; the actual position kind is only known at runtime. Explicitly
+    configured lookback passes through unchanged and is validated by kind in
+    window_bounds; integral defaults collapse to 0 and date defaults are
+    always 3 days regardless of schedule.
+    """
+    family = kind_info(kind)[0]
+    if specified:
+        return size, unit
+    if family == "integral":
+        return 0, None
+    if family == "date":
+        return 3, "d"
+    return size, unit
 
 
 def maximum(previous, observed, kind):

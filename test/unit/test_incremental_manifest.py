@@ -34,19 +34,19 @@ class TestIncrementalManifest(unittest.TestCase):
             with self.subTest(column=column):
                 entity = self.load_entity({"incremental": {"source_column": column}})
                 self.assertEqual(entity.incremental_column, column)
-                self.assertEqual(entity.lookback_size, 0)
-                self.assertIsNone(entity.lookback_unit)
+                self.assertEqual((entity.lookback_size, entity.lookback_unit), (3, "d"))
                 self.assertFalse(entity.lookback_specified)
 
     def test_numeric_and_temporal_lookback(self):
-        for size, unit in ((0, None), (10, None), (0, "h"), (2, "h"), (3, "d"), (10 ** 38 - 1, None)):
+        for size, unit, stored in ((0, None, None), (10, None, None), (0, "h", None),
+                                   (2, "h", "h"), (3, "d", "d"), (10 ** 38 - 1, None, None)):
             lookback = {"size": size}
             if unit is not None:
                 lookback["unit"] = unit
             with self.subTest(size=size, unit=unit):
                 entity = self.load_entity({"incremental": {"source_column": "updated_at", "lookback": lookback}})
                 self.assertEqual(entity.lookback_size, size)
-                self.assertEqual(entity.lookback_unit, unit)
+                self.assertEqual(entity.lookback_unit, stored)
                 self.assertTrue(entity.lookback_specified)
 
     def test_legacy_and_unknown_entity_keys_rejected(self):

@@ -5,7 +5,6 @@ import re
 CATALOG = "raw"
 METADATA_DTTM = "__load_dttm"
 METADATA_PID = "__process_id"
-METADATA_BATCH = "__batch_id"
 
 IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -33,12 +32,11 @@ def build_create_table_sql(target: str, columns: list[tuple[str, str]]) -> str:
     namespace, table = validate_target_table(target)
     rendered: list[str] = []
     for name, ddl_type in columns:
-        if name in (METADATA_DTTM, METADATA_PID, METADATA_BATCH, "__extract_position"):
+        if name in (METADATA_DTTM, METADATA_PID, "__extract_position"):
             raise ValueError(f"source column {name!r} collides with a metadata column")
         rendered.append(f"{quote_identifier(name)} {ddl_type}")
     rendered.append(f"{quote_identifier(METADATA_DTTM)} timestamp_ltz")
     rendered.append(f"{quote_identifier(METADATA_PID)} bigint")
-    rendered.append(f"{quote_identifier(METADATA_BATCH)} bigint")
     joined = ", ".join(rendered)
     return (
         f"CREATE TABLE {target} ({joined}) USING iceberg "

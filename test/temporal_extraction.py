@@ -28,7 +28,7 @@ def metadata_row(hook, table, source_id, entity_fqn):
     connection = hook.get_conn()
     try:
         with connection.cursor() as cursor:
-            order = " ORDER BY batch_id DESC LIMIT 1" if table == "extraction_batches" else ""
+            order = " ORDER BY process_id DESC LIMIT 1" if table == "extraction_batches" else ""
             cursor.execute(
                 f"SELECT * FROM ingestion.{table} WHERE source_id = %s AND entity_fqn = %s" + order,
                 (source_id, entity_fqn),
@@ -39,7 +39,7 @@ def metadata_row(hook, table, source_id, entity_fqn):
         connection.close()
 
 
-def source_count(spark, args, lower, upper, kind):
+def source_count(spark, args, lower, upper, kind, lower_op=">"):
     """Count the exact source predicate without Spark temporal conversion."""
     load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
     from ingestion.sources.rdbms import positions
@@ -48,7 +48,7 @@ def source_count(spark, args, lower, upper, kind):
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     column = dialect.quote_identifier(args.incremental_column)
     predicates = []
-    for value, operator in ((lower, ">"), (upper, "<=")):
+    for value, operator in ((lower, lower_op), (upper, "<=")):
         if value is not None:
             predicates.append(
                 f"{column} {operator} {dialect.position_literal(positions.canonical(value, kind), kind)}"
@@ -76,7 +76,7 @@ def source_count(spark, args, lower, upper, kind):
 
 def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, token,
              expected_upper=None):
-    """Verify bootstrap, overlap, manual-full, empty resume, and successful retry."""
+    """Verify bootstrap, aligned lookback, empty resume, and successful retry."""
     load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
     from ingestion import meta
     from ingestion.sources.rdbms import positions
@@ -87,8 +87,7 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
         source_id=f"e2e_{source}", incremental_column=column,
         no_parallelism=True, num_partitions=1,
         dag_id="e2e_temporal_extraction", run_id=None,
-        process_id=None, force_full=False, reason=None, lookback_size=1, lookback_unit="d",
-        lookback_given=True,
+        process_id=None, lookback_size=0, lookback_unit=None, lookback_given=False,
     )
     require(metadata_row(hook, "extraction_state", args.source_id, table) is None,
             target + " starts with fresh isolated metadata")
@@ -102,27 +101,26 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
         previous = digits[:-1] + str(int(digits[-1]) - 1) + ("Z" if upper.endswith("Z") else "")
         require(source_count(spark, args, previous, upper, kind) == 1,
                 target + " source predicate distinguishes adjacent sub-microsecond positions")
-    full_count = source_count(spark, args, None, None, kind)
     total = 0
     watermark = None
-    for revision, phase in enumerate(("bootstrap", "lookback", "forcefull", "normal"), start=1):
+    for revision, phase in enumerate(("bootstrap", "lookback", "normal"), start=1):
         args.run_id = f"{token}-{target}-{phase}"
-        args.process_id = meta.get_or_create_process_id(dag_id=args.dag_id, run_id=args.run_id,
-                                                        db_connect=hook.get_conn)
-        args.force_full = phase == "forcefull"
-        args.reason = "e2e temporal manual-full contract" if args.force_full else None
-        args.lookback_size = 1 if phase in ("bootstrap", "lookback") else 0
+        args.process_id = meta.allocate_process_id(dag_id=args.dag_id, run_id=args.run_id,
+                                                   db_connect=hook.get_conn)
+        args.lookback_size = 1 if phase == "lookback" else 0
         args.lookback_unit = "d" if args.lookback_size else None
-        args.lookback_given = bool(args.lookback_size)
-        lower = positions.lower_bound(watermark, kind, 1, "d") if phase == "lookback" else (
-            watermark if phase == "normal" else None
-        )
-        bound = None if args.force_full else upper
-        expected_count = source_count(spark, args, lower, bound, kind)
+        args.lookback_given = True
+        if phase == "lookback":
+            lower, lower_op = positions.window_bounds(watermark, kind, 1, "d")
+        else:
+            lower, lower_op = (watermark if phase == "normal" else None), ">"
+        bound = upper
+        expected_count = source_count(spark, args, lower, bound, kind, lower_op)
         if phase == "normal":
             require(expected_count == 0, target + " unchanged source has empty strict resume")
         if phase == "lookback":
             require(expected_count > 0, target + " lookback includes overlapping source rows")
+            require(lower_op == ">=", target + " temporal lookback uses the inclusive aligned operator")
         load_entity.managed_load(spark, args)
         batch = metadata_row(hook, "extraction_batches", args.source_id, table)
         state = metadata_row(hook, "extraction_state", args.source_id, table)
@@ -132,39 +130,35 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
                 label + " stable run/process identity")
         require(batch["status"] == "SUCCEEDED" and batch["attempt_count"] == (1 if expected_count else 0),
                 label + " finalized; empty window starts no executor")
-        require(batch["finished_at"] is not None and batch["last_error"] is None,
-                label + " finalized cleanly")
+        require(batch["finished_at"] is not None, label + " finalized cleanly")
         require(batch["incremental_type"] == kind and state["incremental_type"] == kind,
                 label + " persists original JDBC kind")
         require(batch["lower_bound"] == lower and batch["upper_bound"] == bound,
                 label + " frozen exact lower/upper bounds")
+        require(batch["lower_bound_op"] == lower_op, label + " persisted applied lower operator")
         require(batch["watermark_before"] == watermark, label + " retains previous watermark")
-        reason = "manual_full" if args.force_full else ("bootstrap" if phase == "bootstrap" else "regular")
-        require(batch["reason"] == reason, label + " persisted extraction reason")
-        require(batch["mode"] == ("full_snapshot" if phase in ("bootstrap", "forcefull") else "incremental"),
-                label + " persisted extraction mode")
+        reason = "bootstrap" if phase == "bootstrap" else "regular"
+        require(batch["reason"] == reason and batch["mode"] == "incremental",
+                label + " bootstrap is the opening phase of the incremental stream")
         require(batch["row_count"] == expected_count, label + " row count matches exact JDBC predicate")
         require(batch["observed_max"] == (upper if expected_count else None),
                 label + " observed MAX retains exact source precision")
-        if not args.force_full and expected_count:
+        if expected_count:
             watermark = upper
         require(batch["watermark_after"] == watermark and state["watermark"] == watermark,
                 label + " state watermark matches finalized batch")
         require(state["revision"] == revision + 1 and batch["expected_revision"] == revision,
                 label + " advances one state revision")
-        require(state["last_batch_id"] == batch["batch_id"], label + " state points to latest batch")
+        require(state["last_process_id"] == batch["process_id"], label + " state points to latest batch")
         require(state["configured_mode"] == "incremental" and state["incremental_column"] == column,
                 label + " preserves configured incremental contract")
-        if args.force_full:
-            require(batch["reason_text"] == args.reason and expected_count == full_count,
-                    label + " audited manual full reloads entire source")
         total += expected_count
         frame = spark.table(args.target_table)
         require(frame.count() == total, label + " raw append-only count")
-        require(frame.filter(frame["__batch_id"] == batch["batch_id"]).count() == expected_count,
-                label + " raw rows carry persisted batch ID")
-        require(frame.filter(frame["__batch_id"].isNull()).count() == 0,
-                label + " every raw row has a batch ID")
+        require(frame.filter(frame["__process_id"] == batch["process_id"]).count() == expected_count,
+                label + " raw rows carry the process identity")
+        require(frame.filter(frame["__process_id"].isNull()).count() == 0,
+                label + " every raw row has a process identity")
         load_entity.managed_load(spark, args)
         retried = metadata_row(hook, "extraction_batches", args.source_id, table)
         require(retried == batch and spark.table(args.target_table).count() == total,
@@ -211,9 +205,9 @@ def check_post_append_retry(spark, hook, jdbc, token):
         target_table="raw.e2e_contract.post_append_retry", source_id="e2e_retry",
         incremental_column="position", no_parallelism=True,
         num_partitions=1, dag_id="e2e_post_append_retry",
-        run_id=token, process_id=meta.get_or_create_process_id(
+        run_id=token, process_id=meta.allocate_process_id(
             dag_id="e2e_post_append_retry", run_id=token, db_connect=hook.get_conn),
-        force_full=False, reason=None, lookback_size=0, lookback_unit=None, lookback_given=False,
+        lookback_size=0, lookback_unit=None, lookback_given=False,
     )
     with patch.object(meta, "finalize_batch", side_effect=RuntimeError("injected metadata failure")):
         try:
@@ -229,13 +223,13 @@ def check_post_append_retry(spark, hook, jdbc, token):
     require(failed["status"] == "FAILED", "ordinary failed batch permits retry")
     load_entity.managed_load(spark, args)
     finished = metadata_row(hook, "extraction_batches", args.source_id, args.source_table)
-    require(finished["batch_id"] == failed["batch_id"] and finished["attempt_count"] == 2,
+    require(finished["process_id"] == failed["process_id"] and finished["attempt_count"] == 2,
             "post-append retry retains batch identity")
     require(finished["status"] == "SUCCEEDED" and finished["row_count"] == 1,
             "post-append retry finalizes latest execution")
     require(spark.table(args.target_table).count() == 2, "at-least-once retry intentionally appends twice")
-    require(spark.table(args.target_table).select("__batch_id").distinct().count() == 1,
-            "both commits retain the same logical batch ID")
+    require(spark.table(args.target_table).select("__process_id").distinct().count() == 1,
+            "both commits retain the same process identity")
 
 
 def main():

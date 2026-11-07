@@ -256,18 +256,19 @@ DESCRIBE raw.bank.retail_bank__clients;
 
 SELECT count(*) FROM raw.bank.retail_bank__transactions;
 
-SELECT __process_id, __batch_id, count(*) AS rows
+SELECT __process_id, count(*) AS rows
 FROM raw.bank.retail_bank__transactions
-GROUP BY 1, 2 ORDER BY 1;
+GROUP BY 1 ORDER BY 1;
 
 SELECT * FROM raw.bank.retail_bank__clients
 WHERE __load_dttm = (SELECT max(__load_dttm) FROM raw.bank.retail_bank__clients);
 ```
 
-**Что рассказать:** схема raw-таблицы = зеркало источника + три технические
-колонки (`__load_dttm`, `__process_id`, `__batch_id`); каждый запуск DAG-а
-оставил ровно одну порцию с одним `__process_id`; последний запрос — текущее
-состояние источника (актуальный снапшот).
+**Что рассказать:** схема raw-таблицы = зеркало источника + две технические
+колонки (`__load_dttm`, `__process_id`); `__process_id` — заодно ключ партии
+загрузки в pg-meta; каждый запуск DAG-а оставил ровно одну порцию с одним
+`__process_id`; последний запрос — текущее состояние источника (актуальный
+снапшот).
 
 **pg-meta** (DBeaver, подключение из раздела подготовки; запросы поочерёдно):
 
@@ -279,12 +280,12 @@ SELECT process_id, entity_fqn, status, ts
 FROM ingestion.airflow_tasks_log ORDER BY id DESC LIMIT 20;
 
 SELECT entity_fqn, configured_mode, incremental_column, incremental_type,
-       watermark, revision, last_batch_id
+       watermark, revision, last_process_id
 FROM ingestion.extraction_state ORDER BY source_id, entity_fqn;
 
-SELECT batch_id, entity_fqn, mode, reason, status, attempt_count, row_count,
-       watermark_before, watermark_after, lower_bound, upper_bound
-FROM ingestion.extraction_batches ORDER BY batch_id DESC LIMIT 16;
+SELECT process_id, entity_fqn, mode, reason, status, attempt_count, row_count,
+       watermark_before, watermark_after, lower_bound, lower_bound_op, upper_bound
+FROM ingestion.extraction_batches ORDER BY process_id DESC LIMIT 16;
 ```
 
 **Что рассказать:** у `transactions` первая партия — `bootstrap` (первичное
@@ -306,8 +307,8 @@ FROM raw.bank.retail_bank__clients GROUP BY 1 ORDER BY 1;
 SELECT * FROM raw.bank.retail_bank__clients
 WHERE __load_dttm = (SELECT max(__load_dttm) FROM raw.bank.retail_bank__clients);
 
-SELECT __process_id, __batch_id, count(*) AS rows
-FROM raw.bank.retail_bank__transactions GROUP BY 1, 2 ORDER BY 1;
+SELECT __process_id, count(*) AS rows
+FROM raw.bank.retail_bank__transactions GROUP BY 1 ORDER BY 1;
 ```
 
 **Что показать:** снапшотные таблицы получили **вторую полную порцию** (строк
@@ -320,9 +321,9 @@ FROM raw.bank.retail_bank__transactions GROUP BY 1, 2 ORDER BY 1;
 4. pg-meta (DBeaver) — артефакты второго раунда:
 
 ```sql
-SELECT batch_id, reason, row_count, watermark_before, watermark_after, status
+SELECT process_id, reason, row_count, watermark_before, watermark_after, status
 FROM ingestion.extraction_batches
-WHERE entity_fqn = 'retail_bank.transactions' ORDER BY batch_id;
+WHERE entity_fqn = 'retail_bank.transactions' ORDER BY process_id;
 ```
 
 **Что рассказать:** у второй партии `reason=regular`: окно
@@ -490,8 +491,8 @@ GROUP BY 1 ORDER BY 1;
 **pg-meta** (DBeaver) — последние партии:
 
 ```sql
-SELECT batch_id, entity_fqn, reason, status, row_count, finished_at
-FROM ingestion.extraction_batches ORDER BY batch_id DESC LIMIT 8;
+SELECT process_id, entity_fqn, reason, status, row_count, finished_at
+FROM ingestion.extraction_batches ORDER BY process_id DESC LIMIT 8;
 ```
 
 Все партии загрузок после эволюции — `SUCCEEDED`: смена схемы источника не

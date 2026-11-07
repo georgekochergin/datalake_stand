@@ -14,7 +14,6 @@ from decimal import Decimal
 
 from ingestion.iceberg import (
     CATALOG,
-    METADATA_BATCH,
     METADATA_DTTM,
     METADATA_PID,
     build_create_table_sql,
@@ -27,6 +26,7 @@ from ingestion.sources.rdbms import registry as dialects
 from ingestion.sources.rdbms.contracts import parse_source_table
 
 COLUMN_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+LOGGER = logging.getLogger(__name__)
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse and validate the loader CLI arguments."""
@@ -48,8 +48,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lookback-size", type=int, default=0)
     parser.add_argument("--lookback-unit", choices=("h", "d"))
     parser.add_argument("--lookback-given", action="store_true")
-    parser.add_argument("--force-full", action="store_true")
-    parser.add_argument("--reason")
     args = parser.parse_args(argv)
     if args.process_id <= 0:
         raise ValueError(f"--process-id must be a positive integer (got {args.process_id})")
@@ -147,16 +145,19 @@ def empty_incremental_window(batch) -> bool:
     """True when persisted bounds prove the strict window contains no rows.
 
     Only a zero-lookback regular batch with equal typed bounds reaches this
-    state: lower = watermark - 0 and upper = source MAX = watermark.
+    state: lower = watermark - 0 and upper = source MAX = watermark. With a
+    nonzero lookback the window is always read, even when the bounds are
+    equal: the aligned inclusive operator covers the range between them.
     """
     return (
         batch["mode"] == "incremental"
+        and not batch["lookback_size"]
         and batch["upper_bound"] is not None
         and batch["lower_bound"] == batch["upper_bound"]
     )
 
 
-def source_position(spark, args, inspect_only=False):
+def source_position(spark, args):
     """Inspect original JDBC type and obtain exact MAX plus NULL/empty diagnostics."""
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     column = dialect.quote_identifier(args.incremental_column)
@@ -166,7 +167,7 @@ def source_position(spark, args, inspect_only=False):
             connection, f"SELECT {column} FROM {table} WHERE 1=0"
         )[0]
         kind = dialect.position_kind(type_name, precision, scale)
-        expression = "NULL" if inspect_only else dialect.position_expression(f"MAX({column})", kind)
+        expression = dialect.position_expression(f"MAX({column})", kind)
         row = jdbc.first_row(
             connection, f"SELECT {expression}, COUNT(*), COUNT({column}) FROM {table}"
         )
@@ -177,53 +178,56 @@ def source_position(spark, args, inspect_only=False):
 
 
 def _plan_batch(spark, args, connect):
-    """Resolve this DAG run's persisted batch or plan a fresh one with frozen bounds.
+    """Resolve this execution's persisted batch or plan a fresh one with frozen bounds.
 
-    A retry first re-reads the existing batch so every attempt replays the
-    same window; source inspection then only re-validates the frozen
-    contract. The returned batch may already be SUCCEEDED, which the caller
-    skips as a completed no-op.
+    The batch identity is (process_id, source_id, entity_fqn). A retry
+    replays the same frozen window without any source access: bounds, the
+    position kind and empty_at_plan are already fixed in the batch, and a
+    SUCCEEDED batch returns as a no-op with its recorded result logged.
+    Source inspection runs only when a new batch is being planned.
     """
     from ingestion import meta
 
-    batch = meta.get_batch(dag_id=args.dag_id, run_id=args.run_id, source_id=args.source_id,
+    key = (args.process_id, args.source_id, args.source_table)
+    LOGGER.info("load attempt process_id=%s source_id=%s entity_fqn=%s", *key)
+    batch = meta.get_batch(process_id=args.process_id, source_id=args.source_id,
                            entity_fqn=args.source_table, db_connect=connect)
-    if batch and (batch["process_id"] != args.process_id or batch["target_table"] != args.target_table
-                  or batch["incremental_column"] != args.incremental_column):
-        raise ValueError("Persisted batch identity or extraction contract changed")
-    if batch and batch["status"] == "SUCCEEDED":
+    if batch is not None:
+        if batch["target_table"] != args.target_table:
+            raise ValueError("Persisted batch target does not match")
+        if batch["status"] == "SUCCEEDED":
+            LOGGER.info(
+                "batch already succeeded; repeat read skipped: process_id=%s "
+                "entity_fqn=%s row_count=%s finished_at=%s",
+                args.process_id, args.source_table, batch["row_count"], batch["finished_at"],
+            )
         return batch
-    kind = batch["incremental_type"] if batch else None
+    kind = None
     upper = None
     empty = False
+    size, unit = args.lookback_size, args.lookback_unit
     if args.incremental_column:
-        detected, detected_upper, detected_empty, has_null = source_position(spark, args, inspect_only=batch is not None)
-        if batch is None:
-            kind, upper, empty = detected, detected_upper, detected_empty
-        elif detected != kind:
-            raise ValueError("Incremental source type changed; migrate pg-meta")
-        if has_null and not args.force_full:
+        detected, detected_upper, detected_empty, has_null = source_position(spark, args)
+        if has_null:
             raise ValueError("NULL incremental value in source")
-        positions.lower_bound(upper, kind, args.lookback_size, args.lookback_unit,
-                              specified=args.lookback_given)
-    if batch is not None:
-        return batch
+        kind, upper, empty = detected, detected_upper, detected_empty
+        size, unit = positions.resolve_lookback(kind, args.lookback_size, args.lookback_unit,
+                                                args.lookback_given)
+        positions.window_bounds(upper, kind, size, unit)
 
     def calculate_lower(value):
         """Reject source resets before persisting an incremental window."""
-        if value is not None and not args.force_full:
+        if value is not None:
             if empty or positions.maximum(value, upper, kind) != upper:
                 raise ValueError("SOURCE_POSITION_REGRESSION: explicit reset/bootstrap required")
-        return positions.lower_bound(value, kind, args.lookback_size, args.lookback_unit,
-                                     specified=args.lookback_given)
+        return positions.window_bounds(value, kind, size, unit)
 
     return meta.plan_batch(
         process_id=args.process_id, dag_id=args.dag_id, run_id=args.run_id,
         source_id=args.source_id, entity_fqn=args.source_table, target_table=args.target_table,
         incremental_column=args.incremental_column, incremental_type=kind,
-        upper_bound=upper, empty_at_plan=empty, force_full=args.force_full,
-        lookback_size=args.lookback_size, lookback_unit=args.lookback_unit,
-        reason_text=args.reason, db_connect=connect,
+        upper_bound=upper, empty_at_plan=empty,
+        lookback_size=size, lookback_unit=unit, db_connect=connect,
         calculate_lower=calculate_lower,
         compare_positions=lambda left, right: (
             0 if positions.canonical(left, kind) == positions.canonical(right, kind)
@@ -241,7 +245,7 @@ def _read_extract_frame(spark, args, batch, kind):
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     filters = []
     column = dialect.quote_identifier(args.incremental_column) if args.incremental_column else None
-    for key, op in (("lower_bound", ">"), ("upper_bound", "<=")):
+    for key, op in (("lower_bound", batch["lower_bound_op"]), ("upper_bound", "<=")):
         if batch[key] is not None:
             filters.append(
                 f"{column} {op} {dialect.position_literal(positions.canonical(batch[key], kind), kind)}"
@@ -277,7 +281,7 @@ def _read_extract_frame(spark, args, batch, kind):
     return reader.load().cache()
 
 
-def _append_raw(spark, args, batch, frame, kind):
+def _append_raw(spark, args, frame, kind):
     """Append the read window to the raw table; return (row_count, observed_max).
 
     The target table is created on first load from the actually read schema;
@@ -291,7 +295,7 @@ def _append_raw(spark, args, batch, frame, kind):
     rows = int(summary["n"])
     observed = positions.canonical(summary["position"], kind) if args.incremental_column else None
     clean = frame.drop("__extract_position") if args.incremental_column else frame
-    if any(field.name in (METADATA_BATCH, METADATA_PID, METADATA_DTTM) for field in clean.schema.fields):
+    if any(field.name in (METADATA_PID, METADATA_DTTM) for field in clean.schema.fields):
         raise ValueError("Source column collides with ingestion metadata")
     namespace, _ = validate_target_table(args.target_table)
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{namespace}")
@@ -299,8 +303,7 @@ def _append_raw(spark, args, batch, frame, kind):
         spark.sql(build_create_table_sql(args.target_table, schema_columns(clean.schema)))
     if rows:
         portion = clean.withColumn(METADATA_DTTM, F.current_timestamp()).withColumn(
-            METADATA_PID, F.lit(args.process_id).cast("long")).withColumn(
-            METADATA_BATCH, F.lit(batch["batch_id"]).cast("long"))
+            METADATA_PID, F.lit(args.process_id).cast("long"))
         portion.writeTo(args.target_table).option("mergeSchema", "true").option("check-ordering", "false").append()
     return rows, observed
 
@@ -315,29 +318,29 @@ def managed_load(spark, args):
     batch = _plan_batch(spark, args, connect)
     if batch["status"] == "SUCCEEDED":
         return
+    key = dict(process_id=args.process_id, source_id=args.source_id,
+               entity_fqn=args.source_table, db_connect=connect)
     kind = batch["incremental_type"]
     if empty_incremental_window(batch):
-        meta.finalize_batch(batch_id=batch["batch_id"], row_count=0, observed_max=None,
-                            db_connect=connect)
+        meta.finalize_batch(row_count=0, observed_max=None, **key)
         return
-    meta.start_batch(batch_id=batch["batch_id"], db_connect=connect)
+    meta.start_batch(**key)
     try:
         source = _read_extract_frame(spark, args, batch, kind)
         try:
-            rows, observed = _append_raw(spark, args, batch, source, kind)
+            rows, observed = _append_raw(spark, args, source, kind)
             watermark = batch["watermark_before"]
-            if args.incremental_column and batch["reason"] != "manual_full":
+            if args.incremental_column:
                 watermark = positions.maximum(watermark, observed, kind)
-            meta.finalize_batch(batch_id=batch["batch_id"], row_count=rows, observed_max=observed,
-                                watermark_after=watermark, db_connect=connect)
+            meta.finalize_batch(row_count=rows, observed_max=observed,
+                                watermark_after=watermark, **key)
         finally:
             source.unpersist()
     except Exception:
         try:
-            meta.fail_batch(batch_id=batch["batch_id"], error="Extraction execution failed; see task logs",
-                            db_connect=connect)
+            meta.fail_batch(**key)
         except Exception:
-            logging.getLogger(__name__).warning("Unable to persist batch failure")
+            LOGGER.warning("Unable to persist batch failure")
         raise
 
 

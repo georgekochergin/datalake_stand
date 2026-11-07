@@ -57,11 +57,14 @@ class TransactionTests(unittest.TestCase):
         cur = conn.cursor.return_value.__enter__.return_value
         cur.rowcount = 0
         state = {"watermark": "9"}
-        batch = {"status": "RUNNING", "reason": "regular", "incremental_column": "id",
-                 "source_id": "bank", "entity_fqn": "s.t", "expected_revision": 1}
+        batch = {"status": "RUNNING", "mode": "incremental", "process_id": 1,
+                 "incremental_column": "id", "source_id": "bank", "entity_fqn": "s.t",
+                 "expected_revision": 1}
         with patch.object(meta, "_lock_batch", return_value=(state, batch)):
             with self.assertRaisesRegex(ValueError, "CAS"):
-                meta.finalize_batch(1, 1, "10", watermark_after="10", db_connect=lambda: conn)
+                meta.finalize_batch(process_id=1, source_id="bank", entity_fqn="s.t",
+                                    row_count=1, observed_max="10", watermark_after="10",
+                                    db_connect=lambda: conn)
         self.assertEqual(cur.execute.call_count, 1)
         conn.rollback.assert_called_once()
         conn.commit.assert_not_called()
@@ -118,7 +121,9 @@ class PostgresTests(unittest.TestCase):
     def finish(self, batch, count=1, observed="10"):
         """Finalize using an integer comparator rather than textual ordering."""
         return meta.finalize_batch(
-            batch["batch_id"], count, observed, db_connect=self.connect,
+            process_id=batch["process_id"], source_id=batch["source_id"],
+            entity_fqn=batch["entity_fqn"], row_count=count, observed_max=observed,
+            db_connect=self.connect,
             compare_positions=lambda left, right: (int(left) > int(right)) - (int(left) < int(right)),
         )
 
@@ -132,45 +137,52 @@ class PostgresTests(unittest.TestCase):
         """Bounds and IDs survive failures and success is finalized only once."""
         batch = self.plan()
         self.assertEqual((batch["reason"], batch["mode"], batch["expected_revision"]),
-                         ("bootstrap", "full_snapshot", 1))
-        meta.start_batch(batch["batch_id"], db_connect=self.connect)
-        meta.fail_batch(batch["batch_id"], "safe failure", db_connect=self.connect)
+                         ("bootstrap", "incremental", 1))
+        meta.start_batch(process_id=batch["process_id"], source_id=batch["source_id"],
+                         entity_fqn=batch["entity_fqn"], db_connect=self.connect)
+        meta.fail_batch(process_id=batch["process_id"], source_id=batch["source_id"],
+                        entity_fqn=batch["entity_fqn"], db_connect=self.connect)
         retry = self.plan(upper_bound="99")
-        self.assertEqual(retry["batch_id"], batch["batch_id"])
+        self.assertEqual(retry["process_id"], batch["process_id"])
         self.assertEqual(retry["upper_bound"], "10")
+        self.assertEqual(retry["status"], "FAILED")
         self.assertIsNone(self.state()["watermark"])
-        started = meta.start_batch(batch["batch_id"], db_connect=self.connect)
+        started = meta.start_batch(process_id=batch["process_id"], source_id=batch["source_id"],
+                                   entity_fqn=batch["entity_fqn"], db_connect=self.connect)
         self.assertEqual(started["attempt_count"], 2)
         result = self.finish(batch)
         self.assertEqual(result["watermark_after"], "10")
-        self.assertIsNone(result["last_error"])
         self.assertEqual(self.finish(batch, 99, "99"), result)
         self.assertEqual(self.state()["revision"], 2)
-        self.assertEqual(meta.fail_batch(batch["batch_id"], "late", db_connect=self.connect), result)
+        self.assertEqual(meta.fail_batch(process_id=batch["process_id"],
+                                         source_id=batch["source_id"],
+                                         entity_fqn=batch["entity_fqn"],
+                                         db_connect=self.connect), result)
 
     def test_typed_max_and_empty_noop(self):
         """A lookback never moves the watermark backwards and no-op advances revision."""
         self.finish(self.plan(), observed="9")
-        batch = self.plan(run_id="run2", lookback_size=2, calculate_lower=lambda value: str(int(value) - 2))
-        self.assertEqual(batch["lower_bound"], "7")
+        batch = self.plan(process_id=2, run_id="run2", lookback_size=2,
+                          calculate_lower=lambda value: (str(int(value) - 2), ">="))
+        self.assertEqual((batch["lower_bound"], batch["lower_bound_op"]), ("7", ">="))
         self.assertEqual(self.finish(batch, observed="10")["watermark_after"], "10")
-        batch = self.plan(run_id="run3", upper_bound="8")
+        batch = self.plan(process_id=3, run_id="run3", upper_bound="8")
         self.assertEqual(self.finish(batch, observed="8")["watermark_after"], "10")
-        batch = self.plan(run_id="run4")
+        batch = self.plan(process_id=4, run_id="run4")
         self.assertEqual(self.finish(batch, count=0, observed=None)["watermark_after"], "10")
         self.assertEqual(self.state()["revision"], 5)
 
-    def test_manual_and_permanent_full_preserve_watermark(self):
-        """Manual full ignores upper bounds and never rebases incremental state."""
-        self.finish(self.plan())
-        batch = self.plan(run_id="manual", force_full=True, reason_text="audit")
-        self.assertEqual(batch["reason"], "manual_full")
-        self.assertIsNone(batch["upper_bound"])
-        self.assertEqual(self.finish(batch, observed="99")["watermark_after"], "10")
-        self.source = uuid4().hex
-        batch = self.plan(source_id=self.source, incremental_column=None, incremental_type=None)
-        self.assertEqual(batch["reason"], "regular")
-        self.assertIsNone(self.finish(batch, observed=None)["watermark_after"])
+    def test_full_slice_never_touches_state(self):
+        """Full-slice entities append forever without advancing extraction state."""
+        batch = self.plan(incremental_column=None, incremental_type=None)
+        self.assertEqual((batch["reason"], batch["mode"]), ("regular", "full_snapshot"))
+        result = meta.finalize_batch(process_id=batch["process_id"],
+                                     source_id=batch["source_id"],
+                                     entity_fqn=batch["entity_fqn"], row_count=3,
+                                     observed_max=None, db_connect=self.connect)
+        self.assertEqual(result["watermark_after"], None)
+        self.assertEqual((self.state()["watermark"], self.state()["revision"],
+                          self.state()["last_process_id"]), (None, 1, None))
 
     def test_empty_bootstrap_and_lower_underflow(self):
         """Empty bootstrap is explicit and typed underflow removes the lower filter."""
@@ -178,11 +190,13 @@ class PostgresTests(unittest.TestCase):
         self.assertTrue(batch["empty_at_plan"])
         self.finish(batch, count=0, observed=None)
         self.assertIsNone(self.state()["watermark"])
-        batch = self.plan(run_id="run2")
+        batch = self.plan(process_id=2, run_id="run2")
         self.assertEqual(batch["reason"], "bootstrap")
         self.finish(batch)
-        batch = self.plan(run_id="run3", lookback_size=20, calculate_lower=lambda value: None)
+        batch = self.plan(process_id=3, run_id="run3", lookback_size=20,
+                          calculate_lower=lambda value: (None, ">="))
         self.assertIsNone(batch["lower_bound"])
+        self.assertEqual(batch["lower_bound_op"], ">=")
 
     def test_contract_and_revision_rejected_without_partial_success(self):
         """Old batches cannot read or finalize after state revision changes."""
@@ -193,49 +207,63 @@ class PostgresTests(unittest.TestCase):
             cur.execute("UPDATE ingestion.extraction_state SET revision = revision + 1 WHERE source_id = %s",
                         (self.source,))
         for operation in (
-            lambda: meta.get_batch(batch_id=batch["batch_id"], db_connect=self.connect),
-            lambda: meta.start_batch(batch["batch_id"], db_connect=self.connect),
+            lambda: meta.get_batch(process_id=batch["process_id"], source_id=batch["source_id"],
+                                   entity_fqn=batch["entity_fqn"], db_connect=self.connect),
+            lambda: meta.start_batch(process_id=batch["process_id"], source_id=batch["source_id"],
+                                     entity_fqn=batch["entity_fqn"], db_connect=self.connect),
             lambda: self.finish(batch),
         ):
             with self.assertRaisesRegex(ValueError, "revision"):
                 operation()
         with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
-            cur.execute("SELECT status FROM ingestion.extraction_batches WHERE batch_id = %s", (batch["batch_id"],))
+            cur.execute("SELECT status FROM ingestion.extraction_batches "
+                        "WHERE process_id = %s AND source_id = %s AND entity_fqn = %s",
+                        (batch["process_id"], batch["source_id"], batch["entity_fqn"]))
             self.assertEqual(cur.fetchone()[0], "PLANNED")
 
-    def test_process_id_is_idempotent(self):
-        """Repeated process allocation uses the same unique start event."""
+    def test_process_id_allocated_per_execution(self):
+        """Every generating-task execution allocates its own process."""
         kwargs = dict(dag_id=self.source, run_id="run", db_connect=self.connect)
-        first = meta.get_or_create_process_id(**kwargs)
-        self.assertEqual(meta.get_or_create_process_id(**kwargs), first)
+        first = meta.allocate_process_id(**kwargs)
+        second = meta.allocate_process_id(**kwargs)
+        self.assertLess(first, second)
+        with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM ingestion.airflow_dagruns_log "
+                        "WHERE dag_id = %s AND run_id = %s AND status = 'START'", (self.source, "run"))
+            self.assertEqual(cur.fetchone()[0], 2)
 
     def test_regressed_source_maximum_is_rejected(self):
         """Typed source regression rejects planning without creating a batch."""
         self.finish(self.plan())
         with self.assertRaisesRegex(ValueError, "regressed"):
-            self.plan(run_id="run2", upper_bound="9",
+            self.plan(process_id=2, run_id="run2", upper_bound="9",
                       compare_positions=lambda left, right: int(left) - int(right))
-        self.assertIsNone(meta.get_batch(dag_id="dag", run_id="run2", source_id=self.source,
+        self.assertIsNone(meta.get_batch(process_id=2, source_id=self.source,
                                          entity_fqn="s.t", db_connect=self.connect))
 
-    def test_manual_full_ignores_incorrect_explicit_watermark(self):
-        """An explicit caller result cannot accidentally rebase a manual snapshot."""
-        self.finish(self.plan())
-        batch = self.plan(run_id="manual", force_full=True, reason_text="audit")
-        result = meta.finalize_batch(batch["batch_id"], 1, "99", watermark_after="99",
-                                     db_connect=self.connect)
-        self.assertEqual(result["watermark_after"], "10")
-
-    def test_last_batch_fk_rejects_unknown_batch(self):
-        """The deferred FK rejects last_batch_id pointers to unknown batches at commit."""
+    def test_last_process_fk_rejects_unknown_batch(self):
+        """The deferred composite FK rejects pointers to unknown batches at commit."""
         self.plan()
         with self.assertRaises(self.psycopg2.Error):
             with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE ingestion.extraction_state SET last_batch_id = %s WHERE source_id = %s",
+                    "UPDATE ingestion.extraction_state SET last_process_id = %s WHERE source_id = %s",
                     (2147483647, self.source),
                 )
-        self.assertIsNone(self.state()["last_batch_id"])
+        self.assertIsNone(self.state()["last_process_id"])
+
+    def test_reason_check_rejects_manual_full_row(self):
+        """The target schema has no manual_full reason or reason_text slot."""
+        self.plan()
+        with self.assertRaises(self.psycopg2.Error):
+            with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO ingestion.extraction_batches "
+                    "(process_id, dag_id, run_id, source_id, entity_fqn, target_table, mode, reason, "
+                    "expected_revision, lower_bound_op) VALUES "
+                    "(999, 'dag', 'run', %s, 's.t', 'raw.s.t', 'full_snapshot', 'manual_full', 1, '>')",
+                    (self.source,),
+                )
 
 
 if __name__ == "__main__":
