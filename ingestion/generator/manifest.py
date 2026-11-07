@@ -95,7 +95,9 @@ def _expand_cron_field(field: str, low: int, high: int, label: str) -> set[int]:
     """Expand one cron field into its set of integer values.
 
     Only numeric standard tokens are accepted: '*', values, ranges, steps and
-    their comma-separated lists. Month/day names, macros and wrap-around
+    their comma-separated lists. A numeric base with a step (N/S) expands
+    from N to the field maximum with step S, matching cron semantics
+    ('0/15' minutes = 0,15,30,45). Month/day names, macros and wrap-around
     ranges are rejected, keeping schedule classification static and free of
     calendar arithmetic.
     """
@@ -121,7 +123,8 @@ def _expand_cron_field(field: str, low: int, high: int, label: str) -> set[int]:
             if start > stop:
                 raise ValueError(f"schedule {label}: descending range in {part!r}")
         elif base.isdigit():
-            start = stop = int(base)
+            start = int(base)
+            stop = high if slash else start
         else:
             raise ValueError(f"schedule {label}: unsupported token {part!r}")
         if not low <= start <= high or not low <= stop <= high:

@@ -198,6 +198,11 @@ def _plan_batch(spark, args, connect):
     if batch is not None:
         if batch["target_table"] != args.target_table:
             raise ValueError("Persisted batch target does not match")
+        if batch["incremental_column"] != args.incremental_column:
+            raise ValueError(
+                "Persisted batch incremental column does not match the manifest; "
+                "stop executors and migrate the contract"
+            )
         if batch["status"] == "SUCCEEDED":
             LOGGER.info(
                 "batch already succeeded; repeat read skipped: process_id=%s "

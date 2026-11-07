@@ -248,7 +248,8 @@ class TestLoadPipeline(unittest.TestCase):
 
     def test_valid_cron_tokens_accepted(self):
         for schedule in ("*/30 * * * *", "0 2 * * *", "5,35 * * * *", "0 9-18 * * 1-5",
-                         "0 0 1 1 *", "0 2 * * 7", "0 2 */2 * *", "15,45 5,17 * * *"):
+                         "0 0 1 1 *", "0 2 * * 7", "0 2 */2 * *", "15,45 5,17 * * *",
+                         "0/15 2 * * *", "5/20 * * * *", "0 0/6 * * *"):
             with self.subTest(schedule=schedule):
                 minutes, hours = manifest.parse_schedule(schedule)
                 if schedule == "*/30 * * * *":
@@ -257,6 +258,18 @@ class TestLoadPipeline(unittest.TestCase):
                     self.assertEqual((minutes, hours), ({15, 45}, {5, 17}))
                 if schedule == "0 9-18 * * 1-5":
                     self.assertEqual(hours, set(range(9, 19)))
+                if schedule == "0/15 2 * * *":
+                    self.assertEqual(minutes, {0, 15, 30, 45})
+                if schedule == "5/20 * * * *":
+                    self.assertEqual(minutes, {5, 25, 45})
+                if schedule == "0 0/6 * * *":
+                    self.assertEqual(hours, {0, 6, 12, 18})
+
+    def test_numeric_step_expands_to_field_end_like_cron(self):
+        for schedule, expected in (("0/15 2 * * *", (3, "h")), ("0 0/6 * * *", (3, "h")),
+                                   ("5/20 * * * *", (3, "h")), ("0 2 * * *", (3, "d"))):
+            with self.subTest(schedule=schedule):
+                self.assertEqual(manifest.temporal_lookback_default(schedule), expected)
 
     def test_temporal_lookback_default_by_schedule(self):
         cases = (

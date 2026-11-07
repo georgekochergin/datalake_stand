@@ -451,6 +451,16 @@ class TestPlanBatch(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "target does not match"):
             self.plan(batch, args=args)
 
+    def test_retry_after_manifest_column_change_rejected(self):
+        for status in ("PLANNED", "RUNNING", "FAILED", "SUCCEEDED"):
+            with self.subTest(status=status):
+                batch = {"target_table": "raw.bank.retail_bank__clients",
+                         "incremental_column": "_batch_id", "status": status,
+                         "row_count": 5, "finished_at": "2026-11-07"}
+                args = self.args("--incremental-column", "other_position")
+                with self.assertRaisesRegex(ValueError, "incremental column does not match"):
+                    self.plan(batch, args=args)
+
     def test_retry_replays_frozen_window_without_source_access(self):
         batch = {"target_table": "raw.bank.retail_bank__clients",
                  "incremental_column": "_batch_id", "incremental_type": "bigint",
