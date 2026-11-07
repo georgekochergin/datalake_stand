@@ -277,15 +277,16 @@ _UNSET = object()
 
 
 def finalize_batch(*, process_id, source_id, entity_fqn, row_count, observed_max=None,
-                   compare_positions=None, watermark_after=_UNSET, published=None,
+                   compare_positions=None, watermark_after=_UNSET,
+                   snapshot_published=None,
                    db_connect):
     """Atomically finish a batch; only incremental batches CAS the state.
 
     compare_positions(left, right) returns a negative/zero/positive typed
     comparison. Alternatively supply the typed maximum as watermark_after.
     Snapshot and full-slice batches never write extraction_state: their
-    finalization updates the batch row alone; published records whether at
-    least one attempt actually published the snapshot table.
+    finalization updates the batch row alone; snapshot_published records
+    whether at least one attempt actually published the snapshot table.
     """
     if type(row_count) is not int or row_count < 0:
         raise ValueError("row_count must be a nonnegative integer")
@@ -319,10 +320,10 @@ def finalize_batch(*, process_id, source_id, entity_fqn, row_count, observed_max
                 raise ValueError("Extraction revision CAS failed")
         cur.execute(
             "UPDATE ingestion.extraction_batches SET status = 'SUCCEEDED', row_count = %s, "
-            "observed_max = %s, watermark_after = %s, published = %s, "
+            "observed_max = %s, watermark_after = %s, snapshot_published = %s, "
             "finished_at = clock_timestamp() "
             "WHERE process_id = %s AND source_id = %s AND entity_fqn = %s RETURNING *",
-            (row_count, observed_max, after, published, process_id, source_id, entity_fqn),
+            (row_count, observed_max, after, snapshot_published, process_id, source_id, entity_fqn),
         )
         return _row(cur)
 

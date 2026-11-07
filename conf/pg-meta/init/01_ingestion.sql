@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS ingestion.extraction_batches (
   lower_bound_op text NOT NULL CHECK (lower_bound_op IN ('>', '>=')),
   upper_bound text,
   empty_at_plan boolean NOT NULL DEFAULT false,
-  published boolean,
+  snapshot_published boolean,
   status text NOT NULL DEFAULT 'PLANNED' CHECK (status IN ('PLANNED', 'RUNNING', 'FAILED', 'SUCCEEDED')),
   attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
   row_count bigint CHECK (row_count >= 0),
@@ -79,9 +79,9 @@ CREATE TABLE IF NOT EXISTS ingestion.extraction_batches (
   CHECK ((mode <> 'incremental' OR reason <> 'regular') OR (watermark_before IS NOT NULL AND incremental_column IS NOT NULL)),
   CHECK (reason <> 'scheduled_full' OR (mode = 'full_snapshot' AND incremental_column IS NOT NULL AND lower_bound IS NULL AND upper_bound IS NULL AND empty_at_plan = false AND lookback_size = 0 AND lookback_unit IS NULL AND watermark_before IS NULL AND watermark_after IS NULL)),
   CHECK (incremental_column IS NOT NULL OR (mode = 'full_snapshot' AND reason = 'regular' AND watermark_before IS NULL AND watermark_after IS NULL AND lower_bound IS NULL AND upper_bound IS NULL AND lookback_size = 0 AND lookback_unit IS NULL)),
-  CHECK (reason = 'scheduled_full' OR published IS NULL),
+  CHECK (reason = 'scheduled_full' OR snapshot_published IS NULL),
   CHECK (status <> 'SUCCEEDED' OR (row_count IS NOT NULL AND finished_at IS NOT NULL)),
-  CHECK (status <> 'SUCCEEDED' OR reason <> 'scheduled_full' OR published IS NOT NULL),
+  CHECK (status <> 'SUCCEEDED' OR reason <> 'scheduled_full' OR snapshot_published IS NOT NULL),
   CHECK (status = 'SUCCEEDED' OR (row_count IS NULL AND observed_max IS NULL AND watermark_after IS NULL))
 );
 

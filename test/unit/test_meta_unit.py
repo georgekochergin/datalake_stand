@@ -26,7 +26,7 @@ BATCH_COLUMNS = (
     "target_table", "mode", "reason", "incremental_column", "incremental_type",
     "expected_revision", "watermark_before", "lookback_size", "lookback_unit",
     "lower_bound", "lower_bound_op", "upper_bound", "empty_at_plan",
-    "published", "status", "attempt_count", "row_count", "observed_max",
+    "snapshot_published", "status", "attempt_count", "row_count", "observed_max",
     "watermark_after", "created_at", "finished_at",
 )
 
@@ -108,7 +108,7 @@ class FakeCursor:
                 params,
             ))
             row.update(status="PLANNED", attempt_count=0, row_count=None,
-                       observed_max=None, watermark_after=None, published=None,
+                       observed_max=None, watermark_after=None, snapshot_published=None,
                        created_at="now", finished_at=None)
             self.db.batches[(row["process_id"], row["source_id"], row["entity_fqn"])] = row
             self.description = [(name,) for name in BATCH_COLUMNS]
@@ -132,10 +132,11 @@ class FakeCursor:
             self.rowcount = 1
             return
         if statement.startswith("UPDATE ingestion.extraction_batches SET status = 'SUCCEEDED'"):
-            row_count, observed_max, watermark_after, published, process_id, source_id, entity_fqn = params
+            row_count, observed_max, watermark_after, snapshot_published, process_id, source_id, entity_fqn = params
             batch = self.db.batches[(process_id, source_id, entity_fqn)]
             batch.update(status="SUCCEEDED", row_count=row_count, observed_max=observed_max,
-                         watermark_after=watermark_after, published=published, finished_at="now")
+                         watermark_after=watermark_after,
+                         snapshot_published=snapshot_published, finished_at="now")
             self.description = [(name,) for name in BATCH_COLUMNS]
             self._row = tuple(batch[name] for name in BATCH_COLUMNS)
             self.rowcount = 1
