@@ -354,6 +354,50 @@ def check_partitioning(spark, source_jdbc):
                     "bank: direct date partitioned read returns every row exactly once")
 
 
+def check_partitioned_load_path(spark, source_jdbc):
+    """Run the real read-and-append path with a forced date or timestamp step."""
+    load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
+    from ingestion.sources.rdbms import jdbc, jdbc_partitioning
+    from ingestion.sources.rdbms import registry as dialects
+
+    expected_steps = {"bank": jdbc_partitioning.STEP_DATE,
+                      "broker": jdbc_partitioning.STEP_TIMESTAMP_DAY}
+    for source, table, column in (("bank", "retail_bank.transactions", "posting_date"),
+                                   ("broker", "trading_core.transactions", "posting_date")):
+        jdbc_url, user, password = source_jdbc[source]
+        dialect = dialects.by_jdbc_url(jdbc_url)
+        target = f"raw.e2e_contract.{source}_day_partition_path"
+        args = Namespace(jdbc_url=jdbc_url, jdbc_user=user, jdbc_password=password,
+                         source_table=table, target_table=target, incremental_column=None,
+                         no_jdbc_partitioning=False, num_partitions=4, process_id=1)
+        require(not spark.catalog.tableExists(target),
+                f"{source}: day-partition path starts with a fresh raw table")
+        real_keys = jdbc.key_metadata(spark._jvm, dialect, jdbc_url, user, password, table)
+        forced_columns = dict(real_keys.columns)
+        original = forced_columns[column.lower()]
+        forced_columns[column.lower()] = jdbc.ColumnMeta(
+            original.name, original.type_name, original.precision, original.scale, True)
+        forced = jdbc.KeyMetadata((), (), forced_columns)
+        choice = jdbc_partitioning.choose(dialect, forced)
+        require(choice is not None and choice.step == expected_steps[source],
+                f"{source}: without keys, with a NOT NULL {column}, the heuristic"
+                f" picks the {expected_steps[source]} step")
+        with patch.object(load_entity.jdbc, "key_metadata", return_value=forced):
+            frame = load_entity._read_extract_frame(spark, args, None, None)
+            try:
+                rows, observed = load_entity._append_raw(spark, args, frame, None)
+            finally:
+                frame.unpersist()
+        total = jdbc_count(spark, args, load_entity.render_source_table(dialect, table))
+        require(rows == total, f"{source}: partitioned full-slice append writes every source row")
+        require(observed is None, f"{source}: full-slice append reports no extraction position")
+        schema_names = {field.name for field in spark.table(target).schema.fields}
+        require(jdbc_partitioning.DAY_ALIAS not in schema_names,
+                f"{source}: the day alias never reaches the raw schema")
+        require(spark.table(target).count() == total,
+                f"{source}: raw rows match the source after the partitioned append")
+
+
 def main():
     """Run inside airflow-scheduler with Spark defaults and loaded source data."""
     from airflow.hooks.base import BaseHook
@@ -380,6 +424,7 @@ def main():
     try:
         check_post_append_retry(spark, hook, source_jdbc["bank"], token)
         check_partitioning(spark, source_jdbc)
+        check_partitioned_load_path(spark, source_jdbc)
         for source, table, kind in (
             ("bank", "retail_bank.transactions", "date"),
             ("broker", "trading_core.transactions", "timestamp_local(0)"),

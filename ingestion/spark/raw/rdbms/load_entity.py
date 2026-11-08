@@ -107,6 +107,16 @@ def _bound_literal(value) -> str:
     return str(value)
 
 
+def _long_representable(*values) -> bool:
+    """Check numeric partition bounds fit the signed 64-bit Spark bound parsing.
+
+    Spark's JDBC partitioning parses lowerBound/upperBound of numeric
+    columns as a Long regardless of the column precision: values outside
+    the range fail the read, so such bounds disable partitioning.
+    """
+    return all(-(2 ** 63) <= int(value) <= 2 ** 63 - 1 for value in values)
+
+
 def _read_bounds(spark, args, read_query, column) -> tuple:
     """Read MIN/MAX of the partition column over the read query (one-row JDBC read)."""
     column_ref = dialects.by_jdbc_url(args.jdbc_url).quote_identifier(column)
@@ -265,16 +275,26 @@ def _read_extract_frame(spark, args, batch, kind):
         select += f', {dialect.position_expression(column, kind)} AS "__extract_position"'
     partition = None
     keys = None
+    day_alias_blocked = False
     if not args.no_jdbc_partitioning:
         keys = jdbc.key_metadata(
             spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table
         )
         partition = jdbc_partitioning.choose(dialect, keys)
         if partition is not None and partition.derived:
-            select += (
-                f", {jdbc_partitioning.day_expression(dialect, keys, partition)}"
-                f' AS {dialect.quote_identifier(jdbc_partitioning.DAY_ALIAS)}'
-            )
+            if jdbc_partitioning.DAY_ALIAS in keys.columns:
+                LOGGER.warning(
+                    "jdbc partitioning: source column %s collides with the day alias;"
+                    " single-threaded read",
+                    jdbc_partitioning.DAY_ALIAS,
+                )
+                day_alias_blocked = True
+                partition = None
+            else:
+                select += (
+                    f", {jdbc_partitioning.day_expression(dialect, keys, partition)}"
+                    f' AS {dialect.quote_identifier(jdbc_partitioning.DAY_ALIAS)}'
+                )
     query = (
         f"(SELECT {select} FROM (SELECT * FROM "
         f"{source_table}) extract_source"
@@ -282,26 +302,40 @@ def _read_extract_frame(spark, args, batch, kind):
         + ") extract_batch"
     )
     reader = _jdbc_reader(spark, args, query)
-    if partition is None and not args.no_jdbc_partitioning and keys is not None and keys.columns:
+    if (partition is None and not day_alias_blocked
+            and not args.no_jdbc_partitioning and keys is not None and keys.columns):
         LOGGER.warning(
             "jdbc partitioning: no partition column found for %s; "
             "single-threaded read; %s",
             args.source_table, jdbc_partitioning.no_candidate_reason(dialect, keys),
         )
+    low = high = None
     if partition is not None:
         reference = jdbc_partitioning.partition_name(partition)
         low, high = _read_bounds(spark, args, query, reference)
         parallel = low is not None and high is not None and low != high
-        LOGGER.info(
-            "jdbc partitioning: column=%s step=%s window=[%s..%s] partitions=%s of %s requested",
-            partition.column, partition.step, low, high,
-            args.num_partitions if parallel else 1, args.num_partitions,
-        )
+        if parallel and positions.kind_info(partition.kind)[0] == "integral" and not _long_representable(low, high):
+            LOGGER.warning(
+                "jdbc partitioning: bounds of %s [%s..%s] exceed the signed 64-bit"
+                " range Spark parses for partition bounds; single-threaded read",
+                partition.column, low, high,
+            )
+            parallel = False
         if parallel:
             reader = reader.option("partitionColumn", reference).option(
                 "lowerBound", _bound_literal(low)).option("upperBound", _bound_literal(high)).option(
                 "numPartitions", args.num_partitions)
-    return reader.load().cache()
+    frame = reader.load()
+    if partition is not None and partition.derived:
+        frame = frame.drop(jdbc_partitioning.partition_name(partition))
+    frame = frame.cache()
+    if partition is not None:
+        LOGGER.info(
+            "jdbc partitioning: column=%s step=%s window=[%s..%s] partitions=%s of %s requested",
+            partition.column, partition.step, low, high,
+            frame.rdd.getNumPartitions(), args.num_partitions,
+        )
+    return frame
 
 
 def _append_raw(spark, args, frame, kind):
