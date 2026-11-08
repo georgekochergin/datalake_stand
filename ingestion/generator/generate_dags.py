@@ -70,7 +70,7 @@ def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str
         f'                pool={json.dumps(entity.pool)},',
         f'                pool_slots={entity.pool_slots},',
         f'                source_type={json.dumps(source.type)},',
-        f'                parallelism={entity.parallelism!r},',
+        f'                jdbc_partitioning={entity.jdbc_partitioning!r},',
         f'                num_partitions={num_partitions},',
         f'                source_id="{source.source_id}",',
         f'                airflow_conn_id={json.dumps(source.airflow_conn_id)},',

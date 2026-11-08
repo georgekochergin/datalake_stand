@@ -10,8 +10,8 @@ from unittest.mock import ANY, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from ingestion.sources.rdbms import jdbc
 from ingestion.sources.rdbms import registry
-from ingestion.sources.rdbms.contracts import RdbmsDialect
 
 MODULE_PATH = Path(__file__).resolve().parents[2] / "ingestion" / "spark" / "raw" / "rdbms" / "load_entity.py"
 _SPEC = importlib.util.spec_from_file_location("load_entity", MODULE_PATH)
@@ -94,10 +94,12 @@ class TestParseArgs(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_entity.parse_args(build_argv("--num-partitions", "0"))
 
-    def test_parallelism_switch(self):
-        self.assertFalse(load_entity.parse_args(build_argv()).no_parallelism)
-        args = load_entity.parse_args(build_argv("--no-parallelism", "--num-partitions", "7"))
-        self.assertTrue(args.no_parallelism)
+    def test_jdbc_partitioning_switch(self):
+        self.assertFalse(load_entity.parse_args(build_argv()).no_jdbc_partitioning)
+        args = load_entity.parse_args(
+            build_argv("--no-jdbc-partitioning", "--num-partitions", "7")
+        )
+        self.assertTrue(args.no_jdbc_partitioning)
         self.assertEqual(args.num_partitions, 7)
 
     def test_invalid_incremental_column(self):
@@ -105,57 +107,6 @@ class TestParseArgs(unittest.TestCase):
             load_entity.parse_args(build_argv("--incremental-column", "Client-Id"))
 
 
-
-
-class StubPartitionDialect(RdbmsDialect):
-    """Minimal adapter accepting only its own vendor-specific type name."""
-
-    partition_type_names = frozenset({"INT8"})
-
-
-class TestPickPartitionColumn(unittest.TestCase):
-    """Auto-evaluation of the parallel-read column stays dialect-classified."""
-
-    def setUp(self):
-        self.dialect = registry.by_conn_type("mssql")
-
-    def pick(self, candidates):
-        return load_entity.pick_partition_column(self.dialect, candidates)
-
-    def test_numeric_pk_preferred_over_later_date(self):
-        candidates = [("client_id", "int"), ("updated_at", "datetime2")]
-        self.assertEqual(self.pick(candidates), "client_id")
-
-    def test_string_column_skipped(self):
-        candidates = [("code", "nvarchar"), ("updated_at", "datetime2")]
-        self.assertEqual(self.pick(candidates), "updated_at")
-
-    def test_order_respected(self):
-        candidates = [("code", "varchar"), ("num", "bigint"), ("other", "int")]
-        self.assertEqual(self.pick(candidates), "num")
-
-    def test_identity_type_variant(self):
-        self.assertEqual(self.pick([("id", "int identity")]), "id")
-
-    def test_timestamp_with_zone_variant(self):
-        self.assertEqual(self.pick([("ts", "TIMESTAMP WITH TIME ZONE")]), "ts")
-
-    def test_oracle_number(self):
-        self.assertEqual(
-            load_entity.pick_partition_column(registry.by_conn_type("oracle"), [("client_id", "NUMBER")]),
-            "client_id",
-        )
-
-    def test_stub_adapter_accepts_own_type_without_loader_changes(self):
-        self.assertEqual(
-            load_entity.pick_partition_column(StubPartitionDialect(), [("id", "int8")]),
-            "id",
-        )
-        self.assertIsNone(self.pick([("id", "int8")]))
-
-    def test_no_suitable_column(self):
-        candidates = [("code", "varchar"), ("payload", "nvarchar")]
-        self.assertIsNone(self.pick(candidates))
 
 
 class TestBoundLiteral(unittest.TestCase):
@@ -506,15 +457,26 @@ class TestPlanBatch(unittest.TestCase):
 
 
 class TestReadExtractFrame(unittest.TestCase):
-    """Frozen-window query assembly and optional partition discovery."""
+    """Frozen-window query assembly and heuristic partition discovery."""
 
     def setUp(self):
         self.spark = MagicMock()
 
-    def frame(self, args, batch, kind, projection=None, keys=(), bounds=(1, 100)):
+    def key_metadata(self, primary_key=(), unique_columns=(), columns=()):
+        """Build KeyMetadata from (name, type) shorthand pairs."""
+        return jdbc.KeyMetadata(
+            primary_key=tuple(primary_key),
+            unique_columns=tuple(unique_columns),
+            columns={
+                name.lower(): jdbc.ColumnMeta(name, type_name, None, None, True)
+                for name, type_name in columns
+            },
+        )
+
+    def frame(self, args, batch, kind, projection=None, keys=None, bounds=(1, 100)):
         reader = RecordingReader()
         with patch.object(load_entity.jdbc, "compatibility_projection", return_value=projection), patch.object(
-            load_entity.jdbc, "key_columns", return_value=keys
+            load_entity.jdbc, "key_metadata", return_value=keys or self.key_metadata()
         ) as key_call, patch.object(load_entity, "_read_bounds", return_value=bounds) as probe, patch.object(
             load_entity, "_jdbc_reader", return_value=reader
         ) as builder:
@@ -525,7 +487,7 @@ class TestReadExtractFrame(unittest.TestCase):
         args = load_entity.parse_args(build_argv())
         batch = {"lower_bound": None, "lower_bound_op": ">",
                  "upper_bound": None, "empty_at_plan": False}
-        result, reader, query, key_call = self.frame(args, batch, None, keys=[])
+        result, reader, query, key_call = self.frame(args, batch, None)
         self.assertIs(result, reader)
         self.assertEqual(
             query,
@@ -534,37 +496,79 @@ class TestReadExtractFrame(unittest.TestCase):
         key_call.assert_called_once()
         self.assertNotIn("partitionColumn", reader.options)
 
-    def test_snapshot_with_keys_partitions_read(self):
+    def test_snapshot_with_integer_pk_partitions_read(self):
         args = load_entity.parse_args(build_argv())
         batch = {"lower_bound": None, "lower_bound_op": ">",
                  "upper_bound": None, "empty_at_plan": False}
-        _, reader, _, _ = self.frame(args, batch, None, keys=[("client_id", "int")])
+        keys = self.key_metadata(primary_key=["client_id"], columns=[("client_id", "int")])
+        _, reader, _, _ = self.frame(args, batch, None, keys=keys)
         self.assertEqual(
             {key: reader.options[key] for key in ("partitionColumn", "lowerBound", "upperBound", "numPartitions")},
             {"partitionColumn": "client_id", "lowerBound": "1", "upperBound": "100", "numPartitions": 4},
         )
 
-    def test_incremental_window_filters_and_position(self):
+    def test_incremental_column_has_no_partition_priority(self):
         args = load_entity.parse_args(build_argv("--incremental-column", "_batch_id"))
         batch = {"lower_bound": "5", "lower_bound_op": ">",
                  "upper_bound": "10", "empty_at_plan": False}
-        _, reader, query, _ = self.frame(args, batch, "bigint", keys=[("_batch_id", "bigint")], bounds=(5, 10))
+        keys = self.key_metadata(primary_key=["transaction_id"],
+                                 columns=[("transaction_id", "bigint"), ("_batch_id", "int")])
+        _, reader, query, _ = self.frame(args, batch, "bigint", keys=keys, bounds=(5, 10))
         self.assertIn("[_batch_id] > 5 AND [_batch_id] <= 10", query)
         self.assertIn(', [_batch_id] AS "__extract_position"', query)
-        self.assertEqual(reader.options["partitionColumn"], "_batch_id")
+        self.assertEqual(reader.options["partitionColumn"], "transaction_id")
+
+    def test_timestamp_column_partitions_by_derived_day(self):
+        args = load_entity.parse_args(build_argv("--jdbc-url", ORACLE_URL))
+        batch = {"lower_bound": None, "lower_bound_op": ">",
+                 "upper_bound": None, "empty_at_plan": False}
+        keys = self.key_metadata(columns=[("updated_at", "TIMESTAMP(9) WITH TIME ZONE")])
+        _, reader, query, _ = self.frame(args, batch, None, keys=keys)
+        self.assertIn(
+            'CAST(TO_NUMBER(TO_CHAR(SYS_EXTRACT_UTC(extract_source."updated_at"), \'J\'))'
+            ' AS NUMBER(10,0)) AS "__jdbc_day"',
+            query,
+        )
+        self.assertEqual(reader.options["partitionColumn"], "__jdbc_day")
+
+    def test_date_column_partitions_directly(self):
+        args = load_entity.parse_args(build_argv())
+        batch = {"lower_bound": None, "lower_bound_op": ">",
+                 "upper_bound": None, "empty_at_plan": False}
+        keys = self.key_metadata(columns=[("posting_date", "date")])
+        _, reader, query, _ = self.frame(args, batch, None, keys=keys)
+        self.assertNotIn("__jdbc_day", query)
+        self.assertEqual(reader.options["partitionColumn"], "posting_date")
+
+    def test_composite_pk_and_no_candidates_single_partition(self):
+        args = load_entity.parse_args(build_argv())
+        batch = {"lower_bound": None, "lower_bound_op": ">",
+                 "upper_bound": None, "empty_at_plan": False}
+        keys = self.key_metadata(primary_key=["code", "num"],
+                                 columns=[("code", "nvarchar"), ("num", "int")])
+        _, reader, _, _ = self.frame(args, batch, None, keys=keys)
+        self.assertNotIn("partitionColumn", reader.options)
+
+    def test_equal_bounds_read_single_partition(self):
+        args = load_entity.parse_args(build_argv())
+        batch = {"lower_bound": None, "lower_bound_op": ">",
+                 "upper_bound": None, "empty_at_plan": False}
+        keys = self.key_metadata(primary_key=["client_id"], columns=[("client_id", "int")])
+        _, reader, _, _ = self.frame(args, batch, None, keys=keys, bounds=(7, 7))
+        self.assertNotIn("partitionColumn", reader.options)
 
     def test_aligned_lookback_lower_uses_inclusive_operator(self):
         args = load_entity.parse_args(build_argv("--incremental-column", "_batch_id"))
         batch = {"lower_bound": "2026-10-23T00:00:00Z",
                  "lower_bound_op": ">=", "upper_bound": "2026-10-26T12:34:56Z", "empty_at_plan": False}
-        _, _, query, _ = self.frame(args, batch, "timestamp_instant(0)", keys=[])
+        _, _, query, _ = self.frame(args, batch, "timestamp_instant(0)")
         self.assertIn("[_batch_id] >= ", query)
 
     def test_missing_lower_bound_fully_dropped(self):
         args = load_entity.parse_args(build_argv("--incremental-column", "_batch_id"))
         batch = {"lower_bound": None, "lower_bound_op": ">=",
                  "upper_bound": "10", "empty_at_plan": False}
-        _, _, query, _ = self.frame(args, batch, "bigint", keys=[])
+        _, _, query, _ = self.frame(args, batch, "bigint")
         self.assertNotIn(">=", query)
         self.assertIn("[_batch_id] <= 10", query)
 
@@ -572,26 +576,15 @@ class TestReadExtractFrame(unittest.TestCase):
         args = load_entity.parse_args(build_argv("--incremental-column", "_batch_id"))
         batch = {"lower_bound": "10", "lower_bound_op": ">",
                  "upper_bound": "10", "empty_at_plan": True}
-        _, _, query, _ = self.frame(args, batch, "bigint", keys=[])
+        _, _, query, _ = self.frame(args, batch, "bigint")
         self.assertIn("1=0", query)
 
-    def test_temporal_position_reads_one_partition(self):
-        args = load_entity.parse_args(build_argv("--incremental-column", "updated_at"))
-        batch = {"lower_bound": None, "lower_bound_op": ">",
-                 "upper_bound": "2026-01-01T00:00:00Z", "empty_at_plan": False}
-        _, reader, query, _ = self.frame(
-            args, batch, "timestamp_instant(6)", keys=[("updated_at", "datetimeoffset")]
-        )
-        self.assertNotIn("1=0", query)
-        self.assertIn('"__extract_position"', query)
-        self.assertNotIn("partitionColumn", reader.options)
-
-    def test_disabled_parallelism_skips_probing(self):
-        args = load_entity.parse_args(build_argv("--no-parallelism"))
+    def test_disabled_partitioning_skips_probing(self):
+        args = load_entity.parse_args(build_argv("--no-jdbc-partitioning"))
         batch = {"lower_bound": None, "lower_bound_op": ">",
                  "upper_bound": None, "empty_at_plan": False}
         with patch.object(load_entity, "_jdbc_reader", return_value=RecordingReader()), patch.object(
-            load_entity.jdbc, "key_columns"
+            load_entity.jdbc, "key_metadata"
         ) as keys, patch.object(load_entity, "_read_bounds") as probe:
             load_entity._read_extract_frame(self.spark, args, batch, None)
         keys.assert_not_called()

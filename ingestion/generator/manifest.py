@@ -29,7 +29,7 @@ class EntityConfig:
     fqn: str
     target_table: str
     incremental_column: str | None
-    parallelism: bool = True
+    jdbc_partitioning: bool = True
     pool: str = "default_pool"
     pool_slots: int = 1
     lookback_size: int = 0
@@ -204,10 +204,13 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
         else:
             lookback_size, lookback_unit = temporal_default
 
-    spark = _strict_object(entity.get("spark", {}), {"parallelism"}, f"entity {fqn!r}.spark")
-    parallelism = spark.get("parallelism", True)
-    if type(parallelism) is not bool:
-        raise ValueError(f"entity {fqn!r}: spark.parallelism must be a boolean")
+    spark = entity.get("spark", {})
+    if isinstance(spark, dict) and "parallelism" in spark:
+        raise ValueError(f"entity {fqn!r}: spark.parallelism is renamed to spark.jdbc_partitioning")
+    spark = _strict_object(spark, {"jdbc_partitioning"}, f"entity {fqn!r}.spark")
+    jdbc_partitioning = spark.get("jdbc_partitioning", True)
+    if type(jdbc_partitioning) is not bool:
+        raise ValueError(f"entity {fqn!r}: spark.jdbc_partitioning must be a boolean")
 
     airflow = _strict_object(entity.get("airflow", {}), {"pool"}, f"entity {fqn!r}.airflow")
     pool = _strict_object(airflow.get("pool", {}), {"name", "slots"}, f"entity {fqn!r}.airflow.pool")
@@ -220,7 +223,7 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
         fqn=fqn,
         target_table=naming.resolve_target_table_name(fqn),
         incremental_column=incremental_column,
-        parallelism=parallelism,
+        jdbc_partitioning=jdbc_partitioning,
         pool=pool_name,
         pool_slots=slots,
         lookback_size=lookback_size,

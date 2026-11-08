@@ -3,6 +3,7 @@
 
 import importlib.util
 import os
+import re
 from argparse import Namespace
 from uuid import uuid4
 from unittest.mock import patch
@@ -85,7 +86,7 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
         source_table=table, target_table=f"raw.e2e_contract.{target}",
         source_id=f"e2e_{source}", incremental_column=column,
-        no_parallelism=True, num_partitions=1,
+        no_jdbc_partitioning=True, num_partitions=1,
         dag_id="e2e_temporal_extraction", run_id=None,
         process_id=None, lookback_size=0, lookback_unit=None, lookback_given=False,
     )
@@ -203,7 +204,7 @@ def check_post_append_retry(spark, hook, jdbc, token):
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
         source_table="(SELECT CAST(1 AS bigint) AS position) retry_fixture",
         target_table="raw.e2e_contract.post_append_retry", source_id="e2e_retry",
-        incremental_column="position", no_parallelism=True,
+        incremental_column="position", no_jdbc_partitioning=True,
         num_partitions=1, dag_id="e2e_post_append_retry",
         run_id=token, process_id=meta.allocate_process_id(
             dag_id="e2e_post_append_retry", run_id=token, db_connect=hook.get_conn),
@@ -232,6 +233,127 @@ def check_post_append_retry(spark, hook, jdbc, token):
             "both commits retain the same process identity")
 
 
+def jdbc_count(spark, args, query):
+    """Count rows of a source query over one JDBC connection."""
+    connection = spark._jvm.java.sql.DriverManager.getConnection(
+        args.jdbc_url, args.jdbc_user, args.jdbc_password
+    )
+    try:
+        statement = connection.createStatement()
+        try:
+            result = statement.executeQuery(f"SELECT COUNT(*) FROM {query}")
+            try:
+                result.next()
+                return int(result.getString(1))
+            finally:
+                result.close()
+        finally:
+            statement.close()
+    finally:
+        connection.close()
+
+
+def derived_day_frame(spark, load_entity, dialect, args, source_sql, info, kind):
+    """Read one temporal column through a partitioned calendar-day derivative."""
+    from ingestion.sources.rdbms import jdbc, jdbc_partitioning
+
+    choice = jdbc_partitioning.PartitionChoice(
+        info.name, kind, jdbc_partitioning.STEP_TIMESTAMP_DAY, True)
+    keys = jdbc.KeyMetadata((), (), {info.name.lower(): info})
+    expression = jdbc_partitioning.day_expression(dialect, keys, choice)
+    column = dialect.quote_identifier(info.name)
+    reference = f"extract_source.{column}"
+    projected = dialect.column_projection(info.type_name, reference) or reference
+    alias = dialect.quote_identifier(jdbc_partitioning.DAY_ALIAS)
+    query = (
+        f"(SELECT {projected} AS {column}, {expression} AS {alias} "
+        f"FROM (SELECT * FROM {source_sql}) extract_source) day_probe"
+    )
+    reader = load_entity._jdbc_reader(spark, args, query)
+    low, high = load_entity._read_bounds(spark, args, query, jdbc_partitioning.DAY_ALIAS)
+    require(low is not None and high is not None and low != high,
+            f"derived day bounds of {info.name} span multiple calendar days")
+    return (reader.option("partitionColumn", jdbc_partitioning.DAY_ALIAS)
+            .option("lowerBound", load_entity._bound_literal(low))
+            .option("upperBound", load_entity._bound_literal(high))
+            .option("numPartitions", 4).load())
+
+
+def check_partitioning(spark, source_jdbc):
+    """Prove heuristic metadata choice and real partitioned reads per engine."""
+    load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
+    from ingestion.sources.rdbms import jdbc, jdbc_partitioning
+    from ingestion.sources.rdbms import registry as dialects
+
+    fixtures = (
+        ("bank", "retail_bank.transactions", "posting_date", "DATETIMEOFFSET",
+         "(SELECT CAST('2026-06-14T12:00:00+02:00' AS datetimeoffset) AS ts"
+         " UNION ALL SELECT CAST('2026-06-15T12:00:00+02:00' AS datetimeoffset) AS ts) zone_fixture",
+         7),
+        ("broker", "trading_core.transactions", "posting_date", "TIMESTAMP(6) WITH TIME ZONE",
+         '(SELECT CAST(TO_TIMESTAMP_TZ(\'2026-06-14T12:00:00\', \'YYYY-MM-DD"T"HH24:MI:SS\')'
+         ' AS TIMESTAMP(6) WITH TIME ZONE) AS "ts" FROM dual'
+         " UNION ALL"
+         ' SELECT CAST(TO_TIMESTAMP_TZ(\'2026-06-15T12:00:00\', \'YYYY-MM-DD"T"HH24:MI:SS\')'
+         ' AS TIMESTAMP(6) WITH TIME ZONE) AS "ts" FROM dual) zone_fixture',
+         None),
+    )
+    for source, table, column, zone_type, zone_sql, zone_scale in fixtures:
+        jdbc_url, user, password = source_jdbc[source]
+        dialect = dialects.by_jdbc_url(jdbc_url)
+        args = Namespace(jdbc_url=jdbc_url, jdbc_user=user,
+                         jdbc_password=password, source_table=table)
+        keys = jdbc.key_metadata(spark._jvm, dialect, jdbc_url, user, password, table)
+        require(keys.primary_key == ("transaction_id",) and "transaction_id" in keys.columns,
+                f"{source}: JDBC metadata reports the single-column integer primary key")
+        choice = jdbc_partitioning.choose(dialect, keys)
+        require(choice is not None and choice.column == "transaction_id"
+                and choice.step == jdbc_partitioning.STEP_PRIMARY_KEY,
+                f"{source}: heuristic picks the primary key")
+        table_sql = load_entity.render_source_table(dialect, table, allow_expression=True)
+        total = jdbc_count(spark, args, table_sql)
+        require(total > 0, f"{source}: source table has rows")
+        day_info = keys.columns[column.lower()]
+        require(day_info is not None,
+                f"{source}: temporal column {column} present in metadata")
+        day_kind = dialect.position_kind(day_info.type_name, day_info.precision, day_info.scale)
+        day_frame = derived_day_frame(spark, load_entity, dialect, args, table_sql, day_info, day_kind)
+        simple = day_frame.schema[jdbc_partitioning.DAY_ALIAS].dataType.simpleString()
+        require(simple in ("int", "bigint") or re.fullmatch(r"decimal\(\d+,0\)", simple),
+                f"{source}: derived day column is integral in Spark ({simple})")
+        require(day_frame.count() == total,
+                f"{source}: derived-day partitioned read returns every row exactly once")
+        zone_info = jdbc.ColumnMeta("ts", zone_type, None, zone_scale, True)
+        zone_kind = dialect.position_kind(zone_info.type_name, zone_info.precision, zone_info.scale)
+        require(zone_kind.startswith("timestamp_instant"),
+                f"{source}: zone fixture column classifies as an instant")
+        zone_sql_rendered = load_entity.render_source_table(dialect, zone_sql, allow_expression=True)
+        zone_frame = derived_day_frame(spark, load_entity, dialect, args, zone_sql_rendered,
+                                       zone_info, zone_kind)
+        require(zone_frame.count() == 2,
+                f"{source}: time-zone derived-day partitioned read returns both fixture rows")
+        require(zone_frame.select(jdbc_partitioning.DAY_ALIAS).distinct().count() == 2,
+                f"{source}: fixture days map to distinct day numbers")
+        if source == "bank":
+            date_column = dialect.quote_identifier(column)
+            date_query = (
+                f"(SELECT extract_source.{date_column} AS {date_column} "
+                f"FROM (SELECT * FROM {table_sql}) extract_source) date_probe"
+            )
+            reader = load_entity._jdbc_reader(spark, args, date_query)
+            low, high = load_entity._read_bounds(spark, args, date_query, column)
+            require(low is not None and high is not None and low != high,
+                    "bank: date column bounds span multiple days")
+            date_frame = (reader.option("partitionColumn", column)
+                          .option("lowerBound", load_entity._bound_literal(low))
+                          .option("upperBound", load_entity._bound_literal(high))
+                          .option("numPartitions", 4).load())
+            require(date_frame.schema[column].dataType.simpleString() == "date",
+                    "bank: MSSQL date column reads as Spark DateType")
+            require(date_frame.count() == total,
+                    "bank: direct date partitioned read returns every row exactly once")
+
+
 def main():
     """Run inside airflow-scheduler with Spark defaults and loaded source data."""
     from airflow.hooks.base import BaseHook
@@ -257,6 +379,7 @@ def main():
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     try:
         check_post_append_retry(spark, hook, source_jdbc["bank"], token)
+        check_partitioning(spark, source_jdbc)
         for source, table, kind in (
             ("bank", "retail_bank.transactions", "date"),
             ("broker", "trading_core.transactions", "timestamp_local(0)"),

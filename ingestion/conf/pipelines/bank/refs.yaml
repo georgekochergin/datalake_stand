@@ -6,13 +6,13 @@ tags:
 entities:
   - fqn: retail_bank.clients
     spark:
-      parallelism: false
+      jdbc_partitioning: false
     airflow:
       pool:
         name: ingest_loads
   - fqn: retail_bank.accounts
     spark:
-      parallelism: false
+      jdbc_partitioning: false
     airflow:
       pool:
         name: ingest_loads

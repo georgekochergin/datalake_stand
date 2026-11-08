@@ -162,10 +162,10 @@ class TestGenerateAll(unittest.TestCase):
         bank = self.generated["ingest__rdbms__bank__main.py"]
         self.assertEqual(bank.count('incremental_column="_batch_id"'), 1)
 
-    def test_demonstration_weights_and_parallelism(self):
+    def test_demonstration_weights_and_partitioning(self):
         for name, content in self.generated.items():
             self.assertEqual(content.count('pool="ingest_loads"'), 2)
-            self.assertEqual(content.count("parallelism=False"), 1 if "__main" in name else 2)
+            self.assertEqual(content.count("jdbc_partitioning=False"), 1 if "__main" in name else 2)
             self.assertEqual(content.count("pool_slots=2"), 1 if "__main" in name else 0)
 
     def test_generated_modules_parse(self):

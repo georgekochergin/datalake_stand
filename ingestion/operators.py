@@ -160,7 +160,7 @@ class IngestAppendOperator(SparkSubmitOperator):
         incremental_column: str | None = None,
         pg_conn_id: str = "ingestion_meta",
         source_type: str = "rdbms",
-        parallelism: bool = True,
+        jdbc_partitioning: bool = True,
         num_partitions: int = 4,
         lookback_size: int = 0,
         lookback_unit: str | None = None,
@@ -173,8 +173,8 @@ class IngestAppendOperator(SparkSubmitOperator):
             raise ValueError("lookback_size must be a nonnegative integer")
         if type(lookback_specified) is not bool:
             raise ValueError("lookback_specified must be a boolean")
-        if type(parallelism) is not bool:
-            raise ValueError("parallelism must be a boolean")
+        if type(jdbc_partitioning) is not bool:
+            raise ValueError("jdbc_partitioning must be a boolean")
         if type(num_partitions) is not int or num_partitions <= 0:
             raise ValueError("num_partitions must be a positive integer")
         super().__init__(
@@ -190,7 +190,7 @@ class IngestAppendOperator(SparkSubmitOperator):
         self.incremental_column = incremental_column
         self.pg_conn_id = pg_conn_id
         self.source_type = source_type
-        self.parallelism = parallelism
+        self.jdbc_partitioning = jdbc_partitioning
         self.num_partitions = num_partitions
         self.lookback_size = lookback_size
         self.lookback_unit = lookback_unit
@@ -228,8 +228,8 @@ class IngestAppendOperator(SparkSubmitOperator):
             "--num-partitions",
             str(self.num_partitions),
         ]
-        if not self.parallelism:
-            application_args.append("--no-parallelism")
+        if not self.jdbc_partitioning:
+            application_args.append("--no-jdbc-partitioning")
         dag_run = context["dag_run"]
         meta = BaseHook.get_connection(self.pg_conn_id)
         self.env_vars = dict(self.env_vars or {}, PGHOST=meta.host, PGPORT=str(meta.port or 5432),

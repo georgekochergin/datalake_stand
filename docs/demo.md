@@ -85,10 +85,7 @@ http://localhost:8090/health должен вернуть HTTP 200. При пер
 
 1. Airflow UI → DAG-и `update_source_bank` и `update_source_broker`
    (расписания нет — запуск только ручной, кнопкой ▶ справа).
-2. Запустить оба (можно параллельно), открыть Grid View. Для демонстрации
-   параллельного JDBC-чтения (шаг 3) запустите каждый update-DAG **дважды
-   подряд**: в таблицах появятся строки с двумя разными `_batch_id`, и окно
-   чтения даст ненулевой диапазон для параллельной нарезки.
+2. Запустить оба (можно параллельно), открыть Grid View.
 3. Пока идут: таски `migrate_bank` и `migrate_broker` применяют батчи из
    `airflow/plugins/migrations/{bank,broker}.json`. На каждый запуск каждого
    источника: +20 клиентов, +20 счетов, +200 сделок, +5000 транзакций;
@@ -195,9 +192,11 @@ JDBC-партиций для transactions и отключение паралле
 
 1. **Конфигурация** (до запуска): `ingestion/conf/settings.yaml` —
    `spark.jdbc.num_partitions: 4`; `ingestion/conf/pipelines/bank/main.yaml` — у
-   `transactions` нет `spark.parallelism: false` (параллельное чтение
-   разрешено, колонка нарезки — `_batch_id`), у `deals` и всех таблиц `refs`
-   — `spark.parallelism: false` (один поток).
+   `transactions` нет `spark.jdbc_partitioning: false` (параллельное чтение
+   разрешено), у `deals` и всех таблиц `refs` — `spark.jdbc_partitioning:
+   false` (один поток). Колонка нарезки выбирается автоматически единой
+   эвристикой: у всех демо-таблиц это целочисленный первичный ключ
+   (`transaction_id`).
 2. **Живьём на источнике (MSSQL)**: пока идёт `ingest__rdbms__bank__main`, в
    DBeaver (bank) выполнить — можно увидеть соединения чтения transactions
    и deals (Login `sydafa`, HostName — контейнер spark-worker):
@@ -226,14 +225,22 @@ WHERE username = 'SYDAFA' AND program LIKE 'JDBC%';
 3. **В логе load-таска**: открыть лог
    `ingest_group.load_retail_bank__transactions.load` и показать команду
    Spark с `--num-partitions 4` и `--incremental-column _batch_id`;
-   у deals/clients передаётся `--no-parallelism`. Это параметры запуска,
-   а не подтверждение фактического числа соединений. Загрузчик не печатает
+   у deals и таблиц refs передаётся `--no-jdbc-partitioning`. Ниже в том же
+   логе — строка выбора колонки нарезки вида
+
+   ```text
+   jdbc partitioning: column=transaction_id step=primary_key window=[1..5000] partitions=4 of 4 requested
+   ```
+
+   Колонка, ступень эвристики, MIN/MAX окна чтения и фактическое число
+   партиций. Это параметры запуска и журналируемое решение, а не
+   подтверждение фактического числа соединений. Загрузчик не печатает
    физический план чтения отдельным вызовом `explain`.
 
 Параллельная нарезка включается, только когда в окне чтения минимум ≠ максимум
-колонки нарезки — поэтому шаг 1 запускает update-DAG-и дважды: у дельты из
-одной партии `_batch_id` диапазон нулевой, и чтение честно идёт одним
-потоком.
+колонки нарезки. Дельта одного запуска update-DAG (порядка 5000 строк с
+разбросом `transaction_id`) уже даёт ненулевой диапазон — специально
+готовить данные не нужно.
 
 **Пул Airflow**: Admin → Pools → `ingest_loads` (4 слота; transactions
 занимает 2, остальные загрузки по 1). Во время загрузок колонки Running/Queued

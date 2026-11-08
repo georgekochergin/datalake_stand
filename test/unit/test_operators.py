@@ -73,14 +73,14 @@ class TestIngestOperator(unittest.TestCase):
         operator.execute(self.context)
         args = operator.application_args
         self.assertEqual(args[args.index("--num-partitions") + 1], "4")
-        self.assertNotIn("--no-parallelism", args)
+        self.assertNotIn("--no-jdbc-partitioning", args)
         self.assertEqual(operator.source_type, "rdbms")
         self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/load_entity.py")
         self.assertEqual(operator.deploy_mode, "client")
         self.assertIn("jdbc:sqlserver://host:1433;databaseName=db;encrypt=false", args)
-        operator = self.operator(parallelism=False, num_partitions=7, incremental_column="_batch_id", lookback_size=5)
+        operator = self.operator(jdbc_partitioning=False, num_partitions=7, incremental_column="_batch_id", lookback_size=5)
         operator.execute(self.context)
-        self.assertIn("--no-parallelism", operator.application_args)
+        self.assertIn("--no-jdbc-partitioning", operator.application_args)
         self.assertEqual(operator.application_args[-2:], ["--incremental-column", "_batch_id"])
         self.assertIn("--lookback-size", operator.application_args)
         self.assertEqual(operator.application_args[operator.application_args.index("--lookback-size") + 1], "5")
@@ -121,7 +121,7 @@ class TestIngestOperator(unittest.TestCase):
 
     def test_strict_constructor_types(self):
         for kwargs in (
-            {"parallelism": "false"}, {"parallelism": 0}, {"parallelism": None},
+            {"jdbc_partitioning": "false"}, {"jdbc_partitioning": 0}, {"jdbc_partitioning": None},
             {"num_partitions": True}, {"num_partitions": 0}, {"num_partitions": -1},
             {"num_partitions": 4.0}, {"num_partitions": "4"}, {"source_type": None},
             {"lookback_size": -1}, {"lookback_size": "2"}, {"lookback_size": True},

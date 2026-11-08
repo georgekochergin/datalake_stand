@@ -21,6 +21,7 @@ from ingestion.iceberg import (
     validate_target_table,
 )
 from ingestion.sources.rdbms import jdbc
+from ingestion.sources.rdbms import jdbc_partitioning
 from ingestion.sources.rdbms import positions
 from ingestion.sources.rdbms import registry as dialects
 from ingestion.sources.rdbms.contracts import parse_source_table
@@ -41,7 +42,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--process-id", required=True, type=int)
     parser.add_argument("--incremental-column")
     parser.add_argument("--num-partitions", type=int, default=4)
-    parser.add_argument("--no-parallelism", action="store_true")
+    parser.add_argument("--no-jdbc-partitioning", action="store_true")
     parser.add_argument("--source-id")
     parser.add_argument("--dag-id")
     parser.add_argument("--run-id")
@@ -76,14 +77,6 @@ def render_source_table(dialect, source_table: str, allow_expression: bool = Fal
             return source_table
         raise
     return dialect.render_table(parts)
-
-
-def pick_partition_column(dialect, candidates: list[tuple[str, str]]) -> str | None:
-    """Return the first candidate column the dialect allows for partitioning, else None."""
-    for name, jdbc_type in candidates:
-        if dialect.is_partition_type(jdbc_type):
-            return name
-    return None
 
 
 def _jdbc_reader(spark, args, read_query):
@@ -270,6 +263,18 @@ def _read_extract_frame(spark, args, batch, kind):
         select = ", ".join(projection)
     if column:
         select += f', {dialect.position_expression(column, kind)} AS "__extract_position"'
+    partition = None
+    keys = None
+    if not args.no_jdbc_partitioning:
+        keys = jdbc.key_metadata(
+            spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table
+        )
+        partition = jdbc_partitioning.choose(dialect, keys)
+        if partition is not None and partition.derived:
+            select += (
+                f", {jdbc_partitioning.day_expression(dialect, keys, partition)}"
+                f' AS {dialect.quote_identifier(jdbc_partitioning.DAY_ALIAS)}'
+            )
     query = (
         f"(SELECT {select} FROM (SELECT * FROM "
         f"{source_table}) extract_source"
@@ -277,16 +282,21 @@ def _read_extract_frame(spark, args, batch, kind):
         + ") extract_batch"
     )
     reader = _jdbc_reader(spark, args, query)
-    if not args.no_parallelism and (not kind or not kind.startswith("timestamp")):
-        partition_column = args.incremental_column or pick_partition_column(
-            dialect, jdbc.key_columns(
-                spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table))
-        if partition_column:
-            low, high = _read_bounds(spark, args, query, partition_column)
-            if low is not None and high is not None and low != high:
-                reader = reader.option("partitionColumn", partition_column).option(
-                    "lowerBound", _bound_literal(low)).option("upperBound", _bound_literal(high)).option(
-                    "numPartitions", args.num_partitions)
+    if partition is None and not args.no_jdbc_partitioning:
+        LOGGER.info("jdbc partitioning: no candidate column; single-threaded read")
+    if partition is not None:
+        reference = jdbc_partitioning.partition_name(partition)
+        low, high = _read_bounds(spark, args, query, reference)
+        parallel = low is not None and high is not None and low != high
+        LOGGER.info(
+            "jdbc partitioning: column=%s step=%s window=[%s..%s] partitions=%s of %s requested",
+            partition.column, partition.step, low, high,
+            args.num_partitions if parallel else 1, args.num_partitions,
+        )
+        if parallel:
+            reader = reader.option("partitionColumn", reference).option(
+                "lowerBound", _bound_literal(low)).option("upperBound", _bound_literal(high)).option(
+                "numPartitions", args.num_partitions)
     return reader.load().cache()
 
 

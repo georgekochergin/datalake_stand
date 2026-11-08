@@ -55,6 +55,10 @@ class MssqlDialect(RdbmsDialect):
         target = f"{'datetimeoffset' if family == 'instant' else 'datetime2'}({precision})"
         return f"CAST('{text}' AS {target})"
 
+    def day_expression(self, reference: str) -> str:
+        """Render the calendar-day number of a temporal reference."""
+        return f"DATEDIFF(day, 0, {reference})"
+
     def position_expression(self, column: str, kind: str) -> str:
         """Convert to datetime2(p) with an exact nanosecond fraction; instants in UTC."""
         if not kind.startswith("timestamp"):
