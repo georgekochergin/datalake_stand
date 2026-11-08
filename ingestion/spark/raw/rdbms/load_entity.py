@@ -282,8 +282,12 @@ def _read_extract_frame(spark, args, batch, kind):
         + ") extract_batch"
     )
     reader = _jdbc_reader(spark, args, query)
-    if partition is None and not args.no_jdbc_partitioning:
-        LOGGER.info("jdbc partitioning: no candidate column; single-threaded read")
+    if partition is None and not args.no_jdbc_partitioning and keys is not None and keys.columns:
+        LOGGER.warning(
+            "jdbc partitioning: no partition column found for %s; "
+            "single-threaded read; %s",
+            args.source_table, jdbc_partitioning.no_candidate_reason(dialect, keys),
+        )
     if partition is not None:
         reference = jdbc_partitioning.partition_name(partition)
         low, high = _read_bounds(spark, args, query, reference)

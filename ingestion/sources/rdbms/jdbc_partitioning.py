@@ -83,6 +83,24 @@ def _first_candidate(dialect, infos, families):
     return min(matched, key=lambda info: info.name.lower()) if matched else None
 
 
+def no_candidate_reason(dialect, keys) -> str:
+    """Render the observed metadata that produced an empty heuristic result.
+
+    Every column is listed with its type, heuristic family and nullability,
+    so the task log shows exactly why no step matched — a primary key that
+    is not integral, a unique column that is nullable, dates behind NULL.
+    """
+    columns = ", ".join(
+        f"{info.name} {info.type_name} {_family(dialect, info) or 'unsupported'}"
+        f"{'' if info.not_null else ' null'}"
+        for info in sorted(keys.columns.values(), key=lambda info: info.name.lower())
+    )
+    return (
+        f"primary_key={keys.primary_key or 'none'} "
+        f"unique_columns={keys.unique_columns or 'none'} columns=[{columns}]"
+    )
+
+
 def choose(dialect, keys) -> PartitionChoice | None:
     """Pick the partition column with one heuristic shared by every load mode.
 

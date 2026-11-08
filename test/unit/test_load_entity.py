@@ -463,14 +463,16 @@ class TestReadExtractFrame(unittest.TestCase):
         self.spark = MagicMock()
 
     def key_metadata(self, primary_key=(), unique_columns=(), columns=()):
-        """Build KeyMetadata from (name, type) shorthand pairs."""
+        """Build KeyMetadata from (name, type[, precision, scale, not_null]) tuples."""
+        built = {}
+        for item in columns:
+            extra = item[2:] if len(item) > 2 else (None, None, True)
+            info = jdbc.ColumnMeta(item[0], item[1], *extra)
+            built[item[0].lower()] = info
         return jdbc.KeyMetadata(
             primary_key=tuple(primary_key),
             unique_columns=tuple(unique_columns),
-            columns={
-                name.lower(): jdbc.ColumnMeta(name, type_name, None, None, True)
-                for name, type_name in columns
-            },
+            columns=built,
         )
 
     def frame(self, args, batch, kind, projection=None, keys=None, bounds=(1, 100)):
@@ -589,6 +591,27 @@ class TestReadExtractFrame(unittest.TestCase):
             load_entity._read_extract_frame(self.spark, args, batch, None)
         keys.assert_not_called()
         probe.assert_not_called()
+
+    def test_no_candidate_column_warns_with_observed_metadata(self):
+        args = load_entity.parse_args(build_argv())
+        batch = {"lower_bound": None, "lower_bound_op": ">",
+                 "upper_bound": None, "empty_at_plan": False}
+        keys = self.key_metadata(primary_key=["code"],
+                                 columns=[("code", "nvarchar"), ("num", "int", None, None, False)])
+        with self.assertLogs(load_entity.LOGGER, level="WARNING") as logs:
+            self.frame(args, batch, None, keys=keys)
+        self.assertTrue(any(
+            "no partition column" in line and "retail_bank.clients" in line
+            and "code nvarchar unsupported" in line and "num int integral null" in line
+            for line in logs.output
+        ), logs.output)
+
+    def test_unavailable_metadata_does_not_duplicate_no_candidate_warning(self):
+        args = load_entity.parse_args(build_argv())
+        batch = {"lower_bound": None, "lower_bound_op": ">",
+                 "upper_bound": None, "empty_at_plan": False}
+        with self.assertNoLogs(load_entity.LOGGER, level="WARNING"):
+            self.frame(args, batch, None, keys=jdbc.KeyMetadata((), (), {}))
 
     def test_compatibility_projection_rewrites_select(self):
         args = load_entity.parse_args(build_argv("--jdbc-url", ORACLE_URL))

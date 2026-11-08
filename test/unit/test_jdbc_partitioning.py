@@ -164,6 +164,32 @@ class TestChoose(unittest.TestCase):
         self.assertIsNone(self.choose(MSSQL, keys()))
 
 
+class TestNoCandidateReason(unittest.TestCase):
+    """Diagnostic rendering of the metadata behind an empty heuristic result."""
+
+    def test_reason_lists_keys_types_families_and_nullability(self):
+        reason = jdbc_partitioning.no_candidate_reason(MSSQL, keys(
+            primary_key=("code",),
+            unique_columns=("num",),
+            columns=[("num", "int", None, None, False), ("code", "nvarchar"),
+                     ("deal_date", "date", None, None, False)],
+        ))
+        self.assertEqual(
+            reason,
+            "primary_key=('code',) unique_columns=('num',) "
+            "columns=[code nvarchar unsupported, deal_date date date null, "
+            "num int integral null]",
+        )
+
+    def test_reason_marks_missing_keys_as_none(self):
+        reason = jdbc_partitioning.no_candidate_reason(
+            MSSQL, keys(columns=[("amount", "decimal", 18, 2)]))
+        self.assertEqual(
+            reason,
+            "primary_key=none unique_columns=none columns=[amount decimal unsupported]",
+        )
+
+
 class TestDayExpression(unittest.TestCase):
     """Dialect rendering of the calendar-day derivative."""
 
