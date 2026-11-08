@@ -45,15 +45,18 @@ def _row(cursor):
     return dict(zip((column[0] for column in cursor.description), row)) if row is not None else None
 
 
-def get_or_create_process_id(dag_id=None, run_id=None, execution_date=None, *, db_connect):
-    """Allocate one process and start event per DagRun, including concurrent retries."""
+def allocate_process_id(dag_id=None, run_id=None, execution_date=None, *, db_connect):
+    """Insert a START event and return its fresh process_id.
+
+    Every execution of the generating task allocates its own identifier;
+    retried downstream tasks reuse the value passed through XCom instead.
+    """
     with connection(db_connect) as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO ingestion.airflow_dagruns_log "
             "(process_id, dag_id, run_id, execution_date, status) "
             "VALUES (nextval('ingestion.process_id_seq'), %s, %s, %s, 'START') "
-            "ON CONFLICT (dag_id, run_id) WHERE status = 'START' "
-            "DO UPDATE SET dag_id = EXCLUDED.dag_id RETURNING process_id",
+            "RETURNING process_id",
             (dag_id, run_id, execution_date),
         )
         return int(cur.fetchone()[0])
@@ -94,11 +97,8 @@ def find_process_id(dag_id, run_id, *, db_connect):
 
 def _check_contract(state, column, incremental_type):
     """Reject contract changes until an audited migration is applied."""
-    mode = "incremental" if column is not None else "full_snapshot"
-    if (state["configured_mode"], state["incremental_column"], state["incremental_type"]) != (
-        mode, column, incremental_type
-    ):
-        raise ValueError("Extraction contract changed; stop executors and migrate extraction_state")
+    if (state["incremental_column"], state["incremental_type"]) != (column, incremental_type):
+        raise ValueError("Incremental contract changed; stop executors and migrate incremental_state")
 
 
 def _check_batch(state, batch):
@@ -107,103 +107,98 @@ def _check_batch(state, batch):
         return
     _check_contract(state, batch["incremental_column"], batch["incremental_type"])
     if state["revision"] != batch["expected_revision"]:
-        raise ValueError("Extraction revision mismatch; stale batch cannot be reused")
+        raise ValueError("Incremental revision mismatch; stale batch cannot be reused")
 
 
 def _lock_state(cur, source_id, entity_fqn):
     """Acquire the first lock in the shared state-then-batch lock order."""
     cur.execute(
-        "SELECT * FROM ingestion.extraction_state "
+        "SELECT * FROM ingestion.incremental_state "
         "WHERE source_id = %s AND entity_fqn = %s FOR UPDATE", (source_id, entity_fqn),
     )
     state = _row(cur)
     if state is None:
-        raise ValueError("Extraction state does not exist")
+        raise ValueError("Incremental state does not exist")
     return state
 
 
-def _lock_batch(cur, batch_id):
-    """Locate the entity without a lock, then lock state and batch in order."""
-    cur.execute("SELECT source_id, entity_fqn FROM ingestion.extraction_batches WHERE batch_id = %s",
-                (batch_id,))
-    key = cur.fetchone()
-    if key is None:
-        raise ValueError("Extraction batch does not exist")
-    state = _lock_state(cur, *key)
-    cur.execute("SELECT * FROM ingestion.extraction_batches WHERE batch_id = %s FOR UPDATE", (batch_id,))
+def _lock_batch(cur, process_id, source_id, entity_fqn):
+    """Lock state and the process's batch, in the shared lock order."""
+    state = _lock_state(cur, source_id, entity_fqn)
+    cur.execute(
+        "SELECT * FROM ingestion.incremental_batches "
+        "WHERE process_id = %s AND source_id = %s AND entity_fqn = %s FOR UPDATE",
+        (process_id, source_id, entity_fqn),
+    )
     batch = _row(cur)
+    if batch is None:
+        raise ValueError("Incremental batch does not exist")
     _check_batch(state, batch)
     return state, batch
 
 
-def get_batch(*, dag_id=None, run_id=None, source_id=None, entity_fqn=None, batch_id=None, db_connect):
-    """Return a revision-validated persisted batch before accessing the source."""
+def get_batch(*, process_id, source_id, entity_fqn, db_connect):
+    """Return the process's revision-validated batch, or None before planning."""
     with connection(db_connect) as conn, conn.cursor() as cur:
-        if batch_id is None:
-            cur.execute(
-                "SELECT batch_id FROM ingestion.extraction_batches "
-                "WHERE dag_id = %s AND run_id = %s AND source_id = %s AND entity_fqn = %s",
-                (dag_id, run_id, source_id, entity_fqn),
-            )
-            found = cur.fetchone()
-            if found is None:
-                return None
-            batch_id = found[0]
-        return _lock_batch(cur, batch_id)[1]
+        cur.execute(
+            "SELECT 1 FROM ingestion.incremental_batches "
+            "WHERE process_id = %s AND source_id = %s AND entity_fqn = %s",
+            (process_id, source_id, entity_fqn),
+        )
+        if cur.fetchone() is None:
+            return None
+        return _lock_batch(cur, process_id, source_id, entity_fqn)[1]
 
 
-def _batch_mode_and_reason(incremental_column, watermark, force_full):
-    """Determine batch mode and reason without database access.
+def _batch_reason(watermark):
+    """Map the watermark onto the batch reason.
 
-    Returns (mode, reason) tuple where:
-    - reason is one of 'bootstrap', 'regular', 'manual_full'
-    - mode is 'incremental' or 'full_snapshot'
+    Bootstrap is the opening phase of the incremental stream: a NULL
+    watermark plans bootstrap and only the next execution becomes a regular
+    windowed batch.
     """
-    reason = "manual_full" if force_full else (
-        "bootstrap" if incremental_column is not None and watermark is None else "regular"
-    )
-    mode = "incremental" if reason == "regular" and incremental_column is not None else "full_snapshot"
-    return mode, reason
+    return "bootstrap" if watermark is None else "regular"
 
 
-def _incremental_bounds(mode, watermark, upper_bound, empty_at_plan, force_full, incremental_config):
-    """Compute incremental bounds and detect regressions without database access.
+def _incremental_bounds(watermark, upper_bound, empty_at_plan, incremental_config):
+    """Compute window bounds with the actually applied lower operator.
 
-    Returns (lower, upper_bound, empty_at_plan, lookback_size, lookback_unit) tuple with validated bounds.
-    Raises ValueError on regression or configuration errors.
+    Returns (lower, lower_op, upper_bound, empty_at_plan, lookback_size,
+    lookback_unit). Raises ValueError on source regression or configuration
+    errors. calculate_lower(watermark) returns the (lower, op) pair, with
+    None as the lower bound on underflow.
     """
-    lower = None
-    if mode == "incremental":
-        if upper_bound is not None and incremental_config.compare_positions is not None and \
-                incremental_config.compare_positions(upper_bound, watermark) < 0:
-            raise ValueError("Source maximum regressed below the committed watermark")
-        if incremental_config.lookback_size and incremental_config.calculate_lower is None:
+    if upper_bound is not None and incremental_config.compare_positions is not None and \
+            incremental_config.compare_positions(upper_bound, watermark) < 0:
+        raise ValueError("Source maximum regressed below the committed watermark")
+    if incremental_config.calculate_lower is None:
+        if incremental_config.lookback_size:
             raise ValueError("Nonzero lookback requires calculate_lower")
-        lower = incremental_config.calculate_lower(watermark) if incremental_config.calculate_lower else watermark
-        return lower, upper_bound, empty_at_plan, incremental_config.lookback_size, incremental_config.lookback_unit
-    else:
-        if force_full or incremental_config.column is None:
-            upper_bound, empty_at_plan = None, False
-        return None, upper_bound, empty_at_plan, 0, None
+        return watermark, ">", upper_bound, empty_at_plan, \
+            incremental_config.lookback_size, incremental_config.lookback_unit
+    lower, op = incremental_config.calculate_lower(watermark)
+    return lower, op, upper_bound, empty_at_plan, \
+        incremental_config.lookback_size, incremental_config.lookback_unit
 
 
 def plan_batch(*, process_id, dag_id, run_id, source_id,
                entity_fqn, target_table, incremental_column, incremental_type,
-               upper_bound, empty_at_plan, force_full=False, lookback_size=0,
-               lookback_unit=None, reason_text=None, calculate_lower=None,
+               upper_bound, empty_at_plan, lookback_size=0,
+               lookback_unit=None, calculate_lower=None,
                compare_positions=None, db_connect):
     """Persist fixed bounds once and return the original batch on retry.
 
-    calculate_lower(watermark) returns a typed canonical lower bound or None
-    on underflow. Call get_batch before querying a new source maximum.
+    The registry serves incremental entities only; full-slice loads and
+    snapshot flows never call it. The batch identity is (process_id,
+    source_id, entity_fqn): retries of one execution replan into the same
+    frozen window, a fresh execution plans a fresh batch. calculate_lower is
+    described in _incremental_bounds. Call get_batch before querying a new
+    source maximum.
     """
-    if (incremental_column is None) != (incremental_type is None):
-        raise ValueError("Incremental column and type must be specified together")
+    if incremental_column is None or incremental_type is None:
+        raise ValueError("The incremental registry requires an incremental column and type")
     if type(lookback_size) is not int or not 0 <= lookback_size <= 10**38 - 1:
         raise ValueError("lookback_size must be a nonnegative integer of at most 38 digits")
-    if force_full and (not isinstance(reason_text, str) or not reason_text.strip()):
-        raise ValueError("Manual full snapshot requires reason_text")
-    configured_mode = "incremental" if incremental_column is not None else "full_snapshot"
     incremental_config = _IncrementalConfig(
         column=incremental_column,
         type=incremental_type,
@@ -214,52 +209,53 @@ def plan_batch(*, process_id, dag_id, run_id, source_id,
     )
     with connection(db_connect) as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO ingestion.extraction_state "
-            "(source_id, entity_fqn, configured_mode, incremental_column, incremental_type) "
-            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
-            (source_id, entity_fqn, configured_mode, incremental_column, incremental_type),
+            "INSERT INTO ingestion.incremental_state "
+            "(source_id, entity_fqn, incremental_column, incremental_type) "
+            "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            (source_id, entity_fqn, incremental_column, incremental_type),
         )
         state = _lock_state(cur, source_id, entity_fqn)
         _check_contract(state, incremental_column, incremental_type)
         cur.execute(
-            "SELECT * FROM ingestion.extraction_batches WHERE "
-            "dag_id = %s AND run_id = %s AND source_id = %s AND entity_fqn = %s FOR UPDATE",
-            (dag_id, run_id, source_id, entity_fqn),
+            "SELECT * FROM ingestion.incremental_batches WHERE "
+            "process_id = %s AND source_id = %s AND entity_fqn = %s FOR UPDATE",
+            (process_id, source_id, entity_fqn),
         )
         batch = _row(cur)
         if batch is not None:
             _check_batch(state, batch)
-            if batch["process_id"] != process_id or batch["target_table"] != target_table:
-                raise ValueError("Existing batch process or target does not match")
+            if batch["target_table"] != target_table:
+                raise ValueError("Existing batch target does not match")
             return batch
         watermark = state["watermark"]
-        mode, reason = _batch_mode_and_reason(incremental_column, watermark, force_full)
-        lower, upper_bound, empty_at_plan, lookback_size, lookback_unit = _incremental_bounds(
-            mode, watermark, upper_bound, empty_at_plan, force_full, incremental_config
+        reason = _batch_reason(watermark)
+        lower, lower_op, upper_bound, empty_at_plan, lookback_size, lookback_unit = _incremental_bounds(
+            watermark, upper_bound, empty_at_plan, incremental_config
         )
         cur.execute(
-            "INSERT INTO ingestion.extraction_batches "
-            "(process_id, dag_id, run_id, source_id, entity_fqn, target_table, mode, reason, "
+            "INSERT INTO ingestion.incremental_batches "
+            "(process_id, dag_id, run_id, source_id, entity_fqn, target_table, reason, "
             "incremental_column, incremental_type, expected_revision, watermark_before, "
-            "lookback_size, lookback_unit, lower_bound, upper_bound, empty_at_plan, reason_text) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
-            (process_id, dag_id, run_id, source_id, entity_fqn, target_table, mode, reason,
+            "lookback_size, lookback_unit, lower_bound, lower_bound_op, upper_bound, empty_at_plan) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+            (process_id, dag_id, run_id, source_id, entity_fqn, target_table, reason,
              incremental_column, incremental_type, state["revision"], watermark,
-             lookback_size, lookback_unit, lower, upper_bound, empty_at_plan, reason_text),
+             lookback_size, lookback_unit, lower, lower_op, upper_bound, empty_at_plan),
         )
         return _row(cur)
 
 
-def start_batch(batch_id, *, db_connect):
+def start_batch(*, process_id, source_id, entity_fqn, db_connect):
     """Start an attempt after the caller has ensured no live executor remains."""
     with connection(db_connect) as conn, conn.cursor() as cur:
-        _, batch = _lock_batch(cur, batch_id)
+        _, batch = _lock_batch(cur, process_id, source_id, entity_fqn)
         if batch["status"] == "SUCCEEDED":
             return batch
         cur.execute(
-            "UPDATE ingestion.extraction_batches SET status = 'RUNNING', "
-            "attempt_count = attempt_count + 1, last_error = NULL, finished_at = NULL "
-            "WHERE batch_id = %s RETURNING *", (batch_id,),
+            "UPDATE ingestion.incremental_batches SET status = 'RUNNING', "
+            "attempt_count = attempt_count + 1, finished_at = NULL "
+            "WHERE process_id = %s AND source_id = %s AND entity_fqn = %s RETURNING *",
+            (process_id, source_id, entity_fqn),
         )
         return _row(cur)
 
@@ -267,24 +263,22 @@ def start_batch(batch_id, *, db_connect):
 _UNSET = object()
 
 
-def finalize_batch(batch_id, row_count, observed_max, *, compare_positions=None,
-                   watermark_after=_UNSET, db_connect):
+def finalize_batch(*, process_id, source_id, entity_fqn, row_count, observed_max=None,
+                   compare_positions=None, watermark_after=_UNSET,
+                   db_connect):
     """Atomically finish a batch and CAS the state revision.
 
     compare_positions(left, right) returns a negative/zero/positive typed
     comparison. Alternatively supply the typed maximum as watermark_after.
-    Manual full and permanent snapshots always preserve the state watermark.
     """
     if type(row_count) is not int or row_count < 0:
         raise ValueError("row_count must be a nonnegative integer")
     with connection(db_connect) as conn, conn.cursor() as cur:
-        state, batch = _lock_batch(cur, batch_id)
+        state, batch = _lock_batch(cur, process_id, source_id, entity_fqn)
         if batch["status"] == "SUCCEEDED":
             return batch
         before = state["watermark"]
-        if batch["reason"] == "manual_full" or batch["incremental_column"] is None:
-            after = before
-        elif observed_max is None:
+        if observed_max is None:
             after = before
         elif before is None:
             after = observed_max
@@ -297,30 +291,34 @@ def finalize_batch(batch_id, row_count, observed_max, *, compare_positions=None,
         else:
             raise ValueError("Typed compare_positions or watermark_after is required")
         cur.execute(
-            "UPDATE ingestion.extraction_state SET watermark = %s, revision = revision + 1, "
-            "last_batch_id = %s, updated_at = clock_timestamp() "
+            "UPDATE ingestion.incremental_state SET watermark = %s, revision = revision + 1, "
+            "last_process_id = %s, updated_at = clock_timestamp() "
             "WHERE source_id = %s AND entity_fqn = %s AND revision = %s",
-            (after, batch_id, batch["source_id"], batch["entity_fqn"], batch["expected_revision"]),
+            (after, batch["process_id"], batch["source_id"], batch["entity_fqn"],
+             batch["expected_revision"]),
         )
         if cur.rowcount != 1:
-            raise ValueError("Extraction revision CAS failed")
+            raise ValueError("Incremental revision CAS failed")
         cur.execute(
-            "UPDATE ingestion.extraction_batches SET status = 'SUCCEEDED', row_count = %s, "
-            "observed_max = %s, watermark_after = %s, last_error = NULL, "
-            "finished_at = clock_timestamp() WHERE batch_id = %s RETURNING *",
-            (row_count, observed_max, after, batch_id),
+            "UPDATE ingestion.incremental_batches SET status = 'SUCCEEDED', row_count = %s, "
+            "observed_max = %s, watermark_after = %s, "
+            "finished_at = clock_timestamp() "
+            "WHERE process_id = %s AND source_id = %s AND entity_fqn = %s RETURNING *",
+            (row_count, observed_max, after, process_id, source_id, entity_fqn),
         )
         return _row(cur)
 
 
-def fail_batch(batch_id, error, *, db_connect):
-    """Record a caller-sanitized failure without changing extraction state."""
+def fail_batch(*, process_id, source_id, entity_fqn, db_connect):
+    """Record a failed attempt without changing extraction state."""
     with connection(db_connect) as conn, conn.cursor() as cur:
-        _, batch = _lock_batch(cur, batch_id)
+        _, batch = _lock_batch(cur, process_id, source_id, entity_fqn)
         if batch["status"] == "SUCCEEDED":
             return batch
         cur.execute(
-            "UPDATE ingestion.extraction_batches SET status = 'FAILED', last_error = %s, "
-            "finished_at = clock_timestamp() WHERE batch_id = %s RETURNING *", (str(error), batch_id),
+            "UPDATE ingestion.incremental_batches SET status = 'FAILED', "
+            "finished_at = clock_timestamp() "
+            "WHERE process_id = %s AND source_id = %s AND entity_fqn = %s RETURNING *",
+            (process_id, source_id, entity_fqn),
         )
         return _row(cur)

@@ -59,7 +59,10 @@ class TestPositions(unittest.TestCase):
             fraction = "123456789"[:precision]
             value = f"2026-10-26T12:34:56.{fraction}"
             self.assertEqual(positions.canonical(value.replace("T", " "), kind), value)
-            self.assertEqual(positions.lower_bound(value, kind, 1, "h"), f"2026-10-26T11:34:56.{fraction}")
+            self.assertEqual(
+                positions.window_bounds(value, kind, 1, "h"),
+                (f"2026-10-26T11:00:00." + "0" * precision, ">="),
+            )
         with self.assertRaises(ValueError):
             positions.canonical("2026-10-26T12:34:56.1234567", "timestamp_local(6)")
         self.assertEqual(positions.canonical("2026-10-26 12:34:56.1", "timestamp_local(9)"), "2026-10-26T12:34:56.100000000")
@@ -77,9 +80,38 @@ class TestPositions(unittest.TestCase):
             self.assertEqual(positions.canonical(f"2026-10-26 01:30:00.123456789 {offset}", kind), "2026-10-25T23:30:00.123456789Z")
         self.assertEqual(positions.canonical("2026-10-26T23:30:00-02:00", "timestamp_instant(0)"), "2026-10-27T01:30:00Z")
 
+    def test_alignment_in_the_values_own_calendar(self):
+        """Instants align on the UTC grid; local positions on wall-clock digits."""
+        self.assertEqual(
+            positions.window_bounds("2026-10-26T12:34:56", "timestamp_local(0)", 3, "h"),
+            ("2026-10-26T09:00:00", ">="),
+        )
+        self.assertEqual(
+            positions.window_bounds("2026-10-26T15:34:56+03:00", "timestamp_instant(0)", 3, "h"),
+            ("2026-10-26T09:00:00Z", ">="),
+        )
+        self.assertEqual(
+            positions.window_bounds("2026-10-26T12:34:56", "timestamp_local(0)", 3, "d"),
+            ("2026-10-23T00:00:00", ">="),
+        )
+        self.assertEqual(
+            positions.window_bounds("2026-10-26T12:34:56Z", "timestamp_instant(0)", 3, "d"),
+            ("2026-10-23T00:00:00Z", ">="),
+        )
+        self.assertEqual(
+            positions.window_bounds("2026-10-26T12:34:56", "timestamp_local(0)", 1, "h"),
+            ("2026-10-26T11:00:00", ">="),
+        )
+
     def test_dst_has_no_implicit_timezone(self):
-        self.assertEqual(positions.lower_bound("2026-03-29T03:30:00", "timestamp_local(0)", 1, "h"), "2026-03-29T02:30:00")
-        self.assertEqual(positions.lower_bound("2026-03-29T03:30:00+02:00", "timestamp_instant(0)", 1, "d"), "2026-03-28T01:30:00Z")
+        self.assertEqual(
+            positions.window_bounds("2026-03-29T03:30:00", "timestamp_local(0)", 1, "h"),
+            ("2026-03-29T02:00:00", ">="),
+        )
+        self.assertEqual(
+            positions.window_bounds("2026-03-29T03:30:00+02:00", "timestamp_instant(0)", 1, "d"),
+            ("2026-03-28T00:00:00Z", ">="),
+        )
         self.assertEqual(positions.maximum("2026-10-25T02:30:00+02:00", "2026-10-25T02:15:00+01:00", "timestamp_instant(0)"), "2026-10-25T01:15:00Z")
 
     def test_invalid_temporal_values(self):
@@ -115,30 +147,42 @@ class TestPositions(unittest.TestCase):
             ("0001-01-01T00:00:00.000000000", "timestamp_local(9)", "h"),
             ("0001-01-01T00:00:00Z", "timestamp_instant(0)", "d"),
         ):
-            self.assertIsNone(positions.lower_bound(value, kind, 1, unit))
-            self.assertIsNone(positions.lower_bound(value, kind, 10**38 - 1, unit))
-            self.assertEqual(positions.lower_bound(value, kind), value)
-        self.assertEqual(positions.lower_bound("-32767", "smallint", 1), "-32768")
-        self.assertEqual(positions.lower_bound("2024-03-01", "date", 1, "d"), "2024-02-29")
+            self.assertEqual(positions.window_bounds(value, kind, 1, unit), (None, ">=" if unit else ">"))
+            self.assertEqual(positions.window_bounds(value, kind, 10**38 - 1, unit), (None, ">=" if unit else ">"))
+            self.assertEqual(positions.window_bounds(value, kind), (value, ">"))
+        self.assertEqual(positions.window_bounds("-32767", "smallint", 1), ("-32768", ">"))
+        self.assertEqual(positions.window_bounds("2024-03-01", "date", 1, "d"), ("2024-02-29", ">="))
+        self.assertEqual(positions.window_bounds("9", "bigint", 2), ("7", ">"))
 
     def test_lookback_validation_even_with_null_watermark(self):
         for size in (-1, True, "1", 1.0, 10**38):
             with self.assertRaises(ValueError):
-                positions.lower_bound(None, "bigint", size)
-        for kind, size, unit in (("bigint", 0, "d"), ("date", 0, "h"), ("date", 1, None), ("timestamp_local(0)", 1, "m")):
+                positions.window_bounds(None, "bigint", size)
+        for kind, size, unit in (("bigint", 5, "d"), ("date", 1, None), ("date", 1, "h"),
+                                 ("timestamp_local(0)", 1, None), ("timestamp_local(0)", 1, "m")):
             with self.assertRaises(ValueError):
-                positions.lower_bound(None, kind, size, unit)
+                positions.window_bounds(None, kind, size, unit)
 
-    def test_configured_lookback_requires_temporal_unit_even_at_zero_size(self):
+    def test_size_zero_ignores_unit_entirely(self):
         kinds = {"date": "2026-10-26", "timestamp_local(6)": "2026-10-26T12:00:00.000000",
-                 "timestamp_instant(9)": "2026-10-26T12:00:00.000000000Z"}
+                 "timestamp_instant(9)": "2026-10-26T12:00:00.000000000Z", "bigint": "-5"}
         for kind, position in kinds.items():
-            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "unit"):
-                positions.lower_bound(None, kind, 0, None, specified=True)
-            for unit in (("d",) if kind == "date" else ("h", "d")):
+            for unit in (None, "h", "d", "nonsense"):
                 with self.subTest(kind=kind, unit=unit):
-                    self.assertEqual(positions.lower_bound(position, kind, 0, unit, specified=True), position)
-        self.assertEqual(positions.lower_bound("-5", "bigint", 0, None, specified=True), "-5")
+                    self.assertEqual(positions.window_bounds(position, kind, 0, unit), (position, ">"))
+
+    def test_numeric_lookback_keeps_strict_operator(self):
+        self.assertEqual(positions.window_bounds("10", "bigint", 3), ("7", ">"))
+        self.assertEqual(positions.window_bounds("2026-10-26", "date", 3, "d"), ("2026-10-23", ">="))
+
+    def test_resolve_lookback_applies_kind_defaults(self):
+        self.assertEqual(positions.resolve_lookback("bigint", 3, "d", False), (0, None))
+        self.assertEqual(positions.resolve_lookback("decimal(18,0)", 3, "d", False), (0, None))
+        self.assertEqual(positions.resolve_lookback("date", 3, "h", False), (3, "d"))
+        self.assertEqual(positions.resolve_lookback("timestamp_local(6)", 3, "h", False), (3, "h"))
+        self.assertEqual(positions.resolve_lookback("timestamp_instant(0)", 3, "d", False), (3, "d"))
+        self.assertEqual(positions.resolve_lookback("bigint", 5, "d", True), (5, "d"))
+        self.assertEqual(positions.resolve_lookback("timestamp_local(6)", 0, None, True), (0, None))
 
 
 if __name__ == "__main__":

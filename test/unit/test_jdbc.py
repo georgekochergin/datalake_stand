@@ -21,49 +21,57 @@ def fake_jvm():
     return spark, connection
 
 
-class TestKeyColumns(unittest.TestCase):
+class TestKeyMetadata(unittest.TestCase):
     """Quote-aware metadata resolution and observable fallback."""
 
     def test_only_unquoted_fragments_fold(self):
         spark, connection = fake_jvm()
         metadata = connection.getMetaData.return_value
-        with patch.object(jdbc, "_ordered_key_columns", side_effect=[[], ["id"]]) as keys, patch.object(
-            jdbc, "_column_types", return_value={"id": "INTEGER"}
-        ):
-            self.assertEqual(
-                jdbc.key_columns(spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", 'schema."Mixed.Table"'),
-                [("id", "INTEGER")],
+        located = {"id": jdbc.ColumnMeta("id", "INTEGER", 10, 0, True)}
+        with patch.object(jdbc, "_column_metadata", side_effect=[{}, located]) as columns, patch.object(
+            jdbc, "_primary_key", return_value=("id",)
+        ) as primary, patch.object(jdbc, "_unique_single_columns", return_value=()):
+            result = jdbc.key_metadata(
+                spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", 'schema."Mixed.Table"'
             )
-        self.assertEqual(keys.call_args_list[0].args,
+        self.assertEqual(result, jdbc.KeyMetadata(("id",), (), located))
+        self.assertEqual(columns.call_args_list[0].args,
                          (metadata, MetadataLocation(None, "schema", "Mixed.Table")))
-        self.assertEqual(keys.call_args_list[1].args,
+        self.assertEqual(columns.call_args_list[1].args,
                          (metadata, MetadataLocation(None, "SCHEMA", "Mixed.Table")))
+        primary.assert_called_once_with(metadata, MetadataLocation(None, "SCHEMA", "Mixed.Table"))
         connection.close.assert_called_once()
 
     def test_fully_quoted_names_never_fold(self):
         spark, connection = fake_jvm()
-        with patch.object(jdbc, "_ordered_key_columns", return_value=[]) as keys, self.assertLogs(
+        with patch.object(jdbc, "_column_metadata", return_value={}) as columns, self.assertLogs(
             jdbc.__name__, level="WARNING"
         ) as logs:
-            self.assertEqual(
-                jdbc.key_columns(spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", '"Schema"."Table"'),
-                [],
+            result = jdbc.key_metadata(
+                spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", '"Schema"."Table"'
             )
-        keys.assert_called_once_with(connection.getMetaData.return_value,
-                                     MetadataLocation(None, "Schema", "Table"))
+        self.assertEqual(result, jdbc.KeyMetadata((), (), {}))
+        columns.assert_called_once_with(connection.getMetaData.return_value,
+                                        MetadataLocation(None, "Schema", "Table"))
         self.assertIn("falling back", logs.output[0])
 
     def test_metadata_error_warns(self):
         spark, _ = fake_jvm()
         spark._jvm.java.sql.DriverManager.getConnection.side_effect = RuntimeError("metadata offline")
         with self.assertLogs(jdbc.__name__, level="WARNING") as logs:
-            self.assertEqual(jdbc.key_columns(spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", "s.t"), [])
+            result = jdbc.key_metadata(
+                spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", "s.t"
+            )
+        self.assertEqual(result, jdbc.KeyMetadata((), (), {}))
         self.assertIn("metadata offline", logs.output[0])
 
     def test_malformed_reference_warns(self):
         spark, _ = fake_jvm()
         with self.assertLogs(jdbc.__name__, level="WARNING"):
-            self.assertEqual(jdbc.key_columns(spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", "a..b"), [])
+            result = jdbc.key_metadata(
+                spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", "a..b"
+            )
+        self.assertEqual(result, jdbc.KeyMetadata((), (), {}))
 
 
 class CatalogDialect(RdbmsDialect):
@@ -74,24 +82,62 @@ class CatalogDialect(RdbmsDialect):
         return (MetadataLocation(parts[0][0], None, parts[1][0]),)
 
 
+class ScriptedResult:
+    """JDBC result-set double over scripted {label: value} rows."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.index = -1
+        self.current: dict = {}
+        self.was_null = False
+        self.closed = False
+
+    def next(self):
+        """Advance one row; False past the end."""
+        self.index += 1
+        self.current = self.rows[self.index] if self.index < len(self.rows) else {}
+        return self.index < len(self.rows)
+
+    def getString(self, label):
+        """Return the scripted string value of the current row."""
+        return self.current.get(label)
+
+    def getInt(self, label):
+        """Return the scripted int value; SQL NULL reads as zero with wasNull."""
+        value = self.current.get(label)
+        self.was_null = value is None
+        return 0 if value is None else value
+
+    def getBoolean(self, label):
+        """Return the scripted boolean value."""
+        return self.current.get(label, False)
+
+    def wasNull(self):
+        """Report whether the last int read was SQL NULL."""
+        return self.was_null
+
+    def close(self):
+        """Record the close."""
+        self.closed = True
+
+
 class TestCatalogAddressing(unittest.TestCase):
     """A dialect-controlled catalog reaches every JDBC metadata call."""
 
     def test_catalog_dialect_passes_full_location(self):
         spark, connection = fake_jvm()
         metadata = connection.getMetaData.return_value
-        primary_keys = metadata.getPrimaryKeys.return_value
-        primary_keys.next.side_effect = [True, False]
-        primary_keys.getInt.return_value = 1
-        primary_keys.getString.return_value = "id"
-        indexes = metadata.getIndexInfo.return_value
-        indexes.next.side_effect = [False]
-        columns = metadata.getColumns.return_value
-        columns.next.side_effect = [True, False]
-        columns.getString.side_effect = ["id", "int8"]
+        metadata.getPrimaryKeys.return_value = ScriptedResult([{"KEY_SEQ": 1, "COLUMN_NAME": "id"}])
+        metadata.getIndexInfo.return_value = ScriptedResult([])
+        metadata.getColumns.return_value = ScriptedResult([
+            {"COLUMN_NAME": "id", "TYPE_NAME": "int8", "COLUMN_SIZE": 10,
+             "DECIMAL_DIGITS": 0, "IS_NULLABLE": "NO"},
+        ])
         self.assertEqual(
-            jdbc.key_columns(spark._jvm, CatalogDialect(), "jdbc:stub://", "u", "p", "example_db.example_table"),
-            [("id", "int8")],
+            jdbc.key_metadata(
+                spark._jvm, CatalogDialect(), "jdbc:stub://", "u", "p", "example_db.example_table"
+            ),
+            jdbc.KeyMetadata(("id",), (), {"id": jdbc.ColumnMeta("id", "INT8", 10, 0, True)}),
         )
         metadata.getPrimaryKeys.assert_called_once_with("example_db", None, "example_table")
         metadata.getIndexInfo.assert_called_once_with("example_db", None, "example_table", True, True)
@@ -101,10 +147,10 @@ class TestCatalogAddressing(unittest.TestCase):
         spark, _ = fake_jvm()
         spark._jvm.java.sql.DriverManager.getConnection.side_effect = RuntimeError("catalog engine offline")
         with self.assertLogs(jdbc.__name__, level="WARNING") as logs:
-            self.assertEqual(
-                jdbc.key_columns(spark._jvm, CatalogDialect(), "jdbc:stub://", "u", "p", "example_db.example_table"),
-                [],
+            result = jdbc.key_metadata(
+                spark._jvm, CatalogDialect(), "jdbc:stub://", "u", "p", "example_db.example_table"
             )
+        self.assertEqual(result, jdbc.KeyMetadata((), (), {}))
         self.assertIn("catalog engine offline", logs.output[0])
 
 
@@ -161,34 +207,95 @@ class TestFirstRow(unittest.TestCase):
         statement.close.assert_called_once()
 
 
-class TestOrderedKeyColumns(unittest.TestCase):
-    """Primary keys order by KEY_SEQ; unique indexes add their columns."""
+class TestKeyStructure(unittest.TestCase):
+    """Primary-key ordering and single-column unique-index grouping."""
 
-    def metadata(self, primary_rows=(), index_rows=()):
+    LOCATION = MetadataLocation(None, "s", "t")
+
+    def primary(self, rows):
+        """Run _primary_key over scripted (KEY_SEQ, COLUMN_NAME) rows."""
         metadata = MagicMock()
-        primary_keys = metadata.getPrimaryKeys.return_value
-        primary_keys.next.side_effect = [True] * len(primary_rows) + [False]
-        primary_keys.getInt.side_effect = [seq for seq, _ in primary_rows]
-        primary_keys.getString.side_effect = [name for _, name in primary_rows]
-        indexes = metadata.getIndexInfo.return_value
-        indexes.next.side_effect = [True] * len(index_rows) + [False]
-        indexes.getBoolean.return_value = False
-        indexes.getString.side_effect = list(index_rows)
-        return metadata
+        metadata.getPrimaryKeys.return_value = ScriptedResult(
+            [{"KEY_SEQ": seq, "COLUMN_NAME": name} for seq, name in rows]
+        )
+        return metadata, jdbc._primary_key(metadata, self.LOCATION)
+
+    def unique(self, rows):
+        """Run _unique_single_columns over scripted index rows."""
+        metadata = MagicMock()
+        metadata.getIndexInfo.return_value = ScriptedResult([
+            {"INDEX_NAME": index, "NON_UNIQUE": non_unique, "COLUMN_NAME": column,
+             "FILTER_CONDITION": filter_condition}
+            for index, non_unique, column, filter_condition in rows
+        ])
+        return metadata, jdbc._unique_single_columns(metadata, self.LOCATION)
 
     def test_primary_keys_sorted_by_sequence(self):
-        metadata = self.metadata(primary_rows=[(2, "b"), (1, "a")])
-        self.assertEqual(jdbc._ordered_key_columns(metadata, MetadataLocation(None, "s", "t")), ["a", "b"])
-        metadata.getPrimaryKeys.return_value.close.assert_called_once()
-        metadata.getIndexInfo.return_value.close.assert_called_once()
+        metadata, primary = self.primary([(2, "b"), (1, "a")])
+        self.assertEqual(primary, ("a", "b"))
+        self.assertTrue(metadata.getPrimaryKeys.return_value.closed)
 
-    def test_unique_index_columns_appended_once(self):
-        metadata = self.metadata(primary_rows=[(1, "id")], index_rows=["uk"])
-        self.assertEqual(jdbc._ordered_key_columns(metadata, MetadataLocation(None, "s", "t")), ["id", "uk"])
+    def test_composite_primary_key_preserved(self):
+        _, primary = self.primary([(2, "num"), (1, "code")])
+        self.assertEqual(primary, ("code", "num"))
 
-    def test_null_index_column_skipped(self):
-        metadata = self.metadata(index_rows=[None])
-        self.assertEqual(jdbc._ordered_key_columns(metadata, MetadataLocation(None, "s", "t")), [])
+    def test_null_primary_key_name_skipped(self):
+        _, primary = self.primary([(1, None)])
+        self.assertEqual(primary, ())
+
+    def test_single_column_unique_index_kept(self):
+        metadata, unique = self.unique([("uk_num", False, "num", None)])
+        self.assertEqual(unique, ("num",))
+        self.assertTrue(metadata.getIndexInfo.return_value.closed)
+
+    def test_composite_unique_index_dropped(self):
+        _, unique = self.unique([
+            ("uk_pair", False, "a", None), ("uk_pair", False, "b", None),
+        ])
+        self.assertEqual(unique, ())
+
+    def test_non_unique_and_functional_and_filtered_dropped(self):
+        _, unique = self.unique([
+            ("ix_plain", True, "a", None),
+            ("uk_expr", False, None, None),
+            ("uk_filtered", False, "b", "status = 'A'"),
+        ])
+        self.assertEqual(unique, ())
+
+    def test_same_column_twice_deduplicated(self):
+        _, unique = self.unique([
+            ("uk_one", False, "num", None), ("uk_two", False, "num", None),
+        ])
+        self.assertEqual(unique, ("num",))
+
+
+class TestColumnMetadata(unittest.TestCase):
+    """Column facts mapped from a scripted getColumns result set."""
+
+    def columns(self, rows):
+        """Run _column_metadata over scripted label dicts."""
+        metadata = MagicMock()
+        metadata.getColumns.return_value = ScriptedResult(rows)
+        return jdbc._column_metadata(metadata, MetadataLocation(None, "s", "t"))
+
+    def test_types_normalized_and_keyed_lowercase(self):
+        result = self.columns([
+            {"COLUMN_NAME": "Id", "TYPE_NAME": "int identity", "COLUMN_SIZE": 10,
+             "DECIMAL_DIGITS": 0, "IS_NULLABLE": "NO"},
+            {"COLUMN_NAME": "note", "TYPE_NAME": "nvarchar", "COLUMN_SIZE": None,
+             "DECIMAL_DIGITS": None, "IS_NULLABLE": "YES"},
+        ])
+        self.assertEqual(result, {
+            "id": jdbc.ColumnMeta("Id", "INT IDENTITY", 10, 0, True),
+            "note": jdbc.ColumnMeta("note", "NVARCHAR", None, None, False),
+        })
+
+    def test_null_names_and_types_skipped(self):
+        result = self.columns([
+            {"COLUMN_NAME": None, "TYPE_NAME": "int"},
+            {"COLUMN_NAME": "ok", "TYPE_NAME": None},
+        ])
+        self.assertEqual(result, {})
 
 
 if __name__ == "__main__":

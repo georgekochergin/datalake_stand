@@ -85,10 +85,7 @@ http://localhost:8090/health должен вернуть HTTP 200. При пер
 
 1. Airflow UI → DAG-и `update_source_bank` и `update_source_broker`
    (расписания нет — запуск только ручной, кнопкой ▶ справа).
-2. Запустить оба (можно параллельно), открыть Grid View. Для демонстрации
-   параллельного JDBC-чтения (шаг 3) запустите каждый update-DAG **дважды
-   подряд**: в таблицах появятся строки с двумя разными `_batch_id`, и окно
-   чтения даст ненулевой диапазон для параллельной нарезки.
+2. Запустить оба (можно параллельно), открыть Grid View.
 3. Пока идут: таски `migrate_bank` и `migrate_broker` применяют батчи из
    `airflow/plugins/migrations/{bank,broker}.json`. На каждый запуск каждого
    источника: +20 клиентов, +20 счетов, +200 сделок, +5000 транзакций;
@@ -195,9 +192,11 @@ JDBC-партиций для transactions и отключение паралле
 
 1. **Конфигурация** (до запуска): `ingestion/conf/settings.yaml` —
    `spark.jdbc.num_partitions: 4`; `ingestion/conf/pipelines/bank/main.yaml` — у
-   `transactions` нет `spark.parallelism: false` (параллельное чтение
-   разрешено, колонка нарезки — `_batch_id`), у `deals` и всех таблиц `refs`
-   — `spark.parallelism: false` (один поток).
+   `transactions` нет `spark.jdbc_partitioning: false` (параллельное чтение
+   разрешено), у `deals` и всех таблиц `refs` — `spark.jdbc_partitioning:
+   false` (один поток). Колонка нарезки выбирается автоматически единой
+   эвристикой: у всех демо-таблиц это целочисленный первичный ключ
+   (`transaction_id`).
 2. **Живьём на источнике (MSSQL)**: пока идёт `ingest__rdbms__bank__main`, в
    DBeaver (bank) выполнить — можно увидеть соединения чтения transactions
    и deals (Login `sydafa`, HostName — контейнер spark-worker):
@@ -226,14 +225,22 @@ WHERE username = 'SYDAFA' AND program LIKE 'JDBC%';
 3. **В логе load-таска**: открыть лог
    `ingest_group.load_retail_bank__transactions.load` и показать команду
    Spark с `--num-partitions 4` и `--incremental-column _batch_id`;
-   у deals/clients передаётся `--no-parallelism`. Это параметры запуска,
-   а не подтверждение фактического числа соединений. Загрузчик не печатает
+   у deals и таблиц refs передаётся `--no-jdbc-partitioning`. Ниже в том же
+   логе — строка выбора колонки нарезки вида
+
+   ```text
+   jdbc partitioning: column=transaction_id step=primary_key window=[1..5000] partitions=4 of 4 requested
+   ```
+
+   Колонка, ступень эвристики, MIN/MAX окна чтения и фактическое число
+   партиций. Это параметры запуска и журналируемое решение, а не
+   подтверждение фактического числа соединений. Загрузчик не печатает
    физический план чтения отдельным вызовом `explain`.
 
 Параллельная нарезка включается, только когда в окне чтения минимум ≠ максимум
-колонки нарезки — поэтому шаг 1 запускает update-DAG-и дважды: у дельты из
-одной партии `_batch_id` диапазон нулевой, и чтение честно идёт одним
-потоком.
+колонки нарезки. Дельта одного запуска update-DAG (порядка 5000 строк с
+разбросом `transaction_id`) уже даёт ненулевой диапазон — специально
+готовить данные не нужно.
 
 **Пул Airflow**: Admin → Pools → `ingest_loads` (4 слота; transactions
 занимает 2, остальные загрузки по 1). Во время загрузок колонки Running/Queued
@@ -256,18 +263,19 @@ DESCRIBE raw.bank.retail_bank__clients;
 
 SELECT count(*) FROM raw.bank.retail_bank__transactions;
 
-SELECT __process_id, __batch_id, count(*) AS rows
+SELECT __process_id, count(*) AS rows
 FROM raw.bank.retail_bank__transactions
-GROUP BY 1, 2 ORDER BY 1;
+GROUP BY 1 ORDER BY 1;
 
 SELECT * FROM raw.bank.retail_bank__clients
 WHERE __load_dttm = (SELECT max(__load_dttm) FROM raw.bank.retail_bank__clients);
 ```
 
-**Что рассказать:** схема raw-таблицы = зеркало источника + три технические
-колонки (`__load_dttm`, `__process_id`, `__batch_id`); каждый запуск DAG-а
-оставил ровно одну порцию с одним `__process_id`; последний запрос — текущее
-состояние источника (актуальный снапшот).
+**Что рассказать:** схема raw-таблицы = зеркало источника + две технические
+колонки (`__load_dttm`, `__process_id`); `__process_id` — заодно ключ партии
+загрузки в pg-meta; каждый запуск DAG-а оставил ровно одну порцию с одним
+`__process_id`; последний запрос — текущее состояние источника (актуальный
+снапшот).
 
 **pg-meta** (DBeaver, подключение из раздела подготовки; запросы поочерёдно):
 
@@ -278,21 +286,23 @@ FROM ingestion.airflow_dagruns_log ORDER BY id DESC LIMIT 10;
 SELECT process_id, entity_fqn, status, ts
 FROM ingestion.airflow_tasks_log ORDER BY id DESC LIMIT 20;
 
-SELECT entity_fqn, configured_mode, incremental_column, incremental_type,
-       watermark, revision, last_batch_id
-FROM ingestion.extraction_state ORDER BY source_id, entity_fqn;
+SELECT entity_fqn, incremental_column, incremental_type,
+       watermark, revision, last_process_id
+FROM ingestion.incremental_state ORDER BY source_id, entity_fqn;
 
-SELECT batch_id, entity_fqn, mode, reason, status, attempt_count, row_count,
-       watermark_before, watermark_after, lower_bound, upper_bound
-FROM ingestion.extraction_batches ORDER BY batch_id DESC LIMIT 16;
+SELECT process_id, entity_fqn, reason, status, attempt_count, row_count,
+       watermark_before, watermark_after, lower_bound, lower_bound_op, upper_bound
+FROM ingestion.incremental_batches ORDER BY process_id DESC LIMIT 16;
 ```
 
-**Что рассказать:** у `transactions` первая партия — `bootstrap` (первичное
-наполнение, без нижней границы) с зафиксированным `watermark_after`; у
-снапшотных сущностей — партии `reason=regular` в режиме `full_snapshot` без
-watermark. Границы окна заморозились **до** чтения источника.
+**Что рассказать:** реестр хранит только инкрементальные сущности — здесь
+это `transactions` двух источников; их первая партия — `bootstrap`
+(первичное наполнение, без нижней границы) с зафиксированным
+`watermark_after`. Границы окна заморозились **до** чтения источника;
+полные срезы (справочники, сделки) в реестр не пишутся — их свежесть
+видна по `__process_id`/`__load_dttm` в raw.
 
-## Шаг 5. Повторный раунд: полный снапшот против инкремента
+## Шаг 5. Повторный раунд: полный срез против инкремента
 
 1. Снова запустить `update_source_bank` и `update_source_broker` (шаг 1) —
    источники выросли.
@@ -306,11 +316,11 @@ FROM raw.bank.retail_bank__clients GROUP BY 1 ORDER BY 1;
 SELECT * FROM raw.bank.retail_bank__clients
 WHERE __load_dttm = (SELECT max(__load_dttm) FROM raw.bank.retail_bank__clients);
 
-SELECT __process_id, __batch_id, count(*) AS rows
-FROM raw.bank.retail_bank__transactions GROUP BY 1, 2 ORDER BY 1;
+SELECT __process_id, count(*) AS rows
+FROM raw.bank.retail_bank__transactions GROUP BY 1 ORDER BY 1;
 ```
 
-**Что показать:** снапшотные таблицы получили **вторую полную порцию** (строк
+**Что показать:** таблицы полных срезов получили **вторую полную порцию** (строк
 в порции стало больше — источник вырос); у `transactions` вторая порция —
 **только дельта** (не более 5000 новых транзакций после одного update-батча,
 с учётом каскадного удаления), история первой порции не тронута. Изменения и
@@ -320,9 +330,9 @@ FROM raw.bank.retail_bank__transactions GROUP BY 1, 2 ORDER BY 1;
 4. pg-meta (DBeaver) — артефакты второго раунда:
 
 ```sql
-SELECT batch_id, reason, row_count, watermark_before, watermark_after, status
-FROM ingestion.extraction_batches
-WHERE entity_fqn = 'retail_bank.transactions' ORDER BY batch_id;
+SELECT process_id, reason, row_count, watermark_before, watermark_after, status
+FROM ingestion.incremental_batches
+WHERE entity_fqn = 'retail_bank.transactions' ORDER BY process_id;
 ```
 
 **Что рассказать:** у второй партии `reason=regular`: окно
@@ -350,7 +360,7 @@ WHERE entity_fqn = 'retail_bank.transactions' ORDER BY batch_id;
 
 Показываем, от чего система **не падает**: удаление, переименование и
 добавление колонки на источнике. Таблицы: `retail_bank.clients` (bank) и
-`trading_core.clients` (broker) — снапшотные, изменения схемы пройдут в raw
+`trading_core.clients` (broker) — полные срезы, изменения схемы пройдут в raw
 автоматически.
 
 Все запросы — Swagger UI, по одному «Try it out» на операцию (migrate сам
@@ -490,8 +500,8 @@ GROUP BY 1 ORDER BY 1;
 **pg-meta** (DBeaver) — последние партии:
 
 ```sql
-SELECT batch_id, entity_fqn, reason, status, row_count, finished_at
-FROM ingestion.extraction_batches ORDER BY batch_id DESC LIMIT 8;
+SELECT process_id, entity_fqn, reason, status, row_count, finished_at
+FROM ingestion.incremental_batches ORDER BY process_id DESC LIMIT 8;
 ```
 
 Все партии загрузок после эволюции — `SUCCEEDED`: смена схемы источника не

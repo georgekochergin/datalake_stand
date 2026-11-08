@@ -73,14 +73,14 @@ class TestIngestOperator(unittest.TestCase):
         operator.execute(self.context)
         args = operator.application_args
         self.assertEqual(args[args.index("--num-partitions") + 1], "4")
-        self.assertNotIn("--no-parallelism", args)
+        self.assertNotIn("--no-jdbc-partitioning", args)
         self.assertEqual(operator.source_type, "rdbms")
         self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/load_entity.py")
         self.assertEqual(operator.deploy_mode, "client")
         self.assertIn("jdbc:sqlserver://host:1433;databaseName=db;encrypt=false", args)
-        operator = self.operator(parallelism=False, num_partitions=7, incremental_column="_batch_id", lookback_size=5)
+        operator = self.operator(jdbc_partitioning=False, num_partitions=7, incremental_column="_batch_id", lookback_size=5)
         operator.execute(self.context)
-        self.assertIn("--no-parallelism", operator.application_args)
+        self.assertIn("--no-jdbc-partitioning", operator.application_args)
         self.assertEqual(operator.application_args[-2:], ["--incremental-column", "_batch_id"])
         self.assertIn("--lookback-size", operator.application_args)
         self.assertEqual(operator.application_args[operator.application_args.index("--lookback-size") + 1], "5")
@@ -112,20 +112,16 @@ class TestIngestOperator(unittest.TestCase):
                 operator.execute(self.context)
                 self.assertNotIn("--lookback-given", operator.application_args)
 
-    def test_force_full_override_applies_only_to_selected_entity(self):
-        for fqns in (["s.t"], ["s.other"]):
-            with self.subTest(fqns=fqns):
-                self.context["dag_run"].conf = {"force_full_snapshot_fqns": fqns, "reason": "repair"}
-                operator = self.operator(incremental_column="_batch_id")
-                operator.execute(self.context)
-                self.assertEqual("--force-full" in operator.application_args, fqns == ["s.t"])
-                self.assertEqual("--reason" in operator.application_args, fqns == ["s.t"])
-                if fqns == ["s.t"]:
-                    self.assertEqual(operator.application_args[operator.application_args.index("--reason") + 1], "repair")
+    def test_no_force_full_flags_remain(self):
+        operator = self.operator(incremental_column="_batch_id")
+        self.context["dag_run"].conf = {"force_full_snapshot_fqns": ["s.t"], "reason": "repair"}
+        operator.execute(self.context)
+        self.assertNotIn("--force-full", operator.application_args)
+        self.assertNotIn("--reason", operator.application_args)
 
     def test_strict_constructor_types(self):
         for kwargs in (
-            {"parallelism": "false"}, {"parallelism": 0}, {"parallelism": None},
+            {"jdbc_partitioning": "false"}, {"jdbc_partitioning": 0}, {"jdbc_partitioning": None},
             {"num_partitions": True}, {"num_partitions": 0}, {"num_partitions": -1},
             {"num_partitions": 4.0}, {"num_partitions": "4"}, {"source_type": None},
             {"lookback_size": -1}, {"lookback_size": "2"}, {"lookback_size": True},
@@ -151,67 +147,26 @@ class TestIngestOperator(unittest.TestCase):
                 operator.execute(self.context)
             self.assertFalse(operator.submissions)
 
-    def test_same_pid_across_loads_retries_and_different_runs(self):
+    def test_every_execution_allocates_fresh_process_id(self):
         generate = self.module.GenerateProcessIdOperator()
-        self.module.meta.get_or_create_process_id.side_effect = lambda **kw: {"run_a": 101, "run_b": 102}[kw["run_id"]]
+        self.module.meta.allocate_process_id.side_effect = iter([101, 102, 103])
         ids = []
-        for run_id in ("run_a", "run_b"):
+        for run_id in ("run_a", "run_a", "run_b"):
             dag_run = types.SimpleNamespace(dag_id="dag", run_id=run_id, logical_date="date", conf={})
-            process_id = generate.execute({"dag_run": dag_run})
-            self.assertEqual(generate.execute({"dag_run": dag_run}), process_id)
-            ids.append(process_id)
-            self.context["ti"].xcom_pull.return_value = process_id
-            for operator in (self.operator(), self.operator()):
-                for attempt in range(2):
-                    operator.execute(self.context)
-                    args = operator.application_args
-                    self.assertEqual(args[args.index("--process-id") + 1], str(process_id))
-        self.assertEqual(ids, [101, 102])
-        self.assertEqual([call.kwargs["run_id"] for call in self.module.meta.get_or_create_process_id.call_args_list], [
-            "run_a", "run_a", "run_b", "run_b"
-        ])
+            ids.append(generate.execute({"dag_run": dag_run}))
+        self.assertEqual(ids, [101, 102, 103])
+        self.assertEqual(
+            [(call.kwargs["dag_id"], call.kwargs["run_id"], call.kwargs["execution_date"])
+             for call in self.module.meta.allocate_process_id.call_args_list],
+            [("dag", "run_a", "date")] * 2 + [("dag", "run_b", "date")],
+        )
 
+    def test_generated_task_has_no_entities_parameter(self):
+        import inspect
 
+        parameters = inspect.signature(self.module.GenerateProcessIdOperator.__init__).parameters
+        self.assertNotIn("entities", parameters)
 
-class TestRunConfValidation(unittest.TestCase):
-    """Reject unsafe manual overrides before allocating a process ID."""
-
-    def setUp(self):
-        self.module = load_operators()
-        self.operator = self.module.GenerateProcessIdOperator(entities=("s.t", "s.other"))
-
-    def execute(self, conf):
-        return self.operator.execute({"dag_run": types.SimpleNamespace(
-            dag_id="dag", run_id="run", logical_date="date", conf=conf,
-        )})
-
-    def test_empty_and_valid_overrides(self):
-        for conf in (None, {}, {"force_full_snapshot_fqns": []}, {"reason": "scheduled"},
-                     {"force_full_snapshot_fqns": ["s.t", "s.other"], "reason": "repair"}):
-            with self.subTest(conf=conf):
-                self.module.meta.get_or_create_process_id.reset_mock()
-                self.module.meta.get_or_create_process_id.return_value = 42
-                self.assertEqual(self.execute(conf), 42)
-                call = self.module.meta.get_or_create_process_id.call_args
-                self.assertEqual(
-                    (call.kwargs["dag_id"], call.kwargs["run_id"], call.kwargs["execution_date"]),
-                    ("dag", "run", "date"),
-                )
-
-    def test_invalid_conf_never_allocates_process_id(self):
-        for conf in (
-            {"unknown": True}, {"force_full_snapshot_fqns": ["s.unknown"], "reason": "repair"},
-            {"force_full_snapshot_fqns": ["s.t", "s.t"], "reason": "repair"},
-            {"force_full_snapshot_fqns": "s.t", "reason": "repair"},
-            {"force_full_snapshot_fqns": [1], "reason": "repair"},
-            {"force_full_snapshot_fqns": None}, {"force_full_snapshot_fqns": ["s.t"]},
-            {"force_full_snapshot_fqns": ["s.t"], "reason": "  "},
-            {"force_full_snapshot_fqns": ["s.t"], "reason": 123}, {"reason": None},
-            ["invalid"], "invalid", 1,
-        ):
-            with self.subTest(conf=conf), self.assertRaises(ValueError):
-                self.execute(conf)
-            self.module.meta.get_or_create_process_id.assert_not_called()
 
 
 class TestTableLogOperator(unittest.TestCase):

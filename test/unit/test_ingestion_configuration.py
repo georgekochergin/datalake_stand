@@ -70,7 +70,7 @@ class TestConfiguration(unittest.TestCase):
 
     def test_invalid_nested_settings(self):
         invalid = [
-            {"spark": {"parallelism": 1}}, {"spark": {"parallelism": "false"}},
+            {"spark": {"jdbc_partitioning": 1}}, {"spark": {"jdbc_partitioning": "false"}},
             {"spark": {"other": True}}, {"spark": None},
             {"airflow": {"other": 1}}, {"airflow": {"pool": []}},
             {"airflow": {"pool": {"name": " "}}},
@@ -82,13 +82,18 @@ class TestConfiguration(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     load_pipeline(self.pipeline("pipeline.yaml", **config))
 
+    def test_old_parallelism_key_rejected_with_rename_hint(self):
+        path = self.pipeline("pipeline.yaml", spark={"parallelism": False})
+        with self.assertRaisesRegex(ValueError, "renamed to spark.jdbc_partitioning"):
+            load_pipeline(path)
+
     def test_settings_strict_and_propagated(self):
-        self.pipeline("pipelines/bank.yaml", spark={"parallelism": False})
+        self.pipeline("pipelines/bank.yaml", spark={"jdbc_partitioning": False})
         path = self.write("settings.yaml", {"spark": {"jdbc": {"num_partitions": 7}}})
         self.assertEqual(load_settings(path).num_partitions, 7)
         content = next(iter(generate_all(self.sources, self.root / "pipelines", path).values()))
         self.assertIn("num_partitions=7", content)
-        self.assertIn("parallelism=False", content)
+        self.assertIn("jdbc_partitioning=False", content)
         for value in (True, 0, -2, "4", None):
             self.write("settings.yaml", {"spark": {"jdbc": {"num_partitions": value}}})
             with self.subTest(value=value), self.assertRaises(ValueError):

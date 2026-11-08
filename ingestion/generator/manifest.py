@@ -9,6 +9,8 @@ _ALLOWED_SOURCE_KEYS = frozenset({"type", "airflow_conn_id"})
 _ALLOWED_PIPELINE_KEYS = frozenset({"source_id", "schedule", "catchup", "tags", "entities"})
 _ALLOWED_ENTITY_KEYS = frozenset({"fqn", "incremental", "spark", "airflow"})
 _COLUMN_PATTERN = re.compile(r"^[a-z_][a-z0-9_]*$")
+_CRON_FIELD_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+_CRON_FIELD_NAMES = ("minute", "hour", "day_of_month", "month", "day_of_week")
 
 
 @dataclass(frozen=True)
@@ -27,7 +29,7 @@ class EntityConfig:
     fqn: str
     target_table: str
     incremental_column: str | None
-    parallelism: bool = True
+    jdbc_partitioning: bool = True
     pool: str = "default_pool"
     pool_slots: int = 1
     lookback_size: int = 0
@@ -89,7 +91,74 @@ def load_settings(path) -> IngestionSettings:
     return IngestionSettings(_positive_integer(jdbc.get("num_partitions"), "num_partitions"))
 
 
-def _parse_entity(entity: dict, position: int) -> EntityConfig:
+def _expand_cron_field(field: str, low: int, high: int, label: str) -> set[int]:
+    """Expand one cron field into its set of integer values.
+
+    Only numeric standard tokens are accepted: '*', values, ranges, steps and
+    their comma-separated lists. A numeric base with a step (N/S) expands
+    from N to the field maximum with step S, matching cron semantics
+    ('0/15' minutes = 0,15,30,45). Month/day names, macros and wrap-around
+    ranges are rejected, keeping schedule classification static and free of
+    calendar arithmetic.
+    """
+    if not isinstance(field, str) or not field:
+        raise ValueError(f"schedule {label}: must be a non-empty string")
+    values: set[int] = set()
+    for part in field.split(","):
+        if not part:
+            raise ValueError(f"schedule {label}: empty list element")
+        base, slash, step_text = part.partition("/")
+        step = 1
+        if slash:
+            if not step_text.isdigit() or int(step_text) == 0:
+                raise ValueError(f"schedule {label}: invalid step in {part!r}")
+            step = int(step_text)
+        if base == "*":
+            start, stop = low, high
+        elif "-" in base:
+            start_text, _, stop_text = base.partition("-")
+            if not start_text.isdigit() or not stop_text.isdigit():
+                raise ValueError(f"schedule {label}: unsupported token {part!r}")
+            start, stop = int(start_text), int(stop_text)
+            if start > stop:
+                raise ValueError(f"schedule {label}: descending range in {part!r}")
+        elif base.isdigit():
+            start = int(base)
+            stop = high if slash else start
+        else:
+            raise ValueError(f"schedule {label}: unsupported token {part!r}")
+        if not low <= start <= high or not low <= stop <= high:
+            raise ValueError(f"schedule {label}: value out of range in {part!r}")
+        values.update(range(start, stop + 1, step))
+    return values
+
+
+def parse_schedule(schedule: str) -> tuple[set[int], set[int]]:
+    """Validate a strict five-field cron expression; return (minutes, hours)."""
+    fields = schedule.split()
+    if len(fields) != 5:
+        raise ValueError("schedule must be a standard five-field cron expression")
+    minutes = _expand_cron_field(fields[0], *_CRON_FIELD_RANGES[0], _CRON_FIELD_NAMES[0])
+    hours = _expand_cron_field(fields[1], *_CRON_FIELD_RANGES[1], _CRON_FIELD_NAMES[1])
+    for field, (low, high), label in zip(fields[2:], _CRON_FIELD_RANGES[2:], _CRON_FIELD_NAMES[2:]):
+        _expand_cron_field(field, low, high, label)
+    return minutes, hours
+
+
+def temporal_lookback_default(schedule: str | None) -> tuple[int, str]:
+    """Temporal lookback default derived statically from the DAG schedule.
+
+    The number of fires per day equals the product of distinct minute and
+    hour values; two or more mean 3 hours, otherwise (including no schedule)
+    3 days. This is a re-read volume policy, not an outage coverage promise.
+    """
+    if schedule is None:
+        return 3, "d"
+    minutes, hours = parse_schedule(schedule)
+    return (3, "h") if len(minutes) * len(hours) >= 2 else (3, "d")
+
+
+def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]) -> EntityConfig:
     """Parse and validate a single entity from a pipeline manifest.
 
     Args:
@@ -127,14 +196,21 @@ def _parse_entity(entity: dict, position: int) -> EntityConfig:
             if type(lookback_size) is not int or not 0 <= lookback_size < 10 ** 38:
                 raise ValueError("lookback.size must be a non-negative integer below 10^38")
             lookback_unit = lookback.get("unit")
-            if "unit" in lookback and lookback_unit not in ("h", "d"):
+            if lookback_size and "unit" in lookback and lookback_unit not in ("h", "d"):
                 raise ValueError("lookback.unit must be h or d")
+            if not lookback_size:
+                lookback_unit = None
             lookback_specified = True
+        else:
+            lookback_size, lookback_unit = temporal_default
 
-    spark = _strict_object(entity.get("spark", {}), {"parallelism"}, f"entity {fqn!r}.spark")
-    parallelism = spark.get("parallelism", True)
-    if type(parallelism) is not bool:
-        raise ValueError(f"entity {fqn!r}: spark.parallelism must be a boolean")
+    spark = entity.get("spark", {})
+    if isinstance(spark, dict) and "parallelism" in spark:
+        raise ValueError(f"entity {fqn!r}: spark.parallelism is renamed to spark.jdbc_partitioning")
+    spark = _strict_object(spark, {"jdbc_partitioning"}, f"entity {fqn!r}.spark")
+    jdbc_partitioning = spark.get("jdbc_partitioning", True)
+    if type(jdbc_partitioning) is not bool:
+        raise ValueError(f"entity {fqn!r}: spark.jdbc_partitioning must be a boolean")
 
     airflow = _strict_object(entity.get("airflow", {}), {"pool"}, f"entity {fqn!r}.airflow")
     pool = _strict_object(airflow.get("pool", {}), {"name", "slots"}, f"entity {fqn!r}.airflow.pool")
@@ -147,7 +223,7 @@ def _parse_entity(entity: dict, position: int) -> EntityConfig:
         fqn=fqn,
         target_table=naming.resolve_target_table_name(fqn),
         incremental_column=incremental_column,
-        parallelism=parallelism,
+        jdbc_partitioning=jdbc_partitioning,
         pool=pool_name,
         pool_slots=slots,
         lookback_size=lookback_size,
@@ -197,8 +273,11 @@ def load_pipeline(path) -> PipelineManifest:
     if not isinstance(source_id, str) or not source_id:
         raise ValueError("pipeline manifest: source_id must be a non-empty string")
     schedule = raw.get("schedule")
-    if schedule is not None and (not isinstance(schedule, str) or not schedule):
-        raise ValueError("pipeline manifest: schedule must be a non-empty string or null")
+    if schedule is not None:
+        if not isinstance(schedule, str) or not schedule:
+            raise ValueError("pipeline manifest: schedule must be a non-empty string or null")
+        parse_schedule(schedule)
+    temporal_default = temporal_lookback_default(schedule)
     catchup = raw.get("catchup", False)
     if not isinstance(catchup, bool):
         raise ValueError("pipeline manifest: catchup must be a boolean")
@@ -212,7 +291,7 @@ def load_pipeline(path) -> PipelineManifest:
     entities: list[EntityConfig] = []
     seen_fqns: set[str] = set()
     for position, entity_raw in enumerate(entities_raw):
-        entity = _parse_entity(entity_raw, position + 1)
+        entity = _parse_entity(entity_raw, position + 1, temporal_default)
         if entity.fqn in seen_fqns:
             raise ValueError(f"duplicate entity FQN: {entity.fqn!r}")
         seen_fqns.add(entity.fqn)

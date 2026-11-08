@@ -6,13 +6,13 @@ tags:
 entities:
   - fqn: trading_core.clients
     spark:
-      parallelism: false
+      jdbc_partitioning: false
     airflow:
       pool:
         name: ingest_loads
   - fqn: trading_core.accounts
     spark:
-      parallelism: false
+      jdbc_partitioning: false
     airflow:
       pool:
         name: ingest_loads

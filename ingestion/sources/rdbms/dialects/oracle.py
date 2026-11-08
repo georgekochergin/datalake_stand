@@ -64,6 +64,14 @@ class OracleDialect(RdbmsDialect):
         suffix = '"Z"' if family == "instant" else ""
         return f"TO_CHAR({value}, 'YYYY-MM-DD\"T\"HH24:MI:SS{fraction}{suffix}')"
 
+    def day_expression(self, reference: str) -> str:
+        """Render the julian calendar-day number of a temporal reference.
+
+        The explicit NUMBER(10,0) cast keeps the derivative an exact integer
+        on the Spark side: an unconstrained NUMBER maps to a scaled decimal.
+        """
+        return f"CAST(TO_NUMBER(TO_CHAR({reference}, 'J')) AS NUMBER(10,0))"
+
     def column_projection(self, type_name: str, reference: str) -> str | None:
         """Rewrite timezone types, unmappable by Spark JDBC, into UTC instants.
 

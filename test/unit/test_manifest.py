@@ -96,7 +96,7 @@ class TestLoadPipeline(unittest.TestCase):
     def test_valid_full_snapshot_pipeline(self):
         path = write_temp_yaml(
             "source_id: bank\n"
-            "schedule: \"@daily\"\n"
+            "schedule: \"0 2 * * *\"\n"
             "catchup: false\n"
             "tags:\n  - ingestion\n  - bank\n"
             "entities:\n"
@@ -106,13 +106,17 @@ class TestLoadPipeline(unittest.TestCase):
         )
         pipeline = manifest.load_pipeline(path)
         self.assertEqual(pipeline.source_id, "bank")
-        self.assertEqual(pipeline.schedule, "@daily")
+        self.assertEqual(pipeline.schedule, "0 2 * * *")
         self.assertFalse(pipeline.catchup)
         self.assertEqual(pipeline.tags, ("ingestion", "bank"))
         self.assertEqual(len(pipeline.entities), 2)
         self.assertEqual(pipeline.entities[0].target_table, "retail_bank__clients")
         self.assertIsNone(pipeline.entities[0].incremental_column)
         self.assertEqual(pipeline.entities[1].incremental_column, "transaction_id")
+        self.assertEqual(
+            (pipeline.entities[1].lookback_size, pipeline.entities[1].lookback_unit,
+             pipeline.entities[1].lookback_specified), (3, "d", False),
+        )
 
     @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
     def test_defaults(self):
@@ -229,6 +233,123 @@ class TestLoadPipeline(unittest.TestCase):
         with self.assertRaises(ValueError):
             manifest.load_pipeline(path)
 
+    @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
+    def test_schedule_must_be_standard_five_field_cron(self):
+        for schedule in (
+            "@daily", "@weekly", "*/30 * * *", "*/30 * * * * *", "0 2 * *",
+            "30 2 JAN * *", "0 2 * * MON", "every 5 minutes", "1 hours 2 * * *",
+            "60 * * * *", "* 24 * * *", "0 2 0 * *", "0 2 * * 8",
+            "50-10 * * * *", "*/0 * * * *", "5,,6 * * * *", "-5 * * * *",
+        ):
+            with self.subTest(schedule=schedule), self.assertRaises(ValueError):
+                manifest.load_pipeline(write_temp_yaml(
+                    f"source_id: bank\nschedule: {schedule!r}\nentities:\n  - fqn: retail_bank.clients\n"
+                ))
+
+    def test_valid_cron_tokens_accepted(self):
+        for schedule in ("*/30 * * * *", "0 2 * * *", "5,35 * * * *", "0 9-18 * * 1-5",
+                         "0 0 1 1 *", "0 2 * * 7", "0 2 */2 * *", "15,45 5,17 * * *",
+                         "0/15 2 * * *", "5/20 * * * *", "0 0/6 * * *"):
+            with self.subTest(schedule=schedule):
+                minutes, hours = manifest.parse_schedule(schedule)
+                if schedule == "*/30 * * * *":
+                    self.assertEqual(minutes, {0, 30})
+                if schedule == "15,45 5,17 * * *":
+                    self.assertEqual((minutes, hours), ({15, 45}, {5, 17}))
+                if schedule == "0 9-18 * * 1-5":
+                    self.assertEqual(hours, set(range(9, 19)))
+                if schedule == "0/15 2 * * *":
+                    self.assertEqual(minutes, {0, 15, 30, 45})
+                if schedule == "5/20 * * * *":
+                    self.assertEqual(minutes, {5, 25, 45})
+                if schedule == "0 0/6 * * *":
+                    self.assertEqual(hours, {0, 6, 12, 18})
+
+    def test_numeric_step_expands_to_field_end_like_cron(self):
+        for schedule, expected in (("0/15 2 * * *", (3, "h")), ("0 0/6 * * *", (3, "h")),
+                                   ("5/20 * * * *", (3, "h")), ("0 2 * * *", (3, "d"))):
+            with self.subTest(schedule=schedule):
+                self.assertEqual(manifest.temporal_lookback_default(schedule), expected)
+
+    def test_temporal_lookback_default_by_schedule(self):
+        cases = (
+            (None, (3, "d")),
+            ("0 2 * * *", (3, "d")),
+            ("0 2 * * 0", (3, "d")),
+            ("0 0 1 * *", (3, "d")),
+            ("*/30 * * * *", (3, "h")),
+            ("15,45 * * * *", (3, "h")),
+            ("0 */2 * * *", (3, "h")),
+            ("0 9-18 * * 1-5", (3, "h")),
+        )
+        for schedule, expected in cases:
+            with self.subTest(schedule=schedule):
+                self.assertEqual(manifest.temporal_lookback_default(schedule), expected)
+
+    @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
+    def test_lookback_default_baked_by_schedule(self):
+        for schedule, expected in (("*/15 * * * *", (3, "h")), ("0 2 * * *", (3, "d")), (None, (3, "d"))):
+            with self.subTest(schedule=schedule):
+                content = "source_id: bank\n"
+                if schedule:
+                    content += f"schedule: {schedule!r}\n"
+                content += ("entities:\n  - fqn: retail_bank.transactions\n"
+                            "    incremental: {source_column: updated_at}\n")
+                entity = manifest.load_pipeline(write_temp_yaml(content)).entities[0]
+                self.assertEqual(
+                    (entity.lookback_size, entity.lookback_unit, entity.lookback_specified),
+                    (expected[0], expected[1], False),
+                )
+
+    @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
+    def test_explicit_lookback_replaces_default_entirely(self):
+        entity = manifest.load_pipeline(write_temp_yaml(
+            "source_id: bank\nschedule: '*/15 * * * *'\nentities:\n"
+            "  - fqn: retail_bank.transactions\n"
+            "    incremental: {source_column: updated_at, lookback: {size: 1, unit: h}}\n"
+        )).entities[0]
+        self.assertEqual((entity.lookback_size, entity.lookback_unit, entity.lookback_specified),
+                         (1, "h", True))
+
+    @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
+    def test_lookback_size_zero_needs_no_unit(self):
+        entity = manifest.load_pipeline(write_temp_yaml(
+            "source_id: bank\nentities:\n"
+            "  - fqn: retail_bank.transactions\n"
+            "    incremental: {source_column: updated_at, lookback: {size: 0}}\n"
+        )).entities[0]
+        self.assertEqual((entity.lookback_size, entity.lookback_unit, entity.lookback_specified),
+                         (0, None, True))
+
+    @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
+    def test_lookback_size_zero_ignores_any_unit(self):
+        entity = manifest.load_pipeline(write_temp_yaml(
+            "source_id: bank\nentities:\n"
+            "  - fqn: retail_bank.transactions\n"
+            "    incremental: {source_column: updated_at, lookback: {size: 0, unit: nonsense}}\n"
+        )).entities[0]
+        self.assertEqual((entity.lookback_size, entity.lookback_unit), (0, None))
+
+    @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
+    def test_lookback_fractional_size_rejected(self):
+        path = write_temp_yaml(
+            "source_id: bank\nentities:\n"
+            "  - fqn: retail_bank.transactions\n"
+            "    incremental: {source_column: updated_at, lookback: {size: 0.33, unit: d}}\n"
+        )
+        with self.assertRaises(ValueError):
+            manifest.load_pipeline(path)
+
+    @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
+    def test_lookback_invalid_unit_rejected_at_nonzero_size(self):
+        path = write_temp_yaml(
+            "source_id: bank\nentities:\n"
+            "  - fqn: retail_bank.transactions\n"
+            "    incremental: {source_column: updated_at, lookback: {size: 1, unit: w}}\n"
+        )
+        with self.assertRaises(ValueError):
+            manifest.load_pipeline(path)
+
 
 @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
 class TestManifestShapeRejections(unittest.TestCase):
@@ -276,7 +397,7 @@ class TestValidatePipeline(unittest.TestCase):
         sources = {"bank": BANK_SOURCE}
         pipeline = manifest.PipelineManifest(
             source_id="bank",
-            schedule="@daily",
+            schedule="0 2 * * *",
             catchup=False,
             tags=("ingestion",),
             entities=(manifest.EntityConfig("retail_bank.clients", "retail_bank__clients", None),),

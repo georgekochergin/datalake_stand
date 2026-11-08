@@ -12,9 +12,9 @@ REQUIRED_OBJECTS = (
     "CREATE INDEX IF NOT EXISTS airflow_dagruns_log_process_id_idx",
     "CREATE TABLE IF NOT EXISTS ingestion.airflow_tasks_log",
     "CREATE INDEX IF NOT EXISTS airflow_tasks_log_run_idx",
-    "CREATE TABLE IF NOT EXISTS ingestion.extraction_state",
-    "CREATE TABLE IF NOT EXISTS ingestion.extraction_batches",
-    "CREATE TABLE IF NOT EXISTS ingestion.extraction_state_migrations",
+    "CREATE TABLE IF NOT EXISTS ingestion.incremental_state",
+    "CREATE TABLE IF NOT EXISTS ingestion.incremental_batches",
+    "CREATE TABLE IF NOT EXISTS ingestion.incremental_state_migrations",
 )
 
 
@@ -34,8 +34,18 @@ class TestPgMetaInitSql(unittest.TestCase):
         self.assertNotIn("DROP TABLE", sql.upper())
         self.assertNotIn("TRUNCATE ", sql.upper())
         self.assertNotIn("CREATE TABLE IF NOT EXISTS ingestion.table_watermarks", sql)
-        self.assertIn("UNIQUE (dag_id, run_id, source_id, entity_fqn)", sql)
+        self.assertIn("PRIMARY KEY (process_id, source_id, entity_fqn)", sql)
+        self.assertIn("lower_bound_op", sql)
         self.assertIn("DEFERRABLE INITIALLY DEFERRED", sql)
+        self.assertNotIn("last_error", sql)
+        self.assertNotIn("manual_full", sql)
+        self.assertNotIn("scheduled_full", sql)
+        self.assertNotIn("snapshot_published", sql)
+        self.assertNotIn("full_snapshot", sql)
+        self.assertNotIn("configured_mode", sql)
+        self.assertNotIn("extraction_state", sql)
+        self.assertNotIn("extraction_batches", sql)
+        self.assertNotIn("reason_text", sql.split("incremental_state_migrations")[0])
         self.assertNotIn("CREATE TRIGGER", sql.upper())
         self.assertNotIn("CREATE CONSTRAINT TRIGGER", sql.upper())
         self.assertNotIn("RETURNS TRIGGER", sql.upper())

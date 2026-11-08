@@ -13,7 +13,7 @@ entities:
         slots: 2
   - fqn: trading_core.deals
     spark:
-      parallelism: false
+      jdbc_partitioning: false
     airflow:
       pool:
         name: ingest_loads
