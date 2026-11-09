@@ -4,8 +4,9 @@ import sys
 import tempfile
 import types
 import unittest
+from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -126,6 +127,32 @@ class TestCurrentSnapshotAuthor(unittest.TestCase):
             with self.subTest(rows=rows):
                 spark = self.spark_with([True], rows)
                 self.assertIsNone(act_snap.current_snapshot_author(spark, "raw.bank.t"))
+
+
+class TestOverwriteSnapshot(unittest.TestCase):
+    """Namespace bootstrap and statement order of the atomic replace."""
+
+    def test_namespace_created_before_rtas(self):
+        spark = MagicMock()
+        functions = types.ModuleType("pyspark.sql.functions")
+        functions.lit = MagicMock()
+        root = types.ModuleType("pyspark")
+        sql = types.ModuleType("pyspark.sql")
+        sql.functions = functions
+        root.sql = sql
+        frame = MagicMock()
+        frame.schema.fields = []
+        frame.withColumn.return_value.withColumn.return_value = portion = MagicMock()
+        portion.columns = ["id", "__load_dttm", "__process_id"]
+        args = cli_args()
+        with patch.dict(sys.modules, {"pyspark": root, "pyspark.sql": sql,
+                                      "pyspark.sql.functions": functions}):
+            act_snap._overwrite_snapshot(spark, args, frame, datetime(2026, 1, 1))
+        executed = [call.args[0] for call in spark.sql.call_args_list]
+        self.assertEqual(executed[0], "CREATE NAMESPACE IF NOT EXISTS raw.bank")
+        self.assertTrue(executed[1].startswith("CREATE OR REPLACE TABLE raw.bank.s__t__act_snap"))
+        self.assertIn("'snapshot.process_id'='7'", executed[1])
+        portion.createOrReplaceTempView.assert_called_once_with("snapshot_source")
 
 
 class TestManagedSnapshot(unittest.TestCase):

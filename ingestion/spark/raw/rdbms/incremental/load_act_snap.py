@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ingestion.iceberg import (
+    CATALOG,
     METADATA_DTTM,
     METADATA_PID,
     SNAPSHOT_PROCESS_ID_PROPERTY,
@@ -92,6 +93,8 @@ def _overwrite_snapshot(spark, args, frame, load_dttm) -> None:
         METADATA_PID, F.lit(args.process_id).cast("long")
     )
     portion.createOrReplaceTempView(SNAPSHOT_SOURCE_VIEW)
+    namespace, _ = validate_target_table(args.target_table)
+    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{namespace}")
     spark.sql(build_rtas_sql(args.target_table, args.process_id, portion.columns))
 
 

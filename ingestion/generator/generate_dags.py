@@ -303,10 +303,13 @@ def generate_all(
             if target in targets:
                 raise ValueError(f"target collision {target}: {targets[target]} and {path}")
             targets[target] = path
-            snapshot_target = resolve_snapshot_fully_qualified(source.source_id, entity.fqn)
-            if snapshot_target in targets:
-                raise ValueError(f"target collision {snapshot_target}: {targets[snapshot_target]} and {path}")
-            targets[snapshot_target] = path
+            if entity.incremental_column:
+                snapshot_target = resolve_snapshot_fully_qualified(source.source_id, entity.fqn)
+                if snapshot_target in targets:
+                    raise ValueError(
+                        f"target collision {snapshot_target}: {targets[snapshot_target]} and {path}"
+                    )
+                targets[snapshot_target] = path
         generated[name] = generate_dag_source(source, pipeline, path.stem, settings.num_partitions)
         for entity in pipeline.entities:
             if not entity.incremental_column:

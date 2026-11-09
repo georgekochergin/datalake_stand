@@ -349,6 +349,43 @@ class TestGenerateAllValidation(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(ValueError, "no pipeline manifests"):
             generate_all(sources, Path(tmp))
 
+    def test_full_slice_entity_named_like_snapshot_table_is_allowed(self):
+        import yaml
+
+        from ingestion.generator.manifest import load_sources
+
+        repo_root = Path(__file__).resolve().parents[2]
+        sources = load_sources(repo_root / "ingestion" / "conf" / "sources.yaml")
+        document = {
+            "source_id": "bank",
+            "entities": [{"fqn": "s.t"}, {"fqn": "s.t__act_snap"}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "main.yaml"
+            path.write_text(yaml.safe_dump(document), encoding="utf-8")
+            generated = generate_all(sources, Path(tmp))
+        self.assertEqual(set(generated), {"ingest__rdbms__bank__main.py"})
+
+    def test_snapshot_collision_detected_when_full_slice_comes_first(self):
+        import yaml
+
+        from ingestion.generator.manifest import load_sources
+
+        repo_root = Path(__file__).resolve().parents[2]
+        sources = load_sources(repo_root / "ingestion" / "conf" / "sources.yaml")
+        document = {
+            "source_id": "bank",
+            "entities": [
+                {"fqn": "s.t__act_snap"},
+                {"fqn": "s.t", "incremental": {"source_column": "_batch_id"}},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "main.yaml"
+            path.write_text(yaml.safe_dump(document), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "target collision raw.bank.s__t__act_snap"):
+                generate_all(sources, Path(tmp))
+
     def test_snapshot_target_collision_rejected(self):
         import yaml
 

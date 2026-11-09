@@ -638,6 +638,26 @@ def main() -> None:
     broker_success = airflow_wait_run(token, "update_source_broker", run_id_broker, timeout=360, name="update_source_broker")
     check("update_source_broker completed successfully", broker_success, True)
 
+    print("\n==> Шаг 5а: Снимок банка до первой raw-загрузки (снимок сам создаёт namespace)...")
+    early_snap_dag = SNAPSHOT_DAGS[0]
+    registered = airflow_wait_dag_registered(token, early_snap_dag, timeout=240)
+    check("DAG %s registered before first ingest" % early_snap_dag, registered, True)
+    if registered:
+        early_run = "e2e-snap0-%s-%d" % (early_snap_dag, time.time())
+        code, _ = airflow_trigger_retry(token, early_snap_dag, early_run)
+        check("trigger %s (run 0)" % early_snap_dag, code, 200)
+        early_ok = airflow_wait_run(token, early_snap_dag, early_run, timeout=900, name=early_snap_dag + " snap 0")
+        if early_ok:
+            try:
+                table = "raw.bank.retail_bank__transactions__act_snap"
+                snap = trino_query(
+                    "SELECT count(*), count(DISTINCT __process_id) FROM %s" % table
+                )[0]
+                check(table + ": first snapshot publish on a fresh namespace", snap[0] > 0, True)
+                check(table + ": single portion", snap[1], 1)
+            except Exception as e:
+                check("snapshot table query (run 0)", str(e), "ok")
+
     print("\n==> Шаг 6: Регистрация и запуск DAG-ов ингестии (raw-слой), первая загрузка...")
     for dag_id in INGEST_DAGS:
         registered = airflow_wait_dag_registered(token, dag_id, timeout=240)
