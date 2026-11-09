@@ -81,13 +81,15 @@ class TestIngestOperator(unittest.TestCase):
         self.assertEqual(args[args.index("--num-partitions") + 1], "4")
         self.assertNotIn("--no-jdbc-partitioning", args)
         self.assertEqual(operator.source_type, "rdbms")
-        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/load_entity.py")
+        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/full/load_entity.py")
         self.assertEqual(operator.deploy_mode, "client")
         self.assertIn("jdbc:sqlserver://host:1433;databaseName=db;encrypt=false", args)
         operator = self.operator(jdbc_partitioning=False, num_partitions=7, incremental_column="_batch_id", lookback_size=5)
         operator.execute(self.context)
+        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/incremental/load_entity.py")
         self.assertIn("--no-jdbc-partitioning", operator.application_args)
-        self.assertEqual(operator.application_args[-2:], ["--incremental-column", "_batch_id"])
+        column = operator.application_args
+        self.assertEqual(column[column.index("--incremental-column") + 1], "_batch_id")
         self.assertIn("--lookback-size", operator.application_args)
         self.assertEqual(operator.application_args[operator.application_args.index("--lookback-size") + 1], "5")
         self.assertNotIn("--watermark-value", operator.application_args)
@@ -101,8 +103,8 @@ class TestIngestOperator(unittest.TestCase):
         self.assertIn("jdbc:oracle:thin:@//host:1521/db", operator.application_args)
 
     def test_run_identity_and_metadata_credentials_are_forwarded(self):
-        operator = self.operator(env_vars={"EXISTING": "kept"}, lookback_size=3, lookback_unit="h",
-                                 lookback_specified=True)
+        operator = self.operator(env_vars={"EXISTING": "kept"}, incremental_column="_batch_id",
+                                 lookback_size=3, lookback_unit="h", lookback_specified=True)
         operator.execute(self.context)
         args = operator.application_args
         for flag, value in (("--source-id", "bank"), ("--dag-id", "dag"), ("--run-id", "run"), ("--lookback-unit", "h")):
@@ -110,6 +112,14 @@ class TestIngestOperator(unittest.TestCase):
         self.assertIn("--lookback-given", args)
         self.assertEqual(operator.env_vars, {"EXISTING": "kept", "PGHOST": "pg", "PGPORT": "5432", "PGDATABASE": "metadata", "PGUSER": "writer", "PGPASSWORD": "pg-secret"})
         self.assertNotIn("pg-secret", args)
+
+    def test_full_slice_operator_omits_incremental_flags(self):
+        operator = self.operator(lookback_size=3, lookback_unit="h", lookback_specified=True)
+        operator.execute(self.context)
+        args = operator.application_args
+        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/full/load_entity.py")
+        for flag in ("--incremental-column", "--lookback-size", "--lookback-unit", "--lookback-given"):
+            self.assertNotIn(flag, args)
 
     def test_unspecified_lookback_omits_given_flag(self):
         for kwargs in ({}, {"lookback_size": 0}, {"lookback_size": 5}):
@@ -322,7 +332,7 @@ class TestIngestSnapshotOperator(unittest.TestCase):
 
     def test_application_path_and_arguments(self):
         operator = self.operator()
-        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/snapshot_entity.py")
+        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/incremental/load_act_snap.py")
         self.assertEqual(operator.deploy_mode, "client")
         with tempfile.TemporaryDirectory() as directory:
             operator.result_dir = directory

@@ -190,7 +190,7 @@ DAG ingest__rdbms__bank__main
     └── TaskGroup "ingest_group"                       (сущности параллельно)
         ├── TaskGroup "load_retail_bank__transactions" (одна сущность)
         │   ├── log_start   событие START в pg-meta
-        │   ├── load        IngestAppendOperator → ingestion/spark/raw/rdbms/load_entity.py
+        │   ├── load        IngestAppendOperator → spark/raw/rdbms/<поток>/load_entity.py
         │   ├── log_end     событие END в pg-meta
         │   └── publish_asset  публикация Asset после успешного log_end
         └── TaskGroup "load_retail_bank__deals" ...
@@ -229,7 +229,11 @@ watermark каждой сущности однозначен.
   `log_end`: загрузка завершилась и её успех записан в pg-meta. Ошибка или
   пропуск `log_end` не допускает публикацию.
 - **`load`** (`IngestAppendOperator`, наследник `SparkSubmitOperator`,
-  client-mode, job `ingestion/spark/raw/rdbms/load_entity.py`) — исполнитель загрузки. Во время
+  client-mode) — исполнитель загрузки. Приложение выбирается по типу
+  сущности: инкрементальная — `ingestion/spark/raw/rdbms/incremental/load_entity.py`
+  (окна с реестром pg-meta), полный срез — `ingestion/spark/raw/rdbms/full/load_entity.py`
+  (append без реестра); оба читают источник и пишут raw через общие модули
+  `reader.py` и `raw_append.py`. Во время
   исполнения проверяет `source_type="rdbms"`, выбирает JDBC-диалект по
   `conn_type`, получает Connection источника и `process_id` из XCom.
   Параметры чтения и реквизиты источника, **включая пароль**, передаются
@@ -258,7 +262,7 @@ DAG ingest__rdbms__bank__main__act_snap_<alias>
 └── activate_source       SydafaActivateOperator: поднять СУБД, TTL 15 минут
     └── TaskGroup "snap_retail_bank__transactions"
         ├── log_start      событие START в pg-meta
-        ├── load           IngestSnapshotOperator → ingestion/spark/raw/rdbms/snapshot_entity.py
+        ├── load           IngestSnapshotOperator → ingestion/spark/raw/rdbms/incremental/load_act_snap.py
         ├── log_end        событие END в pg-meta
         └── publish_asset  публикация Asset только если load действительно
                            перезаписал таблицу (иначе задача пропускается)
@@ -822,9 +826,12 @@ Lookback снижает риск пропуска поздних коммито�
 
 ### 7.2. Жизненный цикл загрузки
 
-Загрузкой управляет `managed_load()` в
-`ingestion/spark/raw/rdbms/load_entity.py`. Она вызывает `ingestion/meta.py`
-для коротких транзакций pg-meta и JDBC/Iceberg-функции для данных.
+Загрузкой инкрементального окна управляет `managed_load()` в
+`ingestion/spark/raw/rdbms/incremental/load_entity.py`. Она вызывает
+`ingestion/meta.py` для коротких транзакций pg-meta и общие модули
+`reader.py`/`raw_append.py` для JDBC-чтения и записи raw. Полный срез
+исполняет `full/load_entity.py` без обращений к реестру, снимочный поток —
+`incremental/load_act_snap.py` (раздел 7.7).
 **Партия** — одна загрузка одной сущности в одном исполнении DAG-а; ключ —
 `(process_id, source_id, entity_fqn)`, в raw партию отмечает `__process_id`.
 **Попытка** — исполнение этой партии: retry задач Airflow не создаёт новую
@@ -1533,10 +1540,15 @@ ingestion/
 ├── iceberg.py        (текущее: build_create_table_sql и schema_columns)
 ├── spark/
 │   ├── raw/
-│   │   ├── rdbms/
-│   │   │   └── load_entity.py
-│   │   └── kafka/     (будущее, при добавлении Kafka)
-│   │       └── load_entity.py
+│   │   └── rdbms/
+│   │       ├── reader.py            (общее JDBC-чтение кадра источника)
+│   │       ├── raw_append.py        (общий append порции в raw)
+│   │       ├── incremental/         (инкрементальные сущности)
+│   │       │   ├── load_entity.py   (окна инкремента, реестр pg-meta)
+│   │       │   └── load_act_snap.py (таблицы-снимки __act_snap)
+│   │       ├── full/                (сущности без инкремента)
+│   │       │   └── load_entity.py   (полный срез, append без реестра)
+│   │       └── kafka/               (будущее, при добавлении Kafka)
 │   └── ods/           (новое, при добавлении ODS)
 │       ├── __init__.py
 │       └── load_entity.py (idempotent merge по ключу/версии)
@@ -1547,10 +1559,13 @@ trino/
 
 **Слой Raw (текущее состояние):**
 - Каталог: `raw` в Iceberg
-- Режим: append-only (полный снапшот или инкремент)
+- Режим: append-only (полный срез или инкремент); снимочный поток —
+  атомарная перезапись таблиц `__act_snap` (раздел 7.7)
 - Гарантия: at-least-once; история прочитанных состояний, а не всех изменений источника
 - DAG-ов: автоматически генерируются генератором из манифестов
-- Spark-job: `ingestion/spark/raw/rdbms/load_entity.py` (и будущее `kafka/`)
+- Spark-job-ы: `ingestion/spark/raw/rdbms/incremental/load_entity.py`,
+  `.../full/load_entity.py` и `.../incremental/load_act_snap.py`
+  (общее чтение — `.../reader.py`; и будущее `kafka/`)
 
 **Слой ODS (планируется):**
 - Каталог: `ods` в Iceberg (отдельный каталог, не raw)

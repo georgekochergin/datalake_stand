@@ -5,7 +5,7 @@ import re
 CATALOG = "raw"
 METADATA_DTTM = "__load_dttm"
 METADATA_PID = "__process_id"
-SNAPSHOT_AUTHOR_PROPERTY = "snapshot.process_id"
+SNAPSHOT_PROCESS_ID_PROPERTY = "snapshot.process_id"
 
 IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 

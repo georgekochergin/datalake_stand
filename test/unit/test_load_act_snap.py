@@ -1,4 +1,4 @@
-"""Unit tests for the snapshot loader application."""
+"""Unit tests for the actual-snapshot loader (spark/raw/rdbms/incremental/load_act_snap.py)."""
 
 import sys
 import tempfile
@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from ingestion.spark.raw.rdbms import snapshot_entity
+from ingestion.spark.raw.rdbms.incremental import load_act_snap as act_snap
 
 
 def cli_args(**overrides):
@@ -39,11 +39,10 @@ class TestParseArgs(unittest.TestCase):
     ]
 
     def test_valid_defaults(self):
-        args = snapshot_entity.parse_args(self.BASE)
+        args = act_snap.parse_args(self.BASE)
         self.assertEqual(args.process_id, 7)
         self.assertEqual(args.num_partitions, 4)
         self.assertFalse(args.no_jdbc_partitioning)
-        self.assertIsNone(args.incremental_column)
 
     def test_process_id_and_partitions_validated(self):
         base = [
@@ -53,12 +52,12 @@ class TestParseArgs(unittest.TestCase):
         ]
         for extra in (["--process-id", "0"], ["--process-id", "-3"], ["--num-partitions", "0"]):
             with self.subTest(extra=extra), self.assertRaises(ValueError):
-                snapshot_entity.parse_args(base + extra)
+                act_snap.parse_args(base + extra)
 
     def test_result_marker_required(self):
         base = [value for value in self.BASE if value != "/tmp/m.json"]
         with self.assertRaises(SystemExit):
-            snapshot_entity.parse_args(base)
+            act_snap.parse_args(base)
 
 
 class TestMarker(unittest.TestCase):
@@ -67,13 +66,13 @@ class TestMarker(unittest.TestCase):
     def test_write_result_marker_payload(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "marker.json"
-            snapshot_entity.write_result_marker(str(path), True)
+            act_snap.write_result_marker(str(path), True)
             self.assertEqual(path.read_text(encoding="utf-8"), '{"overwritten": true}')
 
     def test_write_result_marker_false(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "marker.json"
-            snapshot_entity.write_result_marker(str(path), False)
+            act_snap.write_result_marker(str(path), False)
             self.assertEqual(path.read_text(encoding="utf-8"), '{"overwritten": false}')
 
 
@@ -81,7 +80,7 @@ class TestBuildRtasSql(unittest.TestCase):
     """The atomic replace statement."""
 
     def test_renders_property_location_and_quoted_columns(self):
-        statement = snapshot_entity.build_rtas_sql(
+        statement = act_snap.build_rtas_sql(
             "raw.bank.s__t__act_snap", 42, ["id", "weird name", "__load_dttm"]
         )
         self.assertEqual(
@@ -115,18 +114,18 @@ class TestCurrentSnapshotAuthor(unittest.TestCase):
 
     def test_missing_table_never_published(self):
         spark = self.spark_with([False], [])
-        self.assertIsNone(snapshot_entity.current_snapshot_author(spark, "raw.bank.t"))
+        self.assertIsNone(act_snap.current_snapshot_author(spark, "raw.bank.t"))
 
     def test_author_read_from_properties(self):
         rows = [{"key": "snapshot.process_id", "value": "77"}, {"key": "format", "value": "iceberg/parquet"}]
         spark = self.spark_with([True], rows)
-        self.assertEqual(snapshot_entity.current_snapshot_author(spark, "raw.bank.t"), 77)
+        self.assertEqual(act_snap.current_snapshot_author(spark, "raw.bank.t"), 77)
 
     def test_non_numeric_or_missing_property_is_none(self):
         for rows in ([], [{"key": "snapshot.process_id", "value": "soon"}]):
             with self.subTest(rows=rows):
                 spark = self.spark_with([True], rows)
-                self.assertIsNone(snapshot_entity.current_snapshot_author(spark, "raw.bank.t"))
+                self.assertIsNone(act_snap.current_snapshot_author(spark, "raw.bank.t"))
 
 
 class TestManagedSnapshot(unittest.TestCase):
@@ -140,43 +139,43 @@ class TestManagedSnapshot(unittest.TestCase):
 
     def test_retry_skips_read_when_already_published(self):
         spark = types.SimpleNamespace(catalog=FakeCatalog([True]))
-        with patch.object(snapshot_entity, "current_snapshot_author", return_value=7), \
-                patch.object(snapshot_entity, "_read_extract_frame") as read_frame, \
-                patch.object(snapshot_entity, "write_result_marker") as write_marker:
-            snapshot_entity.managed_snapshot(spark, self.args)
+        with patch.object(act_snap, "current_snapshot_author", return_value=7), \
+                patch.object(act_snap, "read_extract_frame") as read_frame, \
+                patch.object(act_snap, "write_result_marker") as write_marker:
+            act_snap.managed_snapshot(spark, self.args)
             read_frame.assert_not_called()
             write_marker.assert_called_once_with(self.args.result_marker, True)
 
     def test_empty_read_keeps_existing_table(self):
         spark = types.SimpleNamespace(catalog=FakeCatalog([True]))
         frame = types.SimpleNamespace(count=lambda: 0, unpersist=lambda: None)
-        with patch.object(snapshot_entity, "current_snapshot_author", return_value=None), \
-                patch.object(snapshot_entity, "_read_extract_frame", return_value=frame), \
-                patch.object(snapshot_entity, "_overwrite_snapshot") as overwrite, \
-                patch.object(snapshot_entity, "write_result_marker") as write_marker:
-            snapshot_entity.managed_snapshot(spark, self.args)
+        with patch.object(act_snap, "current_snapshot_author", return_value=None), \
+                patch.object(act_snap, "read_extract_frame", return_value=frame), \
+                patch.object(act_snap, "_overwrite_snapshot") as overwrite, \
+                patch.object(act_snap, "write_result_marker") as write_marker:
+            act_snap.managed_snapshot(spark, self.args)
             overwrite.assert_not_called()
             write_marker.assert_called_once_with(self.args.result_marker, False)
 
     def test_empty_read_publishes_missing_table(self):
         spark = types.SimpleNamespace(catalog=FakeCatalog([False]))
         frame = types.SimpleNamespace(count=lambda: 0, unpersist=lambda: None)
-        with patch.object(snapshot_entity, "current_snapshot_author", return_value=None), \
-                patch.object(snapshot_entity, "_read_extract_frame", return_value=frame), \
-                patch.object(snapshot_entity, "_overwrite_snapshot") as overwrite, \
-                patch.object(snapshot_entity, "write_result_marker") as write_marker:
-            snapshot_entity.managed_snapshot(spark, self.args)
+        with patch.object(act_snap, "current_snapshot_author", return_value=None), \
+                patch.object(act_snap, "read_extract_frame", return_value=frame), \
+                patch.object(act_snap, "_overwrite_snapshot") as overwrite, \
+                patch.object(act_snap, "write_result_marker") as write_marker:
+            act_snap.managed_snapshot(spark, self.args)
             overwrite.assert_called_once()
             write_marker.assert_called_once_with(self.args.result_marker, True)
 
     def test_non_empty_read_overwrites(self):
         spark = types.SimpleNamespace(catalog=FakeCatalog([False]))
         frame = types.SimpleNamespace(count=lambda: 5, unpersist=lambda: None)
-        with patch.object(snapshot_entity, "current_snapshot_author", return_value=None), \
-                patch.object(snapshot_entity, "_read_extract_frame", return_value=frame), \
-                patch.object(snapshot_entity, "_overwrite_snapshot") as overwrite, \
-                patch.object(snapshot_entity, "write_result_marker") as write_marker:
-            snapshot_entity.managed_snapshot(spark, self.args)
+        with patch.object(act_snap, "current_snapshot_author", return_value=None), \
+                patch.object(act_snap, "read_extract_frame", return_value=frame), \
+                patch.object(act_snap, "_overwrite_snapshot") as overwrite, \
+                patch.object(act_snap, "write_result_marker") as write_marker:
+            act_snap.managed_snapshot(spark, self.args)
             overwrite.assert_called_once()
             write_marker.assert_called_once_with(self.args.result_marker, True)
 

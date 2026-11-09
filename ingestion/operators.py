@@ -196,7 +196,7 @@ class IngestSnapshotOperator(SparkSubmitOperator):
         if type(num_partitions) is not int or num_partitions <= 0:
             raise ValueError("num_partitions must be a positive integer")
         super().__init__(
-            application="/opt/spark-jobs/raw/rdbms/snapshot_entity.py",
+            application="/opt/spark-jobs/raw/rdbms/incremental/load_act_snap.py",
             conn_id="spark_default",
             deploy_mode="client",
             **kwargs,
@@ -301,8 +301,13 @@ class IngestAppendOperator(SparkSubmitOperator):
             raise ValueError("jdbc_partitioning must be a boolean")
         if type(num_partitions) is not int or num_partitions <= 0:
             raise ValueError("num_partitions must be a positive integer")
+        application = (
+            "/opt/spark-jobs/raw/rdbms/incremental/load_entity.py"
+            if incremental_column
+            else "/opt/spark-jobs/raw/rdbms/full/load_entity.py"
+        )
         super().__init__(
-            application="/opt/spark-jobs/raw/rdbms/load_entity.py",
+            application=application,
             conn_id="spark_default",
             deploy_mode="client",
             **kwargs,
@@ -359,12 +364,13 @@ class IngestAppendOperator(SparkSubmitOperator):
         self.env_vars = dict(self.env_vars or {}, PGHOST=meta.host, PGPORT=str(meta.port or 5432),
                              PGDATABASE=meta.schema, PGUSER=meta.login, PGPASSWORD=meta.password)
         application_args += ["--source-id", self.source_id, "--dag-id", dag_run.dag_id,
-                             "--run-id", dag_run.run_id, "--lookback-size", str(self.lookback_size)]
-        if self.lookback_unit:
-            application_args += ["--lookback-unit", self.lookback_unit]
-        if self.lookback_specified:
-            application_args.append("--lookback-given")
+                             "--run-id", dag_run.run_id]
         if self.incremental_column:
-            application_args += ["--incremental-column", self.incremental_column]
+            application_args += ["--incremental-column", self.incremental_column,
+                                 "--lookback-size", str(self.lookback_size)]
+            if self.lookback_unit:
+                application_args += ["--lookback-unit", self.lookback_unit]
+            if self.lookback_specified:
+                application_args.append("--lookback-given")
         self.application_args = application_args
         super().execute(context)

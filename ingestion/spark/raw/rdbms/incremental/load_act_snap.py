@@ -20,12 +20,12 @@ from pathlib import Path
 from ingestion.iceberg import (
     METADATA_DTTM,
     METADATA_PID,
-    SNAPSHOT_AUTHOR_PROPERTY,
+    SNAPSHOT_PROCESS_ID_PROPERTY,
     quote_identifier,
     table_location,
     validate_target_table,
 )
-from ingestion.spark.raw.rdbms.load_entity import _read_extract_frame
+from ingestion.spark.raw.rdbms.reader import read_extract_frame
 
 SNAPSHOT_SOURCE_VIEW = "snapshot_source"
 LOGGER = logging.getLogger(__name__)
@@ -52,7 +52,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError(f"--num-partitions must be a positive integer (got {args.num_partitions})")
     if not args.result_marker:
         raise ValueError("--result-marker must be a non-empty path")
-    args.incremental_column = None
     return args
 
 
@@ -66,7 +65,7 @@ def current_snapshot_author(spark, target: str) -> int | None:
     if not spark.catalog.tableExists(target):
         return None
     properties = {row["key"]: row["value"] for row in spark.sql(f"SHOW TBLPROPERTIES {target}").collect()}
-    value = properties.get(SNAPSHOT_AUTHOR_PROPERTY)
+    value = properties.get(SNAPSHOT_PROCESS_ID_PROPERTY)
     if value is None or not value.isdigit():
         return None
     return int(value)
@@ -78,7 +77,7 @@ def build_rtas_sql(target: str, process_id: int, columns: list[str]) -> str:
     return (
         f"CREATE OR REPLACE TABLE {target} USING iceberg "
         f"LOCATION '{table_location(target)}' "
-        f"TBLPROPERTIES ('{SNAPSHOT_AUTHOR_PROPERTY}'='{process_id}') "
+        f"TBLPROPERTIES ('{SNAPSHOT_PROCESS_ID_PROPERTY}'='{process_id}') "
         f"AS SELECT {rendered} FROM {SNAPSHOT_SOURCE_VIEW}"
     )
 
@@ -113,7 +112,7 @@ def managed_snapshot(spark, args) -> None:
         )
         write_result_marker(args.result_marker, True)
         return
-    frame = _read_extract_frame(spark, args, None, None)
+    frame = read_extract_frame(spark, args, None, None)
     try:
         rows = frame.count()
         if rows == 0 and spark.catalog.tableExists(args.target_table):

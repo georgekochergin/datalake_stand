@@ -3,13 +3,17 @@
 Pure strategy over JDBC key metadata: no Spark imports and no SQL predicate
 construction — Spark's partitionColumn mode builds the range predicates
 itself. The module owns the four-step column heuristic, the calendar-day
-derivative of timestamp columns and its read alias; dialects own the SQL
-rendering rules, and jdbc.py owns the metadata access.
+derivative of timestamp columns, its read alias and the plan() composition
+of the decision for one read; dialects own the SQL rendering rules, and
+jdbc.py owns the metadata access.
 """
 
+import logging
 from dataclasses import dataclass
 
 from . import positions
+
+LOGGER = logging.getLogger(__name__)
 
 STEP_PRIMARY_KEY = "primary_key"
 STEP_UNIQUE_INTEGER = "unique_integer"
@@ -128,3 +132,38 @@ def choose(dialect, keys) -> PartitionChoice | None:
         if info is not None:
             return PartitionChoice(info.name, _position_kind(dialect, info), step, derived)
     return None
+
+
+def plan(dialect, keys, source_table):
+    """Compose the partitioning decision for one read over observed metadata.
+
+    Returns (partition, extra_select): partition is None when the heuristic
+    found no candidate (a warning names the table and lists the observed
+    metadata) or when a source column collides with the day alias (a
+    warning names the alias); the extra_select fragment carries the derived
+    day expression appended to the read query. The caller owns the
+    partitioning switch and the metadata access.
+    """
+    partition = choose(dialect, keys)
+    if partition is None:
+        if keys.columns:
+            LOGGER.warning(
+                "jdbc partitioning: no partition column found for %s; "
+                "single-threaded read; %s",
+                source_table, no_candidate_reason(dialect, keys),
+            )
+        return None, None
+    if not partition.derived:
+        return partition, None
+    if DAY_ALIAS in keys.columns:
+        LOGGER.warning(
+            "jdbc partitioning: source column %s collides with the day alias;"
+            " single-threaded read",
+            DAY_ALIAS,
+        )
+        return None, None
+    day_select = (
+        f", {day_expression(dialect, keys, partition)}"
+        f" AS {dialect.quote_identifier(DAY_ALIAS)}"
+    )
+    return partition, day_select

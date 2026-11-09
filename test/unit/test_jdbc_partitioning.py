@@ -244,5 +244,53 @@ class TestDayExpression(unittest.TestCase):
         self.assertEqual(jdbc_partitioning.partition_name(derived), jdbc_partitioning.DAY_ALIAS)
 
 
+class TestPlan(unittest.TestCase):
+    """Composition of the partitioning decision for one read."""
+
+    def setUp(self):
+        from ingestion.sources.rdbms import registry
+
+        self.dialect = registry.by_conn_type("mssql")
+        self.oracle = registry.by_conn_type("oracle")
+
+    def test_plain_column_has_no_extra_select(self):
+        metadata = keys(primary_key=["id"], columns=[("id", "int")])
+        partition, extra_select = jdbc_partitioning.plan(self.dialect, metadata, "s.t")
+        self.assertEqual((partition.column, partition.step), ("id", jdbc_partitioning.STEP_PRIMARY_KEY))
+        self.assertIsNone(extra_select)
+
+    def test_derived_day_appends_select_fragment(self):
+        metadata = keys(columns=[("updated_at", "TIMESTAMP(6)")])
+        partition, extra_select = jdbc_partitioning.plan(self.oracle, metadata, "s.t")
+        self.assertEqual(partition.step, jdbc_partitioning.STEP_TIMESTAMP_DAY)
+        self.assertIn("TO_NUMBER(TO_CHAR", extra_select)
+        self.assertIn(f'AS "{jdbc_partitioning.DAY_ALIAS}"', extra_select)
+
+    def test_no_candidate_warns_with_table_and_metadata(self):
+        metadata = keys(primary_key=["code", "num"], columns=[("code", "nvarchar"), ("num", "int")])
+        with self.assertLogs(jdbc_partitioning.LOGGER, level="WARNING") as logs:
+            partition, extra_select = jdbc_partitioning.plan(self.dialect, metadata, "retail_bank.clients")
+        self.assertIsNone(partition)
+        self.assertIsNone(extra_select)
+        self.assertTrue(any(
+            "no partition column found for retail_bank.clients" in line
+            and "code nvarchar unsupported" in line
+            for line in logs.output
+        ), logs.output)
+
+    def test_unavailable_metadata_is_silent(self):
+        with self.assertNoLogs(jdbc_partitioning.LOGGER, level="WARNING"):
+            partition, extra_select = jdbc_partitioning.plan(self.dialect, keys(), "s.t")
+        self.assertIsNone(partition)
+
+    def test_day_alias_collision_warns_and_disables(self):
+        metadata = keys(columns=[("updated_at", "TIMESTAMP(6)"), ("__jdbc_day", "NUMBER", 10, 0)])
+        with self.assertLogs(jdbc_partitioning.LOGGER, level="WARNING") as logs:
+            partition, extra_select = jdbc_partitioning.plan(self.oracle, metadata, "s.t")
+        self.assertIsNone(partition)
+        self.assertIsNone(extra_select)
+        self.assertTrue(any("collides with the day alias" in line for line in logs.output), logs.output)
+
+
 if __name__ == "__main__":
     unittest.main()
