@@ -1,7 +1,7 @@
 """Strict loading and validation of ingestion source and pipeline manifests."""
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ingestion.generator import naming
 
@@ -22,6 +22,37 @@ class SourceConfig:
     airflow_conn_id: str
 
 
+@dataclass(frozen=True, kw_only=True)
+class DagConfig:
+    """Common scheduling and labeling contract of generated DAGs."""
+
+    schedule: str | None = None
+    tags: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SparkConfig:
+    """JDBC reading options shared by entity and snapshot configuration."""
+
+    jdbc_partitioning: bool = True
+
+
+@dataclass(frozen=True)
+class AirflowConfig:
+    """Load-task resource options with project defaults."""
+
+    pool: str = "default_pool"
+    pool_slots: int = 1
+
+
+@dataclass(frozen=True, kw_only=True)
+class ActSnapConfig(DagConfig):
+    """Restricted snapshot DAG configuration without entity or incremental fields."""
+
+    spark: SparkConfig = field(default_factory=SparkConfig)
+    airflow: AirflowConfig = field(default_factory=AirflowConfig)
+
+
 @dataclass(frozen=True)
 class EntityConfig:
     """Configuration of a single loaded entity inside a pipeline."""
@@ -35,9 +66,7 @@ class EntityConfig:
     lookback_size: int = 0
     lookback_unit: str | None = None
     lookback_specified: bool = False
-    snapshot_schedule: str | None = None
-    snapshot_pool: str | None = None
-    snapshot_pool_slots: int | None = None
+    act_snap: ActSnapConfig = field(default_factory=ActSnapConfig)
 
 
 @dataclass(frozen=True)
@@ -48,13 +77,11 @@ class IngestionSettings:
 
 
 @dataclass(frozen=True)
-class PipelineManifest:
+class PipelineManifest(DagConfig):
     """Parsed pipeline manifest: one YAML file defines one DAG."""
 
     source_id: str
-    schedule: str | None
     catchup: bool
-    tags: tuple[str, ...]
     entities: tuple[EntityConfig, ...]
 
 
@@ -161,6 +188,43 @@ def temporal_lookback_default(schedule: str | None) -> tuple[int, str]:
     return (3, "h") if len(minutes) * len(hours) >= 2 else (3, "d")
 
 
+def _parse_dag_fields(raw: dict, label: str) -> dict:
+    """Validate common DAG fields without widening either YAML allowlist."""
+    schedule = raw.get("schedule")
+    if schedule is not None:
+        if not isinstance(schedule, str) or not schedule:
+            raise ValueError(f"{label}: schedule must be a non-empty string or null")
+        parse_schedule(schedule)
+    tags = raw.get("tags", [])
+    if not isinstance(tags, list) or any(not isinstance(tag, str) or not tag for tag in tags):
+        raise ValueError(f"{label}: tags must be a list of non-empty strings")
+    return {"schedule": schedule, "tags": tuple(tags)}
+
+
+def _parse_load_options(raw: dict, label: str) -> tuple[SparkConfig, AirflowConfig]:
+    """Parse the same nested YAML paths for entity and snapshot load settings."""
+    spark = _strict_object(raw.get("spark", {}), {"jdbc_partitioning"}, f"{label}.spark")
+    partitioning = spark.get("jdbc_partitioning", True)
+    if type(partitioning) is not bool:
+        raise ValueError(f"{label}: spark.jdbc_partitioning must be a boolean")
+    airflow = _strict_object(raw.get("airflow", {}), {"pool"}, f"{label}.airflow")
+    pool = _strict_object(airflow.get("pool", {}), {"name", "slots"}, f"{label}.airflow.pool")
+    name = pool.get("name", "default_pool")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"{label}: pool.name must be a non-empty string")
+    return SparkConfig(partitioning), AirflowConfig(
+        name, _positive_integer(pool.get("slots", 1), f"{label}.airflow.pool.slots")
+    )
+
+
+def _parse_act_snap(raw) -> ActSnapConfig:
+    """Parse an independent snapshot DAG contract, rejecting unsupported fields."""
+    label = "incremental.act_snap"
+    raw = _strict_object(raw, {"schedule", "tags", "spark", "airflow"}, label)
+    spark, airflow = _parse_load_options(raw, label)
+    return ActSnapConfig(**_parse_dag_fields(raw, label), spark=spark, airflow=airflow)
+
+
 def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]) -> EntityConfig:
     """Parse and validate a single entity from a pipeline manifest.
 
@@ -176,9 +240,9 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
     """
     if not isinstance(entity, dict):
         raise ValueError(f"entity #{position}: must be a mapping")
-    if "full_snapshot" in entity and "incremental" not in entity:
+    if "act_snap" in entity and "incremental" not in entity:
         raise ValueError(
-            f"entity #{position}: full_snapshot is configured inside the incremental block; "
+            f"entity #{position}: act_snap is configured inside the incremental block; "
             "the entity has no incremental block"
         )
     unknown = set(entity) - _ALLOWED_ENTITY_KEYS
@@ -193,11 +257,9 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
     lookback_size = 0
     lookback_unit = None
     lookback_specified = False
-    snapshot_schedule = None
-    snapshot_pool = None
-    snapshot_pool_slots = None
+    act_snap = ActSnapConfig()
     if "incremental" in entity:
-        incremental = _strict_object(entity["incremental"], {"source_column", "lookback", "full_snapshot"}, "incremental")
+        incremental = _strict_object(entity["incremental"], {"source_column", "lookback", "act_snap"}, "incremental")
         incremental_column = incremental.get("source_column")
         if not isinstance(incremental_column, str) or not _COLUMN_PATTERN.fullmatch(incremental_column):
             raise ValueError("incremental.source_column must be a lowercase identifier")
@@ -214,54 +276,25 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
             lookback_specified = True
         else:
             lookback_size, lookback_unit = temporal_default
-        if "full_snapshot" in incremental:
-            full_snapshot = _strict_object(
-                incremental["full_snapshot"], {"schedule", "pool"}, "incremental.full_snapshot"
-            )
-            snapshot_schedule = full_snapshot.get("schedule")
-            if snapshot_schedule is not None:
-                if not isinstance(snapshot_schedule, str) or not snapshot_schedule:
-                    raise ValueError("incremental.full_snapshot.schedule must be a non-empty string or null")
-                parse_schedule(snapshot_schedule)
-            snapshot_pool_block = _strict_object(
-                full_snapshot.get("pool", {}), {"name", "slots"}, "incremental.full_snapshot.pool"
-            )
-            if snapshot_pool_block:
-                snapshot_pool = snapshot_pool_block.get("name")
-                if not isinstance(snapshot_pool, str) or not snapshot_pool.strip():
-                    raise ValueError("incremental.full_snapshot.pool.name must be a non-empty string")
-                snapshot_pool_slots = _positive_integer(
-                    snapshot_pool_block.get("slots", 1), "full_snapshot.pool.slots"
-                )
+        if "act_snap" in incremental:
+            act_snap = _parse_act_snap(incremental["act_snap"])
 
     spark = entity.get("spark", {})
     if isinstance(spark, dict) and "parallelism" in spark:
         raise ValueError(f"entity {fqn!r}: spark.parallelism is renamed to spark.jdbc_partitioning")
-    spark = _strict_object(spark, {"jdbc_partitioning"}, f"entity {fqn!r}.spark")
-    jdbc_partitioning = spark.get("jdbc_partitioning", True)
-    if type(jdbc_partitioning) is not bool:
-        raise ValueError(f"entity {fqn!r}: spark.jdbc_partitioning must be a boolean")
-
-    airflow = _strict_object(entity.get("airflow", {}), {"pool"}, f"entity {fqn!r}.airflow")
-    pool = _strict_object(airflow.get("pool", {}), {"name", "slots"}, f"entity {fqn!r}.airflow.pool")
-    pool_name = pool.get("name", "default_pool")
-    if not isinstance(pool_name, str) or not pool_name.strip():
-        raise ValueError(f"entity {fqn!r}: pool.name must be a non-empty string")
-    slots = _positive_integer(pool.get("slots", 1), "pool.slots")
+    spark_config, airflow_config = _parse_load_options(entity, f"entity {fqn!r}")
 
     return EntityConfig(
         fqn=fqn,
         target_table=naming.resolve_target_table_name(fqn),
         incremental_column=incremental_column,
-        jdbc_partitioning=jdbc_partitioning,
-        pool=pool_name,
-        pool_slots=slots,
+        jdbc_partitioning=spark_config.jdbc_partitioning,
+        pool=airflow_config.pool,
+        pool_slots=airflow_config.pool_slots,
         lookback_size=lookback_size,
         lookback_unit=lookback_unit,
         lookback_specified=lookback_specified,
-        snapshot_schedule=snapshot_schedule,
-        snapshot_pool=snapshot_pool,
-        snapshot_pool_slots=snapshot_pool_slots,
+        act_snap=act_snap,
     )
 
 
@@ -305,18 +338,11 @@ def load_pipeline(path) -> PipelineManifest:
     source_id = raw.get("source_id")
     if not isinstance(source_id, str) or not source_id:
         raise ValueError("pipeline manifest: source_id must be a non-empty string")
-    schedule = raw.get("schedule")
-    if schedule is not None:
-        if not isinstance(schedule, str) or not schedule:
-            raise ValueError("pipeline manifest: schedule must be a non-empty string or null")
-        parse_schedule(schedule)
-    temporal_default = temporal_lookback_default(schedule)
+    dag_fields = _parse_dag_fields(raw, "pipeline manifest")
+    temporal_default = temporal_lookback_default(dag_fields["schedule"])
     catchup = raw.get("catchup", False)
     if not isinstance(catchup, bool):
         raise ValueError("pipeline manifest: catchup must be a boolean")
-    tags = raw.get("tags", [])
-    if not isinstance(tags, list) or any(not isinstance(tag, str) or not tag for tag in tags):
-        raise ValueError("pipeline manifest: tags must be a list of non-empty strings")
     entities_raw = raw.get("entities")
     if not isinstance(entities_raw, list) or not entities_raw:
         raise ValueError("pipeline manifest: entities must be a non-empty list")
@@ -333,9 +359,8 @@ def load_pipeline(path) -> PipelineManifest:
     naming.assert_unique_targets([entity.fqn for entity in entities])
     return PipelineManifest(
         source_id=source_id,
-        schedule=schedule,
+        **dag_fields,
         catchup=catchup,
-        tags=tuple(tags),
         entities=tuple(entities),
     )
 

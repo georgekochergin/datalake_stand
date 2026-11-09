@@ -17,7 +17,7 @@ from ingestion.generator.generate_dags import (
     snapshot_asset_uri,
     snapshot_dag_id,
 )
-from ingestion.generator.manifest import EntityConfig, PipelineManifest, SourceConfig
+from ingestion.generator.manifest import ActSnapConfig, AirflowConfig, SparkConfig, EntityConfig, PipelineManifest, SourceConfig
 from ingestion.generator.naming import snapshot_alias
 
 BANK = SourceConfig(source_id="bank", type="rdbms", airflow_conn_id="bank_source")
@@ -75,7 +75,7 @@ class TestGenerateDagSource(unittest.TestCase):
         publishers = [node for node in calls if any(keyword.arg == "outlets" for keyword in node.keywords)]
         self.assertEqual(len(publishers), 2)
         for node in publishers:
-            self.assertEqual(node.func.id, "EmptyOperator")
+            self.assertEqual(node.func.id, "PythonOperator")
             keywords = {keyword.arg: keyword.value for keyword in node.keywords}
             self.assertEqual(ast.literal_eval(keywords["task_id"]), "publish_asset")
             self.assertNotIn("trigger_rule", keywords)
@@ -139,11 +139,11 @@ class TestAssetUri(unittest.TestCase):
     def test_snapshot_plain(self):
         self.assertEqual(
             snapshot_asset_uri("bank", "retail_bank.transactions"),
-            "raw://bank/retail_bank.transactions__act_snap",
+            "raw://bank/retail_bank.transactions/act_snap",
         )
 
     def test_snapshot_quoted_fqn_percent_encoded(self):
-        self.assertEqual(snapshot_asset_uri("x", '"a.b"'), "raw://x/%22a.b%22__act_snap")
+        self.assertEqual(snapshot_asset_uri("x", '"a.b"'), "raw://x/%22a.b%22/act_snap")
 
 
 SNAPSHOT_PIPELINE = PipelineManifest(
@@ -174,7 +174,7 @@ class TestGenerateSnapshotDagSource(unittest.TestCase):
         self.assertIn("catchup=False", self.source)
         self.assertIn("max_active_runs=1", self.source)
         self.assertIn(
-            "tags=['act_snap', 'bank', 'retail_bank__transactions', 'ingestion', 'bank']", self.source
+            "tags=['act_snap', 'bank', 'retail_bank__transactions']", self.source
         )
         self.assertIn(
             "description='Actual snapshot for source bank entity retail_bank.transactions (generated)'",
@@ -184,10 +184,11 @@ class TestGenerateSnapshotDagSource(unittest.TestCase):
     def test_schedule_literal_rendered(self):
         entity = EntityConfig(
             "retail_bank.transactions", "retail_bank__transactions", "_batch_id",
-            snapshot_schedule="30 2 * * *",
+            act_snap=ActSnapConfig(schedule="30 2 * * *", tags=("nightly",)),
         )
         rendered = generate_snapshot_dag_source(BANK, SNAPSHOT_PIPELINE, entity, "main")
         self.assertIn("schedule='30 2 * * *'", rendered)
+        self.assertIn("'nightly'", rendered)
 
     def test_pipeline_suffix_dropped_for_default_name(self):
         rendered = generate_snapshot_dag_source(BANK, SNAPSHOT_PIPELINE, SNAPSHOT_PIPELINE.entities[0], "bank")
@@ -195,25 +196,28 @@ class TestGenerateSnapshotDagSource(unittest.TestCase):
 
     def test_task_group_and_operators(self):
         self.assertIn('group_id="snap_retail_bank__transactions"', self.source)
-        self.assertIn('IngestSnapshotOperator(', self.source)
+        self.assertIn('IngestActSnapOperator(', self.source)
         self.assertIn('datalake_table="raw.bank.retail_bank__transactions__act_snap"', self.source)
         self.assertIn('target_table="raw.bank.retail_bank__transactions__act_snap"', self.source)
         self.assertIn("generate_process_id >> activate_source >> snap_group", self.source)
 
-    def test_pool_inherited_from_entity_load(self):
-        self.assertIn('pool="ingest_loads"', self.source)
-        self.assertIn("pool_slots=2", self.source)
+    def test_pool_has_independent_defaults(self):
+        self.assertIn('pool="default_pool"', self.source)
+        self.assertIn("pool_slots=1", self.source)
 
     def test_pool_override(self):
         entity = EntityConfig(
             "retail_bank.transactions", "retail_bank__transactions", "_batch_id",
             pool="ingest_loads", pool_slots=2,
-            snapshot_pool="snapshot_loads", snapshot_pool_slots=1,
+            jdbc_partitioning=True,
+            act_snap=ActSnapConfig(airflow=AirflowConfig("snapshot_loads", 1),
+                                   spark=SparkConfig(False)),
         )
         rendered = generate_snapshot_dag_source(BANK, SNAPSHOT_PIPELINE, entity, "main")
         self.assertEqual(rendered.count('pool="snapshot_loads"'), 1)
         self.assertIn("pool_slots=1", rendered)
         self.assertNotIn('pool="ingest_loads"', rendered)
+        self.assertIn("jdbc_partitioning=False", rendered)
 
     def test_asset_published_only_by_conditional_task(self):
         import ast
@@ -222,10 +226,11 @@ class TestGenerateSnapshotDagSource(unittest.TestCase):
         publishers = [node for node in calls if any(keyword.arg == "outlets" for keyword in node.keywords)]
         self.assertEqual(len(publishers), 1)
         node = publishers[0]
-        self.assertEqual(node.func.id, "PublishSnapshotAssetOperator")
+        self.assertEqual(node.func.id, "PythonOperator")
         keywords = {keyword.arg: keyword.value for keyword in node.keywords}
-        self.assertEqual(ast.literal_eval(keywords["load_task_id"]), "snap_retail_bank__transactions.load")
-        self.assertIn('Asset("raw://bank/retail_bank.transactions__act_snap")', self.source)
+        self.assertEqual(ast.literal_eval(keywords["op_kwargs"]), {"target_table": "raw.bank.retail_bank__transactions__act_snap"})
+        self.assertEqual(keywords["python_callable"].id, "publish_asset_event")
+        self.assertIn('Asset("raw://bank/retail_bank.transactions/act_snap")', self.source)
 
     def test_logging_chain(self):
         self.assertEqual(self.source.count("log_start >> load >> log_end >> publish_asset"), 1)
@@ -288,9 +293,9 @@ class TestGenerateAll(unittest.TestCase):
     def test_demonstration_weights_and_partitioning(self):
         for name, content in self.generated.items():
             if "__act_snap_" in name:
-                self.assertEqual(content.count('pool="ingest_loads"'), 1)
+                self.assertEqual(content.count('pool="default_pool"'), 1)
                 self.assertEqual(content.count("jdbc_partitioning=False"), 0)
-                self.assertEqual(content.count("pool_slots=2"), 1)
+                self.assertEqual(content.count("pool_slots=1"), 1)
             elif "__main" in name:
                 self.assertEqual(content.count('pool="ingest_loads"'), 2)
                 self.assertEqual(content.count("jdbc_partitioning=False"), 1)

@@ -1,7 +1,6 @@
 """Unit tests for the actual-snapshot loader (spark/raw/rdbms/incremental/load_act_snap.py)."""
 
 import sys
-import tempfile
 import types
 import unittest
 from datetime import datetime
@@ -24,7 +23,6 @@ def cli_args(**overrides):
         "process_id": 7,
         "num_partitions": 4,
         "no_jdbc_partitioning": False,
-        "result_marker": "/tmp/marker.json",
     }
     values.update(overrides)
     return types.SimpleNamespace(**values)
@@ -36,7 +34,7 @@ class TestParseArgs(unittest.TestCase):
     BASE = [
         "--jdbc-url", "jdbc:u", "--jdbc-user", "u", "--jdbc-password", "p",
         "--source-table", "s.t", "--target-table", "raw.bank.s__t__act_snap",
-        "--process-id", "7", "--result-marker", "/tmp/m.json",
+        "--process-id", "7",
     ]
 
     def test_valid_defaults(self):
@@ -49,32 +47,15 @@ class TestParseArgs(unittest.TestCase):
         base = [
             "--jdbc-url", "jdbc:u", "--jdbc-user", "u", "--jdbc-password", "p",
             "--source-table", "s.t", "--target-table", "raw.bank.s__t__act_snap",
-            "--process-id", "7", "--result-marker", "/tmp/m.json",
+            "--process-id", "7",
         ]
         for extra in (["--process-id", "0"], ["--process-id", "-3"], ["--num-partitions", "0"]):
             with self.subTest(extra=extra), self.assertRaises(ValueError):
                 act_snap.parse_args(base + extra)
 
-    def test_result_marker_required(self):
-        base = [value for value in self.BASE if value != "/tmp/m.json"]
+    def test_result_marker_rejected(self):
         with self.assertRaises(SystemExit):
-            act_snap.parse_args(base)
-
-
-class TestMarker(unittest.TestCase):
-    """The driver-side result marker."""
-
-    def test_write_result_marker_payload(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "marker.json"
-            act_snap.write_result_marker(str(path), True)
-            self.assertEqual(path.read_text(encoding="utf-8"), '{"overwritten": true}')
-
-    def test_write_result_marker_false(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "marker.json"
-            act_snap.write_result_marker(str(path), False)
-            self.assertEqual(path.read_text(encoding="utf-8"), '{"overwritten": false}')
+            act_snap.parse_args(self.BASE + ["--result-marker", "/tmp/m.json"])
 
 
 class TestBuildRtasSql(unittest.TestCase):
@@ -159,52 +140,41 @@ class TestManagedSnapshot(unittest.TestCase):
     """Decision tree of the snapshot execution."""
 
     def setUp(self):
-        self.marker = tempfile.NamedTemporaryFile(delete=False)
-        self.marker.close()
-        self.addCleanup(Path(self.marker.name).unlink)
-        self.args = cli_args(result_marker=self.marker.name)
+        self.args = cli_args()
 
     def test_retry_skips_read_when_already_published(self):
         spark = types.SimpleNamespace(catalog=FakeCatalog([True]))
         with patch.object(act_snap, "current_snapshot_author", return_value=7), \
-                patch.object(act_snap, "read_extract_frame") as read_frame, \
-                patch.object(act_snap, "write_result_marker") as write_marker:
+                patch.object(act_snap, "read_extract_frame") as read_frame:
             act_snap.managed_snapshot(spark, self.args)
             read_frame.assert_not_called()
-            write_marker.assert_called_once_with(self.args.result_marker, True)
 
     def test_empty_read_keeps_existing_table(self):
         spark = types.SimpleNamespace(catalog=FakeCatalog([True]))
         frame = types.SimpleNamespace(count=lambda: 0, unpersist=lambda: None)
         with patch.object(act_snap, "current_snapshot_author", return_value=None), \
                 patch.object(act_snap, "read_extract_frame", return_value=frame), \
-                patch.object(act_snap, "_overwrite_snapshot") as overwrite, \
-                patch.object(act_snap, "write_result_marker") as write_marker:
+                patch.object(act_snap, "_overwrite_snapshot") as overwrite:
             act_snap.managed_snapshot(spark, self.args)
             overwrite.assert_not_called()
-            write_marker.assert_called_once_with(self.args.result_marker, False)
 
     def test_empty_read_publishes_missing_table(self):
         spark = types.SimpleNamespace(catalog=FakeCatalog([False]))
         frame = types.SimpleNamespace(count=lambda: 0, unpersist=lambda: None)
         with patch.object(act_snap, "current_snapshot_author", return_value=None), \
                 patch.object(act_snap, "read_extract_frame", return_value=frame), \
-                patch.object(act_snap, "_overwrite_snapshot") as overwrite, \
-                patch.object(act_snap, "write_result_marker") as write_marker:
+                patch.object(act_snap, "_overwrite_snapshot") as overwrite:
             act_snap.managed_snapshot(spark, self.args)
             overwrite.assert_called_once()
-            write_marker.assert_called_once_with(self.args.result_marker, True)
 
     def test_non_empty_read_overwrites(self):
         spark = types.SimpleNamespace(catalog=FakeCatalog([False]))
         frame = types.SimpleNamespace(count=lambda: 5, unpersist=lambda: None)
         with patch.object(act_snap, "current_snapshot_author", return_value=None), \
                 patch.object(act_snap, "read_extract_frame", return_value=frame), \
-                patch.object(act_snap, "_overwrite_snapshot") as overwrite, \
-                patch.object(act_snap, "write_result_marker") as write_marker:
+                patch.object(act_snap, "_overwrite_snapshot") as overwrite:
             act_snap.managed_snapshot(spark, self.args)
             overwrite.assert_called_once()
-            write_marker.assert_called_once_with(self.args.result_marker, True)
 
 
 if __name__ == "__main__":

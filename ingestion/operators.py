@@ -1,14 +1,13 @@
 """Airflow operators for the raw-layer ingestion framework."""
 
-import json
 from functools import partial
-from pathlib import Path
 
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 from airflow.sdk import BaseHook, BaseOperator
 from airflow.sdk.exceptions import AirflowSkipException
 
 from ingestion import meta
+from ingestion.iceberg import validate_target_table
 from ingestion.sources.rdbms import registry as rdbms_registry
 from ingestion.sources.rdbms.contracts import ConnectionSpec
 
@@ -151,30 +150,34 @@ class TableLogOperator(BaseOperator):
         )
 
 
-def read_snapshot_marker(path: str) -> bool:
-    """Read the snapshot driver's result marker and return the overwritten flag.
+def snapshot_has_current_process(target_table: str, process_id: int) -> bool:
+    """Check one row of an atomic single-process snapshot; propagate read failures."""
+    from airflow.providers.trino.hooks.trino import TrinoHook
 
-    The marker is written by the Spark driver in client mode, which shares the
-    filesystem with this operator. A missing or malformed marker after a
-    successful submission is a contract violation: the task fails and the
-    retry re-checks publication through the table property.
-    """
-    try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        raise ValueError(f"snapshot result marker {path!r} is missing or malformed: {error}") from error
-    if not isinstance(payload, dict) or type(payload.get("overwritten")) is not bool:
-        raise ValueError(f"snapshot result marker {path!r} must contain the boolean 'overwritten'")
-    return payload["overwritten"]
+    validate_target_table(target_table)
+    row = TrinoHook(trino_conn_id="trino_default").get_first(
+        f"SELECT __process_id FROM {target_table} LIMIT 1"
+    )
+    return bool(row) and row[0] == process_id
 
 
-class IngestSnapshotOperator(SparkSubmitOperator):
+def publish_asset_event(target_table: str | None = None, **context) -> None:
+    """Publish unconditionally for raw loads, or only for this process's nonempty snapshot."""
+    if target_table is None:
+        return
+    process_id = _pull_process_id(context)
+    if process_id is None:
+        raise ValueError("missing process_id from generate_process_id")
+    if not snapshot_has_current_process(target_table, process_id):
+        raise AirflowSkipException("current process has no published snapshot rows")
+
+
+class IngestActSnapOperator(SparkSubmitOperator):
     """Submit the actual-snapshot job for one entity with resolved runtime parameters.
 
     The snapshot stream runs outside the incremental registry: no batch is
     planned or finalized in pg-meta, so no pg-meta environment is passed to
-    the application. The job reports whether it actually replaced the table
-    through a result marker read after the submission.
+    the application. Asset publication independently checks the committed table.
     """
 
     def __init__(
@@ -186,7 +189,6 @@ class IngestSnapshotOperator(SparkSubmitOperator):
         source_type: str = "rdbms",
         jdbc_partitioning: bool = True,
         num_partitions: int = 4,
-        result_dir: str = "/tmp",
         **kwargs,
     ):
         if not isinstance(source_type, str):
@@ -208,7 +210,6 @@ class IngestSnapshotOperator(SparkSubmitOperator):
         self.source_type = source_type
         self.jdbc_partitioning = jdbc_partitioning
         self.num_partitions = num_partitions
-        self.result_dir = result_dir
         if self.on_failure_callback is None:
             self.on_failure_callback = partial(
                 log_task_failed,
@@ -225,7 +226,6 @@ class IngestSnapshotOperator(SparkSubmitOperator):
         process_id = _pull_process_id(context)
         if process_id is None:
             raise ValueError("missing process_id from generate_process_id")
-        marker_path = f"{self.result_dir}/snapshot_result_{process_id}.json"
         application_args = [
             "--jdbc-url",
             jdbc_url,
@@ -241,35 +241,11 @@ class IngestSnapshotOperator(SparkSubmitOperator):
             str(process_id),
             "--num-partitions",
             str(self.num_partitions),
-            "--result-marker",
-            marker_path,
         ]
         if not self.jdbc_partitioning:
             application_args.append("--no-jdbc-partitioning")
         self.application_args = application_args
         super().execute(context)
-        return read_snapshot_marker(marker_path)
-
-
-class PublishSnapshotAssetOperator(BaseOperator):
-    """Publish the snapshot Asset only when the load task actually replaced the table.
-
-    A run that verified an empty source without overwriting succeeds without
-    publication: this task raises AirflowSkipException so the outlet Asset
-    emits no event. The overwrite decision is made by the load task and read
-    from its XCom.
-    """
-
-    def __init__(self, load_task_id: str, **kwargs):
-        super().__init__(**kwargs)
-        self.load_task_id = load_task_id
-
-    def execute(self, context):
-        overwritten = context["ti"].xcom_pull(task_ids=self.load_task_id)
-        if overwritten is not True:
-            raise AirflowSkipException(
-                f"snapshot table was not overwritten by {self.load_task_id}; asset not published"
-            )
 
 
 class IngestAppendOperator(SparkSubmitOperator):

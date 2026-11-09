@@ -21,6 +21,39 @@ def records(cursor, sql):
     return [dict(zip(names, row)) for row in cursor.fetchall()]
 
 
+def check_snapshot_publication():
+    """Exercise the real Trino publication condition for empty, old and current rows."""
+    from airflow.providers.trino.hooks.trino import TrinoHook
+    from airflow.sdk.exceptions import AirflowSkipException
+    from ingestion.operators import publish_asset_event
+
+    hook = TrinoHook(trino_conn_id="trino_default")
+    table = "raw.bank.e2e_asset_" + uuid4().hex
+    hook.run(f"CREATE TABLE {table} (__process_id BIGINT)")
+    try:
+        class TaskInstance:
+            """Provide the already allocated process identity to the callable."""
+
+            def xcom_pull(self, task_ids):
+                return 42
+
+        context = {"ti": TaskInstance()}
+        for process in (None, 41, 42):
+            if process is not None:
+                hook.run(f"DELETE FROM {table}")
+                hook.run(f"INSERT INTO {table} VALUES ({process})")
+            try:
+                publish_asset_event(target_table=table, **context)
+            except AirflowSkipException:
+                require(process != 42, f"snapshot Asset skipped for process {process}")
+            else:
+                require(process == 42, "snapshot Asset accepted for current process")
+        publish_asset_event()
+        print("PASS regular publication requires no table query")
+    finally:
+        hook.run(f"DROP TABLE {table}")
+
+
 def check_registry_recovery():
     """Exercise real pg-meta retry/finalization without touching JDBC sources."""
     from ingestion import meta
@@ -204,6 +237,7 @@ def main():
                             for left, right in zip(history, history[1:])),
                         label + " batch revisions contiguous")
         check_registry_recovery()
+        check_snapshot_publication()
         print("PASS extraction metadata checks; FAIL=0")
     finally:
         connection.close()

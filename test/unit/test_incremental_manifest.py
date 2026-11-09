@@ -80,8 +80,8 @@ class TestIncrementalManifest(unittest.TestCase):
                 self.load_entity({"incremental": {"source_column": "updated_at", "lookback": {"size": 1, "unit": unit}}})
 
 
-class TestFullSnapshotManifest(unittest.TestCase):
-    """The incremental.full_snapshot block: schedule and pool allowlist parsing."""
+class TestActSnapManifest(unittest.TestCase):
+    """Independent restricted snapshot DAG configuration."""
 
     def load_entity(self, fields):
         import yaml
@@ -94,59 +94,88 @@ class TestFullSnapshotManifest(unittest.TestCase):
 
     def test_snapshot_defaults(self):
         entity = self.load_entity({"incremental": {"source_column": "_batch_id"}})
-        self.assertIsNone(entity.snapshot_schedule)
-        self.assertIsNone(entity.snapshot_pool)
-        self.assertIsNone(entity.snapshot_pool_slots)
+        self.assertEqual(entity.act_snap, manifest.ActSnapConfig())
 
-    def test_full_snapshot_with_schedule_and_pool(self):
+    def test_act_snap_with_schedule_and_pool(self):
         entity = self.load_entity({"incremental": {
             "source_column": "_batch_id",
-            "full_snapshot": {"schedule": "30 2 * * *", "pool": {"name": "snapshot_loads", "slots": 2}},
+            "act_snap": {"schedule": "30 2 * * *", "tags": ["nightly"],
+                         "airflow": {"pool": {"name": "snapshot_loads", "slots": 2}}},
         }})
-        self.assertEqual(entity.snapshot_schedule, "30 2 * * *")
-        self.assertEqual(entity.snapshot_pool, "snapshot_loads")
-        self.assertEqual(entity.snapshot_pool_slots, 2)
+        self.assertEqual(entity.act_snap.schedule, "30 2 * * *")
+        self.assertEqual(entity.act_snap.tags, ("nightly",))
+        self.assertEqual(entity.act_snap.airflow.pool, "snapshot_loads")
+        self.assertEqual(entity.act_snap.airflow.pool_slots, 2)
 
-    def test_full_snapshot_empty_block_and_null_schedule(self):
+    def test_act_snap_empty_block_and_null_schedule(self):
         entity = self.load_entity({"incremental": {
-            "source_column": "_batch_id", "full_snapshot": {"schedule": None},
+            "source_column": "_batch_id", "act_snap": {"schedule": None},
         }})
-        self.assertIsNone(entity.snapshot_schedule)
-        self.assertIsNone(entity.snapshot_pool)
+        self.assertEqual(entity.act_snap, manifest.ActSnapConfig())
 
     def test_pool_name_alone_defaults_slots(self):
         entity = self.load_entity({"incremental": {
-            "source_column": "_batch_id", "full_snapshot": {"pool": {"name": "snapshot_loads"}},
+            "source_column": "_batch_id", "act_snap": {"airflow": {"pool": {"name": "snapshot_loads"}}},
         }})
-        self.assertEqual(entity.snapshot_pool, "snapshot_loads")
-        self.assertEqual(entity.snapshot_pool_slots, 1)
+        self.assertEqual(entity.act_snap.airflow.pool, "snapshot_loads")
+        self.assertEqual(entity.act_snap.airflow.pool_slots, 1)
 
     def test_invalid_schedule_rejected(self):
         for schedule in ("", "nonsense", "61 * * * *", "* * *", 5, True):
             with self.subTest(schedule=schedule), self.assertRaisesRegex(ValueError, "schedule"):
                 self.load_entity({"incremental": {
-                    "source_column": "_batch_id", "full_snapshot": {"schedule": schedule},
+                    "source_column": "_batch_id", "act_snap": {"schedule": schedule},
                 }})
 
     def test_invalid_pool_rejected(self):
-        for pool in ("busy", [], {"name": ""}, {"name": " "}, {"name": 5}, {"slots": 2},
+        for pool in ("busy", [], {"name": ""}, {"name": " "}, {"name": 5},
                      {"name": "p", "slots": 0}, {"name": "p", "slots": True}, {"name": "p", "extra": 1}):
             with self.subTest(pool=pool), self.assertRaisesRegex(ValueError, "pool"):
-                self.load_entity({"incremental": {"source_column": "_batch_id", "full_snapshot": {"pool": pool}}})
+                self.load_entity({"incremental": {"source_column": "_batch_id", "act_snap": {"airflow": {"pool": pool}}}})
 
     def test_unknown_keys_rejected(self):
-        with self.assertRaisesRegex(ValueError, "unknown keys"):
-            self.load_entity({"incremental": {
-                "source_column": "_batch_id", "full_snapshot": {"cron": "0 3 * * *"},
-            }})
+        for key in ("fqn", "entities", "incremental", "catchup", "max_active_runs", "pool", "cron"):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "unknown keys"):
+                self.load_entity({"incremental": {"source_column": "_batch_id", "act_snap": {key: None}}})
 
-    def test_entity_level_full_snapshot_rejected_with_hint(self):
-        with self.assertRaisesRegex(ValueError, "full_snapshot is configured inside the incremental block"):
-            self.load_entity({"full_snapshot": {"schedule": "0 3 * * *"}})
+    def test_entity_level_act_snap_rejected_with_hint(self):
+        with self.assertRaisesRegex(ValueError, "act_snap is configured inside the incremental block"):
+            self.load_entity({"act_snap": {"schedule": "0 3 * * *"}})
 
-    def test_full_snapshot_requires_source_column(self):
+    def test_act_snap_requires_source_column(self):
         with self.assertRaisesRegex(ValueError, "incremental.source_column"):
-            self.load_entity({"incremental": {"full_snapshot": {"schedule": "0 3 * * *"}}})
+            self.load_entity({"incremental": {"act_snap": {"schedule": "0 3 * * *"}}})
+
+    def test_old_name_rejected(self):
+        with self.assertRaisesRegex(ValueError, "full_snapshot"):
+            self.load_entity({"incremental": {"source_column": "id", "full_snapshot": {}}})
+
+    def test_independent_reading_and_pool_defaults(self):
+        entity = self.load_entity({"spark": {"jdbc_partitioning": False},
+                                   "airflow": {"pool": {"name": "main", "slots": 2}},
+                                   "incremental": {"source_column": "id"}})
+        self.assertTrue(entity.act_snap.spark.jdbc_partitioning)
+        self.assertEqual(entity.act_snap.airflow, manifest.AirflowConfig())
+        entity = self.load_entity({"incremental": {"source_column": "id",
+                                   "act_snap": {"spark": {"jdbc_partitioning": False}}}})
+        self.assertTrue(entity.jdbc_partitioning)
+        self.assertFalse(entity.act_snap.spark.jdbc_partitioning)
+
+    def test_strict_snapshot_options(self):
+        for options in ({"spark": {"jdbc_partitioning": "false"}}, {"tags": "nightly"},
+                        {"spark": {"parallelism": True}}, {"airflow": {"extra": 1}}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                self.load_entity({"incremental": {"source_column": "id", "act_snap": options}})
+
+    def test_restricted_dataclass_contract(self):
+        from dataclasses import fields
+
+        self.assertEqual({item.name for item in fields(manifest.ActSnapConfig)},
+                         {"schedule", "tags", "spark", "airflow"})
+        self.assertTrue(issubclass(manifest.PipelineManifest, manifest.DagConfig))
+        self.assertTrue(issubclass(manifest.ActSnapConfig, manifest.DagConfig))
+        self.assertEqual({item.name for item in fields(manifest.PipelineManifest)},
+                         {"source_id", "schedule", "tags", "catchup", "entities"})
 
 
 if __name__ == "__main__":

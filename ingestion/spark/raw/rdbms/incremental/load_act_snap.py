@@ -6,16 +6,12 @@ raw.<namespace>.<table>__act_snap with a single Iceberg commit. The
 publishing process id is stamped as a table property so the author of the
 current version stays readable from metadata even when the snapshot has no
 rows; snapshot-summary properties are not delivered by the pinned Iceberg
-version. Managed Airflow execution is the only load path: the driver reports
-whether the table was actually replaced through a result marker that the
-operator reads after the submission.
+version. Airflow independently checks committed rows before publishing the Asset.
 """
 
 import argparse
-import json
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 
 from ingestion.iceberg import (
     CATALOG,
@@ -45,20 +41,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--process-id", required=True, type=int)
     parser.add_argument("--num-partitions", type=int, default=4)
     parser.add_argument("--no-jdbc-partitioning", action="store_true")
-    parser.add_argument("--result-marker", required=True)
     args = parser.parse_args(argv)
     if args.process_id <= 0:
         raise ValueError(f"--process-id must be a positive integer (got {args.process_id})")
     if args.num_partitions <= 0:
         raise ValueError(f"--num-partitions must be a positive integer (got {args.num_partitions})")
-    if not args.result_marker:
-        raise ValueError("--result-marker must be a non-empty path")
     return args
-
-
-def write_result_marker(path: str, overwritten: bool) -> None:
-    """Report whether this execution replaced the snapshot table."""
-    Path(path).write_text(json.dumps({"overwritten": bool(overwritten)}), encoding="utf-8")
 
 
 def current_snapshot_author(spark, target: str) -> int | None:
@@ -104,7 +92,7 @@ def managed_snapshot(spark, args) -> None:
     A retry first checks the publishing property: when the current version of
     the table already belongs to this process id, the publication happened in
     the failed attempt and the source is not read again. An empty read keeps
-    an existing table untouched (a warning is logged, no marker publication);
+    an existing table untouched (a warning is logged);
     a missing table is published even when empty.
     """
     author = current_snapshot_author(spark, args.target_table)
@@ -113,7 +101,6 @@ def managed_snapshot(spark, args) -> None:
             "actual snapshot: %s already published by process_id=%s; repeat read skipped",
             args.target_table, args.process_id,
         )
-        write_result_marker(args.result_marker, True)
         return
     frame = read_extract_frame(spark, args, None, None)
     try:
@@ -124,11 +111,9 @@ def managed_snapshot(spark, args) -> None:
                 " without overwrite",
                 args.target_table,
             )
-            write_result_marker(args.result_marker, False)
             return
         load_dttm = datetime.now(timezone.utc)
         _overwrite_snapshot(spark, args, frame, load_dttm)
-        write_result_marker(args.result_marker, True)
         LOGGER.info(
             "actual snapshot: %s row(s) published to %s by process_id=%s",
             rows, args.target_table, args.process_id,

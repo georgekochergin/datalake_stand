@@ -2,7 +2,6 @@
 
 import importlib.util
 import sys
-import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -312,7 +311,7 @@ class TestMetaConnect(unittest.TestCase):
         hook.return_value.get_conn.assert_called_once_with()
 
 
-class TestIngestSnapshotOperator(unittest.TestCase):
+class TestIngestActSnapOperator(unittest.TestCase):
     """The snapshot submission: CLI arguments, marker channel, no pg-meta."""
 
     def setUp(self):
@@ -325,7 +324,7 @@ class TestIngestSnapshotOperator(unittest.TestCase):
         self.context["ti"].xcom_pull.return_value = 42
 
     def operator(self, **kwargs):
-        return self.module.IngestSnapshotOperator(
+        return self.module.IngestActSnapOperator(
             task_id="load", source_id="bank", airflow_conn_id="source", fqn="s.t",
             target_table="raw.bank.s__t__act_snap", **kwargs,
         )
@@ -334,12 +333,7 @@ class TestIngestSnapshotOperator(unittest.TestCase):
         operator = self.operator()
         self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/incremental/load_act_snap.py")
         self.assertEqual(operator.deploy_mode, "client")
-        with tempfile.TemporaryDirectory() as directory:
-            operator.result_dir = directory
-            marker = Path(directory) / "snapshot_result_42.json"
-            marker.write_text('{"overwritten": true}', encoding="utf-8")
-            result = operator.execute(self.context)
-            self.assertTrue(result)
+        self.assertIsNone(operator.execute(self.context))
         args = operator.application_args
         self.assertEqual(args[args.index("--source-table") + 1], "s.t")
         self.assertEqual(args[args.index("--target-table") + 1], "raw.bank.s__t__act_snap")
@@ -351,40 +345,21 @@ class TestIngestSnapshotOperator(unittest.TestCase):
 
     def test_partitioning_disabled_appends_flag(self):
         operator = self.operator(jdbc_partitioning=False)
-        with tempfile.TemporaryDirectory() as directory:
-            operator.result_dir = directory
-            (Path(directory) / "snapshot_result_42.json").write_text(
-                '{"overwritten": false}', encoding="utf-8")
-            result = operator.execute(self.context)
-            self.assertFalse(result)
+        operator.execute(self.context)
         self.assertIn("--no-jdbc-partitioning", operator.application_args)
 
     def test_no_pg_meta_environment_forwarded(self):
         operator = self.operator()
-        with tempfile.TemporaryDirectory() as directory:
-            operator.result_dir = directory
-            (Path(directory) / "snapshot_result_42.json").write_text(
-                '{"overwritten": true}', encoding="utf-8")
-            operator.execute(self.context)
+        operator.execute(self.context)
         self.assertNotIn("PGHOST", operator.env_vars or {})
         self.assertNotIn("--lookback-size", operator.application_args)
         self.assertNotIn("--incremental-column", operator.application_args)
 
-    def test_missing_marker_fails_after_submission(self):
+    def test_no_marker_protocol(self):
         operator = self.operator()
-        with tempfile.TemporaryDirectory() as directory:
-            operator.result_dir = directory
-            with self.assertRaisesRegex(ValueError, "marker"):
-                operator.execute(self.context)
+        operator.execute(self.context)
+        self.assertNotIn("--result-marker", operator.application_args)
         self.assertTrue(operator.submissions)
-
-    def test_malformed_marker_fails(self):
-        operator = self.operator()
-        with tempfile.TemporaryDirectory() as directory:
-            operator.result_dir = directory
-            (Path(directory) / "snapshot_result_42.json").write_text('{"rows": 3}', encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "overwritten"):
-                operator.execute(self.context)
 
     def test_strict_constructor_types(self):
         for kwargs in (
@@ -402,53 +377,47 @@ class TestIngestSnapshotOperator(unittest.TestCase):
         self.assertFalse(operator.submissions)
 
 
-class TestReadSnapshotMarker(unittest.TestCase):
-    """Marker file contract on the operator side."""
-
-    def test_bool_payload(self):
-        with tempfile.TemporaryDirectory() as directory:
-            for payload, expected in (('{"overwritten": true}', True), ('{"overwritten": false}', False)):
-                path = Path(directory) / "marker.json"
-                path.write_text(payload, encoding="utf-8")
-                self.assertEqual(self.module_marker(path), expected)
-
-    def module_marker(self, path):
-        module = load_operators()
-        return module.read_snapshot_marker(str(path))
-
-    def test_missing_or_malformed_fails(self):
-        module = load_operators()
-        for content in (None, "not json", "{}", '{"overwritten": "yes"}', '{"overwritten": 1}'):
-            with tempfile.TemporaryDirectory() as directory:
-                path = Path(directory) / "marker.json"
-                if content is not None:
-                    path.write_text(content, encoding="utf-8")
-                with self.subTest(content=content), self.assertRaises(ValueError):
-                    module.read_snapshot_marker(str(path))
-
-
-class TestPublishSnapshotAssetOperator(unittest.TestCase):
-    """Conditional Asset publication driven by the load task XCom."""
+class TestPublishAsset(unittest.TestCase):
+    """Publication policy is independent of Spark and the generated task structure."""
 
     def setUp(self):
         self.module = load_operators()
         self.context = {"ti": MagicMock()}
+        self.context["ti"].xcom_pull.return_value = 42
 
-    def test_published_when_overwritten(self):
-        self.context["ti"].xcom_pull.return_value = True
-        operator = self.module.PublishSnapshotAssetOperator(
-            task_id="publish_asset", load_task_id="snap_t.load")
-        self.assertIsNone(operator.execute(self.context))
-        self.context["ti"].xcom_pull.assert_called_once_with(task_ids="snap_t.load")
+    def test_regular_load_has_no_condition(self):
+        with patch.object(self.module, "snapshot_has_current_process") as condition:
+            self.module.publish_asset_event(**self.context)
+        condition.assert_not_called()
+        self.context["ti"].xcom_pull.assert_not_called()
 
-    def test_skipped_when_not_overwritten(self):
-        for value in (False, None, "true", 1):
-            with self.subTest(value=value):
-                self.context["ti"].xcom_pull.return_value = value
-                operator = self.module.PublishSnapshotAssetOperator(
-                    task_id="publish_asset", load_task_id="snap_t.load")
-                with self.assertRaises(self.module.AirflowSkipException):
-                    operator.execute(self.context)
+    def test_snapshot_policy(self):
+        for result in (True, False):
+            with patch.object(self.module, "snapshot_has_current_process", return_value=result) as condition:
+                if result:
+                    self.module.publish_asset_event("raw.bank.s__t__act_snap", **self.context)
+                else:
+                    with self.assertRaises(FakeSkip):
+                        self.module.publish_asset_event("raw.bank.s__t__act_snap", **self.context)
+                condition.assert_called_once_with("raw.bank.s__t__act_snap", 42)
+
+    def test_missing_process_is_error(self):
+        self.context["ti"].xcom_pull.return_value = None
+        with self.assertRaisesRegex(ValueError, "process_id"):
+            self.module.publish_asset_event("raw.bank.s__t__act_snap", **self.context)
+
+    def test_single_row_query_and_errors(self):
+        hook_module = types.ModuleType("airflow.providers.trino.hooks.trino")
+        hook_module.TrinoHook = MagicMock()
+        hook = hook_module.TrinoHook.return_value
+        with patch.dict(sys.modules, {"airflow.providers.trino.hooks.trino": hook_module}):
+            for row, expected in ((None, False), ([], False), ((41,), False), ((42,), True)):
+                hook.get_first.return_value = row
+                self.assertEqual(self.module.snapshot_has_current_process("raw.bank.s__t__act_snap", 42), expected)
+            hook.get_first.assert_called_with("SELECT __process_id FROM raw.bank.s__t__act_snap LIMIT 1")
+            hook.get_first.side_effect = RuntimeError("Trino unavailable")
+            with self.assertRaisesRegex(RuntimeError, "Trino unavailable"):
+                self.module.publish_asset_event("raw.bank.s__t__act_snap", **self.context)
 
 
 if __name__ == "__main__":

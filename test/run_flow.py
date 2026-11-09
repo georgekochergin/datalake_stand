@@ -531,9 +531,13 @@ def validate_manifests_and_dags() -> None:
         check("generated DAG %s syntax valid" % name, True, True)
     for dag_id in SNAPSHOT_DAGS:
         content = generated[dag_id + ".py"]
-        check("snapshot DAG %s renders snapshot loader" % dag_id, "IngestSnapshotOperator(" in content, True)
+        check("snapshot DAG %s renders snapshot loader" % dag_id, "IngestActSnapOperator(" in content, True)
         check("snapshot DAG %s has no schedule" % dag_id, "schedule=None" in content, True)
         check("snapshot DAG %s tagged act_snap" % dag_id, "'act_snap'" in content, True)
+        check("snapshot DAG %s uses Python publication task" % dag_id,
+              "python_callable=publish_asset_event" in content, True)
+        check("snapshot DAG %s uses slash Asset URI" % dag_id, "/act_snap\")" in content, True)
+        check("snapshot DAG %s uses independent default pool" % dag_id, 'pool="default_pool"' in content, True)
 
 
 def main() -> None:

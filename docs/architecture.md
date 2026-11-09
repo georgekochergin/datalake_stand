@@ -136,18 +136,22 @@ Airflow: генератор `ingestion/generator/generate_dags.py` статич�
 | Параметр | Тип | Обязателен | По умолчанию | Описание |
 |---|---|---|---|---|
 | `fqn` | string | да | — | `<схема>.<таблица>` источника, ровно два фрагмента; преобразуется в имя целевой таблицы по правилам именования (раздел 4) |
-| `incremental` | mapping | нет | полный срез | Переключает сущность в инкрементальный режим: `source_column` — колонка инкремента (строчный идентификатор); `lookback.size` — неотрицательное число, `lookback.unit` — `h`/`d` (для date только `d`); `size` — целое число. Блок необязателен: без него default по фактическому типу колонки — целочисленная 0, date `3d`, timestamp `3h`/`3d` по расписанию DAG-а (раздел 7.1). Явный `size: 0` отключает отступ, `unit` при этом игнорируется. Внутри блока допустим также `full_snapshot` (см. ниже) |
-| `incremental.full_snapshot.schedule` | string \| null | нет | `null` (ручной запуск) | Расписание DAG-а снимка этой сущности; тот же строгий пятиполевой cron, что и у расписания пайплайна |
-| `incremental.full_snapshot.pool.name` | string | нет | пул load-таска сущности | Пул load-таска снимка; без блока `pool` снимок разделяет пул и вес инкрементальной загрузки |
-| `incremental.full_snapshot.pool.slots` | int | нет | `1` (при заданном `name`) | Вес load-таска снимка в пуле |
-| `spark.jdbc_partitioning` | bool | нет | `true` | `false` — полностью отключить нарезку JDBC-чтения: без разведки ключей и запроса MIN/MAX, чтение одной партицией (раздел 6). Действует и на чтение DAG-а снимка |
+| `incremental` | mapping | нет | полный срез | `source_column` — колонка инкремента; `lookback` — отступ окна (раздел 7.1); `act_snap` — независимая конфигурация вспомогательного снимочного DAG-а (раздел 7.7) |
+| `incremental.act_snap.schedule` | string \| null | нет | `null` | Строгий пятиполевой cron; null — ручной запуск |
+| `incremental.act_snap.tags` | list[string] | нет | `[]` | Дополнительные теги снимочного DAG-а; теги основного пайплайна не наследуются |
+| `incremental.act_snap.spark.jdbc_partitioning` | bool | нет | `true` | Независимое от основной сущности параллельное JDBC-чтение |
+| `incremental.act_snap.airflow.pool.name` | string | нет | `default_pool` | Пул load-таска снимка |
+| `incremental.act_snap.airflow.pool.slots` | int | нет | `1` | Положительный вес load-таска снимка |
+| `spark.jdbc_partitioning` | bool | нет | `true` | `false` — полностью отключить нарезку JDBC-чтения основной загрузки: без разведки ключей и запроса MIN/MAX (раздел 6); не влияет на снимок |
 | `airflow.pool.name` | string | нет | `default_pool` | Пул load-таска; пользовательский пул должен заранее существовать в Airflow |
 | `airflow.pool.slots` | int | нет | `1` | Вес load-таска в пуле |
 
-Блок `full_snapshot` допустим только внутри `incremental`: он настраивает
+Блок `act_snap` допустим только внутри `incremental`: он настраивает
 гарантированно существующий DAG-снимок (расписание и пул), а не включает его
-(раздел 7.7). `full_snapshot` на уровне сущности вне `incremental`
-отвергается валидацией с подсказкой; `pool` без `name` — тоже ошибка.
+(раздел 7.7). Старый ключ `full_snapshot` не поддерживается. Внутри `act_snap`
+запрещены `fqn`, `entities`, `incremental`, `catchup`, `max_active_runs` и
+плоский `pool`: настройки используют те же вложенные пути `spark` и
+`airflow.pool`, что у основной сущности. Defaults независимы от родителя.
 
 **`ingestion/conf/settings.yaml`** — общие технические настройки: сейчас один ключ
 `spark.jdbc.num_partitions` (положительное целое, по умолчанию на стенде `4`) —
@@ -159,7 +163,7 @@ Airflow: генератор `ingestion/generator/generate_dags.py` статич�
 `transactions` (инкремент по `_batch_id`) и `deals` (полный срез); в `refs.yaml` —
 `clients` и `accounts` (полные срезы, у всех демо-таблиц кроме transactions
 JDBC-параллелизм отключён). Обе сущности `transactions` получают по
-DAG-у снимка без расписания (блок `full_snapshot` в манифестах не задан) —
+DAG-у снимка без расписания (блок `act_snap` в манифестах не задан) —
 ручной запуск, раздел 7.7.
 
 ## 3. Структура сгенерированного DAG-а
@@ -223,7 +227,7 @@ watermark каждой сущности однозначен.
 `ingestion.incremental_state`
   обслуживает Spark-функция `managed_load()` через `ingestion.meta`;
   `incremental_column` передаётся только задаче `load`.
-- **`publish_asset`** (`EmptyOperator` с `outlets`) — отдельная задача публикации
+- **`publish_asset`** (`PythonOperator` с `outlets`, callable `publish_asset_event`) — отдельная задача публикации
   события обновления Asset `raw://<source_id>/<fqn>`, на который смогут
   подписываться DAG-и следующих слоёв. Выполняется только после успешного
   `log_end`: загрузка завершилась и её успех записан в pg-meta. Ошибка или
@@ -256,16 +260,16 @@ Docker-машины), но не выделяет им CPU/память.
 
 ```text
 DAG ingest__rdbms__bank__main__act_snap_<alias>
-│  schedule из incremental.full_snapshot (нет — ручной запуск)
+│  schedule из incremental.act_snap (нет — ручной запуск)
 │
 ├── generate_process_id   собственный process_id снимочного запуска
 └── activate_source       SydafaActivateOperator: поднять СУБД, TTL 15 минут
     └── TaskGroup "snap_retail_bank__transactions"
         ├── log_start      событие START в pg-meta
-        ├── load           IngestSnapshotOperator → ingestion/spark/raw/rdbms/incremental/load_act_snap.py
+        ├── load           IngestActSnapOperator → ingestion/spark/raw/rdbms/incremental/load_act_snap.py
         ├── log_end        событие END в pg-meta
-        └── publish_asset  публикация Asset только если load действительно
-                           перезаписал таблицу (иначе задача пропускается)
+        └── publish_asset  PythonOperator: в таблице есть строки текущего
+                           процесса — публикация, иначе пропуск
 ```
 
 Снимочный поток не пишет в инкрементальный реестр pg-meta; контракт снимка —
@@ -1283,12 +1287,17 @@ COMMIT;
   символов `base32(sha256(FQN))`; коллизии dag_id и целевых имён ловятся
   генератором глобально (раздел 2).
 - Теги: `act_snap`, `source_id`, целевое имя таблицы (`resolve_target_table_name`)
-  плюс унаследованные теги манифеста. По ним снимочные DAG-и находятся
+  плюс собственные `act_snap.tags`. По ним снимочные DAG-и находятся
   в UI Airflow без чтения документации DAG-а.
-- Блок `incremental.full_snapshot` только настраивает: `schedule` (без него
-  или без блока — DAG без расписания, запуск вручную) и `pool{name,slots}`
-  (по умолчанию пул и вес load-таска сущности). `catchup=False`,
-  `max_active_runs=1`. Ключ `jdbc_partitioning` сущности действует и здесь.
+- Блок `incremental.act_snap` задаёт самостоятельный ограниченный контракт
+  DAG-а: `schedule`, `tags`, `spark.jdbc_partitioning`, `airflow.pool.name/slots`.
+  Defaults и типы — раздел 2; настройки родительской сущности не наследуются.
+  Общий `DagConfig` содержит только schedule и tags; `PipelineManifest`
+  расширяет его полями основного пайплайна, `ActSnapConfig` — композициями
+  `SparkConfig` и `AirflowConfig`. Это не добавляет spark/airflow в корень
+  YAML основного пайплайна. `catchup=False` для снимков фиксирован;
+  `MAX_ACTIVE_RUNS=1` — проектная константа генератора для обоих видов DAG-ов,
+  а не параметр YAML.
 - Активация источника, колбэки успеха/провала и `TableLogOperator`
   START/END — штатные. В **инкрементальный реестр** (`incremental_state`,
   `incremental_batches`) снимок не пишет ничего; `finalize_batch()`
@@ -1347,12 +1356,22 @@ writer обязан быть остановлен до повтора** (экс�
 публикация пустого поверх пустого не создаёт новый снапшот, свежесть при
 этом не сдвигается.
 
-**Публикация Asset.** Событие обновления Asset `raw://<source_id>/<fqn>__act_snap`
-публикуется только при фактической перезаписи: Spark-приложение сообщает
-факт маркером результата (файл в контейнере задачи; driver в client-mode
-разделяет с оператором файловую систему), оператор читает его и передаёт
-задачей XCom; задача `publish_asset` при отсутствии перезаписи пропускается
-(AirflowSkipException) — событие не эмитируется, DAG-run остаётся успешным.
+**Публикация Asset.** URI снимка — `raw://<source_id>/<fqn>/act_snap`,
+обычной загрузки — `raw://<source_id>/<fqn>`. Структура DAG-а постоянна:
+`log_start → load → log_end → publish_asset`. Последняя задача всегда
+`PythonOperator` с заранее объявленным outlet и callable `publish_asset_event`.
+Для обычной загрузки callable не выполняет проверок. Для снимка вызывает
+отдельную функцию `snapshot_has_current_process`, которая через `TrinoHook`
+(`trino_default`) читает `SELECT __process_id FROM <таблица> LIMIT 1` и
+сравнивает значение с process_id из XCom задачи `generate_process_id`.
+Все строки атомарного снимка принадлежат одному процессу, поэтому фильтр
+и полный скан не нужны. Нет строк или процесс другой — AirflowSkipException:
+задача пропущена, события нет, DAG-run успешен. Ошибка запроса означает
+ошибку задачи. Первая пустая таблица также не порождает событие. Retry после
+успешной непустой записи проходит проверку без повторной загрузки источника.
+Локальных файлов результата и XCom результата Spark-job нет. Для изменения
+политики достаточно изменить функцию условия; для безусловной публикации —
+вызывать callable без target_table, не меняя структуру задач.
 
 ## 8. База метаданных pg-meta: остальные объекты
 

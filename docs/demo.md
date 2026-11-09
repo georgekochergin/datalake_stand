@@ -516,7 +516,9 @@ FROM ingestion.incremental_batches ORDER BY process_id DESC LIMIT 8;
    запустить вручную (Trigger), без параметров.
 2. Структура запуска та же, что у пайплайна: `generate_process_id`
    (свой номер процесса) → `activate_source` → группа `snap_...`:
-   `log_start → load → log_end → publish_asset`. Пул — общий `ingest_loads`.
+   `log_start → load → log_end → publish_asset`. Без настроек `incremental.act_snap`
+   используется `default_pool`; пул основной загрузки не наследуется.
+   Исполнитель — `IngestActSnapOperator`, Spark-приложение — `load_act_snap.py`.
 3. По завершении — запросы в Trino (DBeaver):
 
 ```sql
@@ -558,3 +560,30 @@ WHERE key = 'snapshot.process_id';
 Реестр инкремента (`incremental_batches`) снимком не пополняется — у
 инкремента и снимка раздельные потоки, а пустое чтение источника не
 перезаписывает существующий непустой снимок (защита от затирания данных).
+
+**Публикация готовности:** постоянная задача `publish_asset` — PythonOperator.
+Для снимка она читает одну строку `__process_id` через Trino и публикует
+`raw://bank/retail_bank.transactions/act_snap`, только если строка принадлежит
+текущему процессу. Пустая таблица или старый процесс означают пропуск задачи
+без события; ошибка Trino — ошибку задачи. Локальный файл результата не нужен.
+У обычных загрузок тот же PythonOperator публикует Asset без проверки.
+
+Пример независимых настроек снимка внутри инкрементальной сущности:
+
+```yaml
+incremental:
+  source_column: _batch_id
+  act_snap:
+    schedule: "0 2 * * *"
+    tags: [nightly]
+    spark:
+      jdbc_partitioning: true
+    airflow:
+      pool:
+        name: ingest_loads
+        slots: 2
+```
+
+`catchup`, `incremental`, `fqn`, `entities`, `max_active_runs` внутри `act_snap`
+запрещены. Старый ключ `full_snapshot` не поддерживается. Снимок всегда имеет
+`catchup=False`, все генерируемые DAG-и — `max_active_runs=1`.
