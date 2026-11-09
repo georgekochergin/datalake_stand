@@ -63,10 +63,10 @@ class TestParseArgs(unittest.TestCase):
 
     def test_zero_num_partitions(self):
         with self.assertRaises(ValueError):
-            load_entity.parse_args(build_argv("--num-partitions", "0"))
+            load_entity.parse_args(build_argv("--num-jdbc-partitions", "0"))
 
     def test_jdbc_partitioning_switch(self):
-        args = load_entity.parse_args(build_argv("--no-jdbc-partitioning", "--num-partitions", "7"))
+        args = load_entity.parse_args(build_argv("--no-jdbc-partitioning", "--num-jdbc-partitions", "7"))
         self.assertTrue(args.no_jdbc_partitioning)
         self.assertEqual(args.num_partitions, 7)
 

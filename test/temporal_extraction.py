@@ -90,6 +90,7 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
         no_jdbc_partitioning=True, num_partitions=1,
         dag_id="e2e_temporal_extraction", run_id=None,
         process_id=None, lookback_size=0, lookback_unit=None, lookback_given=False,
+        default_temporal_lookback_unit="d",
     )
     require(metadata_row(hook, "incremental_state", args.source_id, table) is None,
             target + " starts with fresh isolated metadata")
@@ -210,6 +211,7 @@ def check_post_append_retry(spark, hook, jdbc, token):
         run_id=token, process_id=meta.allocate_process_id(
             dag_id="e2e_post_append_retry", run_id=token, db_connect=hook.get_conn),
         lookback_size=0, lookback_unit=None, lookback_given=False,
+        default_temporal_lookback_unit="d",
     )
     with patch.object(meta, "finalize_batch", side_effect=RuntimeError("injected metadata failure")):
         try:

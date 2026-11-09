@@ -224,7 +224,7 @@ WHERE username = 'SYDAFA' AND program LIKE 'JDBC%';
 
 3. **В логе load-таска**: открыть лог
    `ingest_group.load_retail_bank__transactions.load` и показать команду
-   Spark с `--num-partitions 4` и `--incremental-column _batch_id`;
+   Spark с `--num-jdbc-partitions 4` и `--incremental-column _batch_id`;
    у deals и таблиц refs передаётся `--no-jdbc-partitioning`. Ниже в том же
    логе — строка выбора колонки нарезки вида
 

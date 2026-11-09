@@ -49,7 +49,7 @@ class TestParseArgs(unittest.TestCase):
             "--source-table", "s.t", "--target-table", "raw.bank.s__t__act_snap",
             "--process-id", "7",
         ]
-        for extra in (["--process-id", "0"], ["--process-id", "-3"], ["--num-partitions", "0"]):
+        for extra in (["--process-id", "0"], ["--process-id", "-3"], ["--num-jdbc-partitions", "0"]):
             with self.subTest(extra=extra), self.assertRaises(ValueError):
                 act_snap.parse_args(base + extra)
 

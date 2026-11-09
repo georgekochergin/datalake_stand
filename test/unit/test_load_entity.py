@@ -86,12 +86,12 @@ class TestParseArgs(unittest.TestCase):
 
     def test_zero_num_partitions(self):
         with self.assertRaises(ValueError):
-            load_entity.parse_args(build_argv("--num-partitions", "0"))
+            load_entity.parse_args(build_argv("--num-jdbc-partitions", "0"))
 
     def test_jdbc_partitioning_switch(self):
         self.assertFalse(load_entity.parse_args(build_argv()).no_jdbc_partitioning)
         args = load_entity.parse_args(
-            build_argv("--no-jdbc-partitioning", "--num-partitions", "7")
+            build_argv("--no-jdbc-partitioning", "--num-jdbc-partitions", "7")
         )
         self.assertTrue(args.no_jdbc_partitioning)
         self.assertEqual(args.num_partitions, 7)
@@ -218,13 +218,13 @@ class TestPlanBatch(unittest.TestCase):
         probe.assert_called_once()
 
     def test_default_lookback_resolved_by_runtime_kind(self):
-        args = self.args("--lookback-size", "3", "--lookback-unit", "h")
+        args = self.args("--default-temporal-lookback-unit", "h")
         _, _, plan, _ = self.plan(None, planned={"status": "PLANNED"},
                                   position=("bigint", "10", False, False), args=args)
         self.assertEqual((plan.call_args.kwargs["lookback_size"],
                           plan.call_args.kwargs["lookback_unit"]), (0, None))
         timestamp_args = self.args("--incremental-column", "updated_at",
-                                   "--lookback-size", "3", "--lookback-unit", "h")
+                                    "--default-temporal-lookback-unit", "h")
         _, _, plan, _ = self.plan(None, planned={"status": "PLANNED"},
                                   position=("timestamp_instant(6)", "2026-01-01T00:00:00.000000Z", False, False),
                                   args=timestamp_args)

@@ -239,10 +239,10 @@ class IngestActSnapOperator(SparkSubmitOperator):
             self.target_table,
             "--process-id",
             str(process_id),
-            "--num-partitions",
-            str(self.num_partitions),
         ]
-        if not self.jdbc_partitioning:
+        if self.jdbc_partitioning:
+            application_args += ["--num-jdbc-partitions", str(self.num_partitions)]
+        else:
             application_args.append("--no-jdbc-partitioning")
         self.application_args = application_args
         super().execute(context)
@@ -330,10 +330,10 @@ class IngestAppendOperator(SparkSubmitOperator):
             self.target_table,
             "--process-id",
             str(process_id),
-            "--num-partitions",
-            str(self.num_partitions),
         ]
-        if not self.jdbc_partitioning:
+        if self.jdbc_partitioning:
+            application_args += ["--num-jdbc-partitions", str(self.num_partitions)]
+        else:
             application_args.append("--no-jdbc-partitioning")
         dag_run = context["dag_run"]
         meta = BaseHook.get_connection(self.pg_conn_id)
@@ -342,11 +342,12 @@ class IngestAppendOperator(SparkSubmitOperator):
         application_args += ["--source-id", self.source_id, "--dag-id", dag_run.dag_id,
                              "--run-id", dag_run.run_id]
         if self.incremental_column:
-            application_args += ["--incremental-column", self.incremental_column,
-                                 "--lookback-size", str(self.lookback_size)]
-            if self.lookback_unit:
-                application_args += ["--lookback-unit", self.lookback_unit]
+            application_args += ["--incremental-column", self.incremental_column]
             if self.lookback_specified:
-                application_args.append("--lookback-given")
+                application_args += ["--lookback-size", str(self.lookback_size), "--lookback-given"]
+                if self.lookback_size and self.lookback_unit:
+                    application_args += ["--lookback-unit", self.lookback_unit]
+            elif self.lookback_unit == "h":
+                application_args += ["--default-temporal-lookback-unit", "h"]
         self.application_args = application_args
         super().execute(context)

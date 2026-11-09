@@ -77,13 +77,13 @@ class TestIngestOperator(unittest.TestCase):
         operator = self.operator()
         operator.execute(self.context)
         args = operator.application_args
-        self.assertEqual(args[args.index("--num-partitions") + 1], "4")
+        self.assertEqual(args[args.index("--num-jdbc-partitions") + 1], "4")
         self.assertNotIn("--no-jdbc-partitioning", args)
         self.assertEqual(operator.source_type, "rdbms")
         self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/full/load_entity.py")
         self.assertEqual(operator.deploy_mode, "client")
         self.assertIn("jdbc:sqlserver://host:1433;databaseName=db;encrypt=false", args)
-        operator = self.operator(jdbc_partitioning=False, num_partitions=7, incremental_column="_batch_id", lookback_size=5)
+        operator = self.operator(jdbc_partitioning=False, num_partitions=7, incremental_column="_batch_id", lookback_size=5, lookback_specified=True)
         operator.execute(self.context)
         self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/incremental/load_entity.py")
         self.assertIn("--no-jdbc-partitioning", operator.application_args)
@@ -93,7 +93,24 @@ class TestIngestOperator(unittest.TestCase):
         self.assertEqual(operator.application_args[operator.application_args.index("--lookback-size") + 1], "5")
         self.assertNotIn("--watermark-value", operator.application_args)
         self.module.meta.get_watermark.assert_not_called()
-        self.assertEqual(operator.application_args[operator.application_args.index("--num-partitions") + 1], "7")
+        self.assertNotIn("--num-jdbc-partitions", operator.application_args)
+
+    def test_partitioning_arguments_for_full_and_incremental_loads(self):
+        for incremental_column in (None, "_batch_id"):
+            for enabled in (False, True):
+                with self.subTest(incremental_column=incremental_column, enabled=enabled):
+                    operator = self.operator(
+                        incremental_column=incremental_column,
+                        jdbc_partitioning=enabled, num_partitions=7,
+                    )
+                    operator.execute(self.context)
+                    args = operator.application_args
+                    if enabled:
+                        self.assertEqual(args[args.index("--num-jdbc-partitions") + 1], "7")
+                        self.assertNotIn("--no-jdbc-partitioning", args)
+                    else:
+                        self.assertIn("--no-jdbc-partitioning", args)
+                        self.assertNotIn("--num-jdbc-partitions", args)
 
     def test_oracle_connection(self):
         self.module.BaseHook.get_connection.return_value.conn_type = "oracle"
@@ -123,9 +140,28 @@ class TestIngestOperator(unittest.TestCase):
     def test_unspecified_lookback_omits_given_flag(self):
         for kwargs in ({}, {"lookback_size": 0}, {"lookback_size": 5}):
             with self.subTest(kwargs=kwargs):
-                operator = self.operator(**kwargs)
+                operator = self.operator(incremental_column="_batch_id", **kwargs)
                 operator.execute(self.context)
                 self.assertNotIn("--lookback-given", operator.application_args)
+                self.assertNotIn("--lookback-size", operator.application_args)
+                self.assertNotIn("--lookback-unit", operator.application_args)
+
+    def test_hourly_temporal_default_is_not_explicit_lookback(self):
+        operator = self.operator(incremental_column="updated_at", lookback_size=3, lookback_unit="h")
+        operator.execute(self.context)
+        args = operator.application_args
+        self.assertEqual(args[args.index("--default-temporal-lookback-unit") + 1], "h")
+        self.assertNotIn("--lookback-size", args)
+        self.assertNotIn("--lookback-unit", args)
+
+    def test_explicit_zero_lookback_omits_unit(self):
+        operator = self.operator(incremental_column="_batch_id", lookback_specified=True,
+                                 lookback_size=0, lookback_unit="d")
+        operator.execute(self.context)
+        args = operator.application_args
+        self.assertEqual(args[args.index("--lookback-size") + 1], "0")
+        self.assertIn("--lookback-given", args)
+        self.assertNotIn("--lookback-unit", args)
 
     def test_no_force_full_flags_remain(self):
         operator = self.operator(incremental_column="_batch_id")
@@ -338,15 +374,23 @@ class TestIngestActSnapOperator(unittest.TestCase):
         self.assertEqual(args[args.index("--source-table") + 1], "s.t")
         self.assertEqual(args[args.index("--target-table") + 1], "raw.bank.s__t__act_snap")
         self.assertEqual(args[args.index("--process-id") + 1], "42")
-        self.assertEqual(args[args.index("--num-partitions") + 1], "4")
+        self.assertEqual(args[args.index("--num-jdbc-partitions") + 1], "4")
         self.assertNotIn("--no-jdbc-partitioning", args)
         self.assertIn("jdbc:sqlserver://host:1433;databaseName=db;encrypt=false", args)
         self.assertTrue(operator.submissions)
 
     def test_partitioning_disabled_appends_flag(self):
-        operator = self.operator(jdbc_partitioning=False)
+        operator = self.operator(jdbc_partitioning=False, num_partitions=7)
         operator.execute(self.context)
         self.assertIn("--no-jdbc-partitioning", operator.application_args)
+        self.assertNotIn("--num-jdbc-partitions", operator.application_args)
+
+    def test_partitioning_enabled_forwards_partition_count(self):
+        operator = self.operator(num_partitions=7)
+        operator.execute(self.context)
+        args = operator.application_args
+        self.assertEqual(args[args.index("--num-jdbc-partitions") + 1], "7")
+        self.assertNotIn("--no-jdbc-partitioning", args)
 
     def test_no_pg_meta_environment_forwarded(self):
         operator = self.operator()

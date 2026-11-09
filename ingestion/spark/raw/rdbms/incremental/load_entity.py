@@ -36,7 +36,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--target-table", required=True)
     parser.add_argument("--process-id", required=True, type=int)
     parser.add_argument("--incremental-column", required=True)
-    parser.add_argument("--num-partitions", type=int, default=4)
+    parser.add_argument("--num-jdbc-partitions", dest="num_partitions", type=int, default=4)
     parser.add_argument("--no-jdbc-partitioning", action="store_true")
     parser.add_argument("--source-id")
     parser.add_argument("--dag-id")
@@ -44,11 +44,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lookback-size", type=int, default=0)
     parser.add_argument("--lookback-unit", choices=("h", "d"))
     parser.add_argument("--lookback-given", action="store_true")
+    parser.add_argument("--default-temporal-lookback-unit", choices=("h", "d"), default="d")
     args = parser.parse_args(argv)
     if args.process_id <= 0:
         raise ValueError(f"--process-id must be a positive integer (got {args.process_id})")
     if args.num_partitions <= 0:
-        raise ValueError(f"--num-partitions must be a positive integer (got {args.num_partitions})")
+        raise ValueError(f"--num-jdbc-partitions must be a positive integer (got {args.num_partitions})")
     if not COLUMN_NAME_PATTERN.match(args.incremental_column):
         raise ValueError(
             f"--incremental-column must be a column identifier (got {args.incremental_column!r})"
@@ -138,8 +139,14 @@ def _plan_batch(spark, args, connect):
     kind, upper, empty, has_null = source_position(spark, args)
     if has_null:
         raise ValueError("NULL incremental value in source")
-    size, unit = positions.resolve_lookback(kind, args.lookback_size, args.lookback_unit,
-                                            args.lookback_given)
+    size, unit = positions.resolve_lookback(
+        kind,
+        args.lookback_size if args.lookback_given else 3,
+        args.lookback_unit if args.lookback_given else args.default_temporal_lookback_unit,
+        args.lookback_given,
+    )
+    LOGGER.info("resolved lookback: kind=%s size=%s unit=%s explicit=%s",
+                kind, size, unit, args.lookback_given)
     positions.window_bounds(upper, kind, size, unit)
 
     def calculate_lower(value):
