@@ -113,5 +113,31 @@ class TestAssertUniqueTargets(unittest.TestCase):
             naming.assert_unique_targets(["retail_bank.clients", "retail_bank.clients"])
 
 
+class TestSnapshotNames(unittest.TestCase):
+    """Snapshot alias and snapshot table name derivation."""
+
+    def test_alias_is_eight_lowercase_base32_characters(self):
+        alias = naming.snapshot_alias("retail_bank.transactions")
+        self.assertEqual(len(alias), 8)
+        self.assertTrue(all(char in "abcdefghijklmnopqrstuvwxyz234567" for char in alias))
+
+    def test_alias_is_deterministic_and_distinct(self):
+        first = naming.snapshot_alias("retail_bank.transactions")
+        self.assertEqual(first, naming.snapshot_alias("retail_bank.transactions"))
+        self.assertNotEqual(first, naming.snapshot_alias("trading_core.transactions"))
+
+    def test_snapshot_table_name_appends_suffix(self):
+        self.assertEqual(
+            naming.resolve_snapshot_table_name("retail_bank.transactions"),
+            "retail_bank__transactions__act_snap",
+        )
+
+    def test_snapshot_fully_qualified(self):
+        self.assertEqual(
+            naming.resolve_snapshot_fully_qualified("bank", "retail_bank.transactions"),
+            "raw.bank.retail_bank__transactions__act_snap",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

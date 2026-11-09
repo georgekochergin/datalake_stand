@@ -128,6 +128,21 @@ class TestBuildCreateTableSql(unittest.TestCase):
                 ddl = iceberg.build_create_table_sql(f"raw.{namespace}.{table}", [("id", "bigint")])
                 self.assertIn(f"LOCATION 's3://datalake/raw/{namespace}/{table}'", ddl)
 
+
+class TestTableLocation(unittest.TestCase):
+    """Shared deterministic S3 location helper."""
+
+    def test_location_includes_namespace_and_table(self):
+        self.assertEqual(
+            iceberg.table_location("raw.bank.retail_bank__transactions__act_snap"),
+            "s3://datalake/raw/bank/retail_bank__transactions__act_snap",
+        )
+
+    def test_invalid_target_rejected(self):
+        for target in ("bank.t", "raw.Bank.t", "raw.bank.t-1"):
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                iceberg.table_location(target)
+
     def test_unsafe_location_parts_rejected(self):
         for target in ("raw.bank.a/b", "raw.bank.a'b", "raw../accounts", "raw.bank.a-b"):
             with self.subTest(target=target), self.assertRaises(ValueError):

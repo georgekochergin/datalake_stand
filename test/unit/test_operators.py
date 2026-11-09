@@ -2,10 +2,15 @@
 
 import importlib.util
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+
+class FakeSkip(Exception):
+    """Stand-in for AirflowSkipException in the scoped module doubles."""
 
 
 class FakeOperator:
@@ -29,11 +34,12 @@ def load_operators():
     for name in (
         "airflow", "airflow.providers", "airflow.providers.apache", "airflow.providers.apache.spark",
         "airflow.providers.apache.spark.operators", "airflow.providers.apache.spark.operators.spark_submit",
-        "airflow.sdk", "_operator_test_ingestion",
+        "airflow.sdk", "airflow.sdk.exceptions", "_operator_test_ingestion",
     ):
         modules[name] = types.ModuleType(name)
     modules["airflow.sdk"].BaseHook = MagicMock()
     modules["airflow.sdk"].BaseOperator = FakeOperator
+    modules["airflow.sdk.exceptions"].AirflowSkipException = FakeSkip
     modules["airflow.providers.apache.spark.operators.spark_submit"].SparkSubmitOperator = FakeOperator
     modules["ingestion"] = types.ModuleType("ingestion")
     modules["ingestion"].meta = MagicMock()
@@ -294,6 +300,145 @@ class TestMetaConnect(unittest.TestCase):
             module._meta_connect("custom_meta")
         hook.assert_called_once_with(postgres_conn_id="custom_meta")
         hook.return_value.get_conn.assert_called_once_with()
+
+
+class TestIngestSnapshotOperator(unittest.TestCase):
+    """The snapshot submission: CLI arguments, marker channel, no pg-meta."""
+
+    def setUp(self):
+        self.module = load_operators()
+        self.module.BaseHook.get_connection.return_value = types.SimpleNamespace(
+            conn_type="mssql", conn_id="source", host="host", port=None,
+            schema="db", login="reader", password="secret",
+        )
+        self.context = {"ti": MagicMock(), "dag_run": types.SimpleNamespace(dag_id="dag", run_id="run", conf={})}
+        self.context["ti"].xcom_pull.return_value = 42
+
+    def operator(self, **kwargs):
+        return self.module.IngestSnapshotOperator(
+            task_id="load", source_id="bank", airflow_conn_id="source", fqn="s.t",
+            target_table="raw.bank.s__t__act_snap", **kwargs,
+        )
+
+    def test_application_path_and_arguments(self):
+        operator = self.operator()
+        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/snapshot_entity.py")
+        self.assertEqual(operator.deploy_mode, "client")
+        with tempfile.TemporaryDirectory() as directory:
+            operator.result_dir = directory
+            marker = Path(directory) / "snapshot_result_42.json"
+            marker.write_text('{"overwritten": true}', encoding="utf-8")
+            result = operator.execute(self.context)
+            self.assertTrue(result)
+        args = operator.application_args
+        self.assertEqual(args[args.index("--source-table") + 1], "s.t")
+        self.assertEqual(args[args.index("--target-table") + 1], "raw.bank.s__t__act_snap")
+        self.assertEqual(args[args.index("--process-id") + 1], "42")
+        self.assertEqual(args[args.index("--num-partitions") + 1], "4")
+        self.assertNotIn("--no-jdbc-partitioning", args)
+        self.assertIn("jdbc:sqlserver://host:1433;databaseName=db;encrypt=false", args)
+        self.assertTrue(operator.submissions)
+
+    def test_partitioning_disabled_appends_flag(self):
+        operator = self.operator(jdbc_partitioning=False)
+        with tempfile.TemporaryDirectory() as directory:
+            operator.result_dir = directory
+            (Path(directory) / "snapshot_result_42.json").write_text(
+                '{"overwritten": false}', encoding="utf-8")
+            result = operator.execute(self.context)
+            self.assertFalse(result)
+        self.assertIn("--no-jdbc-partitioning", operator.application_args)
+
+    def test_no_pg_meta_environment_forwarded(self):
+        operator = self.operator()
+        with tempfile.TemporaryDirectory() as directory:
+            operator.result_dir = directory
+            (Path(directory) / "snapshot_result_42.json").write_text(
+                '{"overwritten": true}', encoding="utf-8")
+            operator.execute(self.context)
+        self.assertNotIn("PGHOST", operator.env_vars or {})
+        self.assertNotIn("--lookback-size", operator.application_args)
+        self.assertNotIn("--incremental-column", operator.application_args)
+
+    def test_missing_marker_fails_after_submission(self):
+        operator = self.operator()
+        with tempfile.TemporaryDirectory() as directory:
+            operator.result_dir = directory
+            with self.assertRaisesRegex(ValueError, "marker"):
+                operator.execute(self.context)
+        self.assertTrue(operator.submissions)
+
+    def test_malformed_marker_fails(self):
+        operator = self.operator()
+        with tempfile.TemporaryDirectory() as directory:
+            operator.result_dir = directory
+            (Path(directory) / "snapshot_result_42.json").write_text('{"rows": 3}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "overwritten"):
+                operator.execute(self.context)
+
+    def test_strict_constructor_types(self):
+        for kwargs in (
+            {"jdbc_partitioning": "false"}, {"num_partitions": 0}, {"num_partitions": True},
+            {"source_type": None},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                self.operator(**kwargs)
+
+    def test_missing_pid_fails_before_submit(self):
+        self.context["ti"].xcom_pull.return_value = None
+        operator = self.operator()
+        with self.assertRaisesRegex(ValueError, "process_id"):
+            operator.execute(self.context)
+        self.assertFalse(operator.submissions)
+
+
+class TestReadSnapshotMarker(unittest.TestCase):
+    """Marker file contract on the operator side."""
+
+    def test_bool_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for payload, expected in (('{"overwritten": true}', True), ('{"overwritten": false}', False)):
+                path = Path(directory) / "marker.json"
+                path.write_text(payload, encoding="utf-8")
+                self.assertEqual(self.module_marker(path), expected)
+
+    def module_marker(self, path):
+        module = load_operators()
+        return module.read_snapshot_marker(str(path))
+
+    def test_missing_or_malformed_fails(self):
+        module = load_operators()
+        for content in (None, "not json", "{}", '{"overwritten": "yes"}', '{"overwritten": 1}'):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "marker.json"
+                if content is not None:
+                    path.write_text(content, encoding="utf-8")
+                with self.subTest(content=content), self.assertRaises(ValueError):
+                    module.read_snapshot_marker(str(path))
+
+
+class TestPublishSnapshotAssetOperator(unittest.TestCase):
+    """Conditional Asset publication driven by the load task XCom."""
+
+    def setUp(self):
+        self.module = load_operators()
+        self.context = {"ti": MagicMock()}
+
+    def test_published_when_overwritten(self):
+        self.context["ti"].xcom_pull.return_value = True
+        operator = self.module.PublishSnapshotAssetOperator(
+            task_id="publish_asset", load_task_id="snap_t.load")
+        self.assertIsNone(operator.execute(self.context))
+        self.context["ti"].xcom_pull.assert_called_once_with(task_ids="snap_t.load")
+
+    def test_skipped_when_not_overwritten(self):
+        for value in (False, None, "true", 1):
+            with self.subTest(value=value):
+                self.context["ti"].xcom_pull.return_value = value
+                operator = self.module.PublishSnapshotAssetOperator(
+                    task_id="publish_asset", load_task_id="snap_t.load")
+                with self.assertRaises(self.module.AirflowSkipException):
+                    operator.execute(self.context)
 
 
 if __name__ == "__main__":

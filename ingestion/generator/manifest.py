@@ -35,6 +35,9 @@ class EntityConfig:
     lookback_size: int = 0
     lookback_unit: str | None = None
     lookback_specified: bool = False
+    snapshot_schedule: str | None = None
+    snapshot_pool: str | None = None
+    snapshot_pool_slots: int | None = None
 
 
 @dataclass(frozen=True)
@@ -173,6 +176,11 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
     """
     if not isinstance(entity, dict):
         raise ValueError(f"entity #{position}: must be a mapping")
+    if "full_snapshot" in entity and "incremental" not in entity:
+        raise ValueError(
+            f"entity #{position}: full_snapshot is configured inside the incremental block; "
+            "the entity has no incremental block"
+        )
     unknown = set(entity) - _ALLOWED_ENTITY_KEYS
     if unknown:
         raise ValueError(f"entity #{position}: unknown keys {sorted(unknown)}")
@@ -185,8 +193,11 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
     lookback_size = 0
     lookback_unit = None
     lookback_specified = False
+    snapshot_schedule = None
+    snapshot_pool = None
+    snapshot_pool_slots = None
     if "incremental" in entity:
-        incremental = _strict_object(entity["incremental"], {"source_column", "lookback"}, "incremental")
+        incremental = _strict_object(entity["incremental"], {"source_column", "lookback", "full_snapshot"}, "incremental")
         incremental_column = incremental.get("source_column")
         if not isinstance(incremental_column, str) or not _COLUMN_PATTERN.fullmatch(incremental_column):
             raise ValueError("incremental.source_column must be a lowercase identifier")
@@ -203,6 +214,25 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
             lookback_specified = True
         else:
             lookback_size, lookback_unit = temporal_default
+        if "full_snapshot" in incremental:
+            full_snapshot = _strict_object(
+                incremental["full_snapshot"], {"schedule", "pool"}, "incremental.full_snapshot"
+            )
+            snapshot_schedule = full_snapshot.get("schedule")
+            if snapshot_schedule is not None:
+                if not isinstance(snapshot_schedule, str) or not snapshot_schedule:
+                    raise ValueError("incremental.full_snapshot.schedule must be a non-empty string or null")
+                parse_schedule(snapshot_schedule)
+            snapshot_pool_block = _strict_object(
+                full_snapshot.get("pool", {}), {"name", "slots"}, "incremental.full_snapshot.pool"
+            )
+            if snapshot_pool_block:
+                snapshot_pool = snapshot_pool_block.get("name")
+                if not isinstance(snapshot_pool, str) or not snapshot_pool.strip():
+                    raise ValueError("incremental.full_snapshot.pool.name must be a non-empty string")
+                snapshot_pool_slots = _positive_integer(
+                    snapshot_pool_block.get("slots", 1), "full_snapshot.pool.slots"
+                )
 
     spark = entity.get("spark", {})
     if isinstance(spark, dict) and "parallelism" in spark:
@@ -229,6 +259,9 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
         lookback_size=lookback_size,
         lookback_unit=lookback_unit,
         lookback_specified=lookback_specified,
+        snapshot_schedule=snapshot_schedule,
+        snapshot_pool=snapshot_pool,
+        snapshot_pool_slots=snapshot_pool_slots,
     )
 
 

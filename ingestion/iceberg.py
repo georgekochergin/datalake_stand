@@ -5,6 +5,7 @@ import re
 CATALOG = "raw"
 METADATA_DTTM = "__load_dttm"
 METADATA_PID = "__process_id"
+SNAPSHOT_AUTHOR_PROPERTY = "snapshot.process_id"
 
 IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -27,6 +28,12 @@ def quote_identifier(name: str) -> str:
     return "`%s`" % name.replace("`", "``")
 
 
+def table_location(target: str) -> str:
+    """Deterministic S3 location of a raw-layer table (shared by raw DDL and snapshot RTAS)."""
+    namespace, table = validate_target_table(target)
+    return f"s3://datalake/raw/{namespace}/{table}"
+
+
 def build_create_table_sql(target: str, columns: list[tuple[str, str]]) -> str:
     """Build the first-load Iceberg DDL from (column name, DDL type) pairs."""
     namespace, table = validate_target_table(target)
@@ -41,7 +48,7 @@ def build_create_table_sql(target: str, columns: list[tuple[str, str]]) -> str:
     return (
         f"CREATE TABLE {target} ({joined}) USING iceberg "
         f"PARTITIONED BY (days({quote_identifier(METADATA_DTTM)})) "
-        f"LOCATION 's3://datalake/raw/{namespace}/{table}' "
+        f"LOCATION '{table_location(target)}' "
         f"TBLPROPERTIES ('write.spark.accept-any-schema'='true')"
     )
 
