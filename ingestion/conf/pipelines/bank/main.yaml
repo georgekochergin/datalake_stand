@@ -7,6 +7,11 @@ entities:
   - fqn: retail_bank.transactions
     incremental:
       source_column: _batch_id
+      act_snap:
+        airflow:
+          pool:
+            name: ingest_loads
+            slots: 2
     airflow:
       pool:
         name: ingest_loads

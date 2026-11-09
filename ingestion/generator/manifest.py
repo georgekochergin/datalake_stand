@@ -279,9 +279,6 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
         if "act_snap" in incremental:
             act_snap = _parse_act_snap(incremental["act_snap"])
 
-    spark = entity.get("spark", {})
-    if isinstance(spark, dict) and "parallelism" in spark:
-        raise ValueError(f"entity {fqn!r}: spark.parallelism is renamed to spark.jdbc_partitioning")
     spark_config, airflow_config = _parse_load_options(entity, f"entity {fqn!r}")
 
     return EntityConfig(

@@ -516,8 +516,10 @@ FROM ingestion.incremental_batches ORDER BY process_id DESC LIMIT 8;
    запустить вручную (Trigger), без параметров.
 2. Структура запуска та же, что у пайплайна: `generate_process_id`
    (свой номер процесса) → `activate_source` → группа `snap_...`:
-   `log_start → load → log_end → publish_asset`. Без настроек `incremental.act_snap`
-   используется `default_pool`; пул основной загрузки не наследуется.
+   `log_start → load → log_end → publish_asset`. В манифестах явно задан
+   `incremental.act_snap.airflow.pool`: `ingest_loads`, вес 2, чтобы снимки
+   разделяли ограничение числа Spark-приложений с обычными загрузками.
+   Это самостоятельная настройка, а не наследование пула основной загрузки.
    Исполнитель — `IngestActSnapOperator`, Spark-приложение — `load_act_snap.py`.
 3. По завершении — запросы в Trino (DBeaver):
 

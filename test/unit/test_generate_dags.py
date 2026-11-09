@@ -293,9 +293,9 @@ class TestGenerateAll(unittest.TestCase):
     def test_demonstration_weights_and_partitioning(self):
         for name, content in self.generated.items():
             if "__act_snap_" in name:
-                self.assertEqual(content.count('pool="default_pool"'), 1)
+                self.assertEqual(content.count('pool="ingest_loads"'), 1)
                 self.assertEqual(content.count("jdbc_partitioning=False"), 0)
-                self.assertEqual(content.count("pool_slots=1"), 1)
+                self.assertEqual(content.count("pool_slots=2"), 1)
             elif "__main" in name:
                 self.assertEqual(content.count('pool="ingest_loads"'), 2)
                 self.assertEqual(content.count("jdbc_partitioning=False"), 1)

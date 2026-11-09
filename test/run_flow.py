@@ -537,7 +537,8 @@ def validate_manifests_and_dags() -> None:
         check("snapshot DAG %s uses Python publication task" % dag_id,
               "python_callable=publish_asset_event" in content, True)
         check("snapshot DAG %s uses slash Asset URI" % dag_id, "/act_snap\")" in content, True)
-        check("snapshot DAG %s uses independent default pool" % dag_id, 'pool="default_pool"' in content, True)
+        check("snapshot DAG %s uses explicitly configured shared pool" % dag_id, 'pool="ingest_loads"' in content, True)
+        check("snapshot DAG %s uses configured pool weight" % dag_id, "pool_slots=2" in content, True)
 
 
 def main() -> None:
