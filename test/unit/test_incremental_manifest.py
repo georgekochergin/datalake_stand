@@ -29,10 +29,23 @@ class TestIncrementalManifest(unittest.TestCase):
         self.assertIsNone(entity.lookback_unit)
         self.assertFalse(entity.lookback_specified)
 
+    def test_contract_type_required_and_strict(self):
+        for contract in ({"source_column": "id"}, {"source_column": "id", "position_type": "int"},
+                         {"source_column": "id", "position_type": "float"},
+                         {"source_column": "id", "position_type": "bigint", "extra": 1}):
+            with self.subTest(contract=contract), self.assertRaises(ValueError):
+                self.load_entity({"incremental": {"contract": contract}})
+
+    def test_default_is_resolved_for_declared_type(self):
+        for kind, expected in (("bigint", (0, None)), ("decimal(38,0)", (0, None)),
+                               ("date", (3, "d")), ("timestamp_instant(9)", (3, "d"))):
+            entity = self.load_entity({"incremental": {"contract": {"source_column": "id", "position_type": kind}}})
+            self.assertEqual((entity.lookback_size, entity.lookback_unit), expected)
+
     def test_nested_source_column_and_default_lookback(self):
         for column in ("_batch_id", "updated_at"):
             with self.subTest(column=column):
-                entity = self.load_entity({"incremental": {"source_column": column}})
+                entity = self.load_entity({"incremental": {"contract": {"source_column": column, "position_type": "timestamp_local(7)"}}})
                 self.assertEqual(entity.incremental_column, column)
                 self.assertEqual((entity.lookback_size, entity.lookback_unit), (3, "d"))
                 self.assertFalse(entity.lookback_specified)
@@ -44,7 +57,8 @@ class TestIncrementalManifest(unittest.TestCase):
             if unit is not None:
                 lookback["unit"] = unit
             with self.subTest(size=size, unit=unit):
-                entity = self.load_entity({"incremental": {"source_column": "updated_at", "lookback": lookback}})
+                kind = "bigint" if stored is None else "timestamp_local(7)"
+                entity = self.load_entity({"incremental": {"contract": {"source_column": "updated_at", "position_type": kind}, "lookback": lookback}})
                 self.assertEqual(entity.lookback_size, size)
                 self.assertEqual(entity.lookback_unit, stored)
                 self.assertTrue(entity.lookback_specified)
@@ -67,17 +81,17 @@ class TestIncrementalManifest(unittest.TestCase):
     def test_lookback_requires_strict_mapping(self):
         for lookback in (None, False, [], 1, "1", {}, {"unit": "h"}, {"size": 1, "unknown": 1}):
             with self.subTest(lookback=lookback), self.assertRaises(ValueError):
-                self.load_entity({"incremental": {"source_column": "updated_at", "lookback": lookback}})
+                self.load_entity({"incremental": {"contract": {"source_column": "updated_at", "position_type": "timestamp_local(7)"}, "lookback": lookback}})
 
     def test_lookback_size_rejects_bool_fraction_and_overflow(self):
         for size in (None, True, False, -1, 1.0, 0.5, "1", [], {}, 10 ** 38):
             with self.subTest(size=size), self.assertRaisesRegex(ValueError, "lookback.size"):
-                self.load_entity({"incremental": {"source_column": "_batch_id", "lookback": {"size": size}}})
+                self.load_entity({"incremental": {"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": size}}})
 
     def test_lookback_unit_rejects_invalid_or_explicit_null(self):
         for unit in (None, "", "H", "hours", "m", 1, True, [], {}):
             with self.subTest(unit=unit), self.assertRaisesRegex(ValueError, "lookback.unit"):
-                self.load_entity({"incremental": {"source_column": "updated_at", "lookback": {"size": 1, "unit": unit}}})
+                self.load_entity({"incremental": {"contract": {"source_column": "updated_at", "position_type": "timestamp_local(7)"}, "lookback": {"size": 1, "unit": unit}}})
 
 
 class TestActSnapManifest(unittest.TestCase):
@@ -93,12 +107,12 @@ class TestActSnapManifest(unittest.TestCase):
             return manifest.load_pipeline(path).entities[0]
 
     def test_snapshot_defaults(self):
-        entity = self.load_entity({"incremental": {"source_column": "_batch_id"}})
+        entity = self.load_entity({"incremental": {"contract": {"source_column": "_batch_id", "position_type": "bigint"}}})
         self.assertEqual(entity.act_snap, manifest.ActSnapConfig())
 
     def test_act_snap_with_schedule_and_pool(self):
         entity = self.load_entity({"incremental": {
-            "source_column": "_batch_id",
+            "contract": {"source_column": "_batch_id", "position_type": "bigint"},
             "act_snap": {"schedule": "30 2 * * *", "tags": ["nightly"],
                          "airflow": {"pool": {"name": "snapshot_loads", "slots": 2}}},
         }})
@@ -109,13 +123,13 @@ class TestActSnapManifest(unittest.TestCase):
 
     def test_act_snap_empty_block_and_null_schedule(self):
         entity = self.load_entity({"incremental": {
-            "source_column": "_batch_id", "act_snap": {"schedule": None},
+            "contract": {"source_column": "_batch_id", "position_type": "bigint"}, "act_snap": {"schedule": None},
         }})
         self.assertEqual(entity.act_snap, manifest.ActSnapConfig())
 
     def test_pool_name_alone_defaults_slots(self):
         entity = self.load_entity({"incremental": {
-            "source_column": "_batch_id", "act_snap": {"airflow": {"pool": {"name": "snapshot_loads"}}},
+            "contract": {"source_column": "_batch_id", "position_type": "bigint"}, "act_snap": {"airflow": {"pool": {"name": "snapshot_loads"}}},
         }})
         self.assertEqual(entity.act_snap.airflow.pool, "snapshot_loads")
         self.assertEqual(entity.act_snap.airflow.pool_slots, 1)
@@ -124,26 +138,26 @@ class TestActSnapManifest(unittest.TestCase):
         for schedule in ("", "nonsense", "61 * * * *", "* * *", 5, True):
             with self.subTest(schedule=schedule), self.assertRaisesRegex(ValueError, "schedule"):
                 self.load_entity({"incremental": {
-                    "source_column": "_batch_id", "act_snap": {"schedule": schedule},
+                    "contract": {"source_column": "_batch_id", "position_type": "bigint"}, "act_snap": {"schedule": schedule},
                 }})
 
     def test_invalid_pool_rejected(self):
         for pool in ("busy", [], {"name": ""}, {"name": " "}, {"name": 5},
                      {"name": "p", "slots": 0}, {"name": "p", "slots": True}, {"name": "p", "extra": 1}):
             with self.subTest(pool=pool), self.assertRaisesRegex(ValueError, "pool"):
-                self.load_entity({"incremental": {"source_column": "_batch_id", "act_snap": {"airflow": {"pool": pool}}}})
+                self.load_entity({"incremental": {"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "act_snap": {"airflow": {"pool": pool}}}})
 
     def test_unknown_keys_rejected(self):
         for key in ("fqn", "entities", "incremental", "catchup", "max_active_runs", "pool", "cron"):
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, "unknown keys"):
-                self.load_entity({"incremental": {"source_column": "_batch_id", "act_snap": {key: None}}})
+                self.load_entity({"incremental": {"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "act_snap": {key: None}}})
 
     def test_entity_level_act_snap_rejected_with_hint(self):
         with self.assertRaisesRegex(ValueError, "act_snap is configured inside the incremental block"):
             self.load_entity({"act_snap": {"schedule": "0 3 * * *"}})
 
     def test_act_snap_requires_source_column(self):
-        with self.assertRaisesRegex(ValueError, "incremental.source_column"):
+        with self.assertRaisesRegex(ValueError, "incremental.contract"):
             self.load_entity({"incremental": {"act_snap": {"schedule": "0 3 * * *"}}})
 
     def test_old_name_rejected(self):
@@ -153,10 +167,10 @@ class TestActSnapManifest(unittest.TestCase):
     def test_independent_reading_and_pool_defaults(self):
         entity = self.load_entity({"spark": {"jdbc_partitioning": False},
                                    "airflow": {"pool": {"name": "main", "slots": 2}},
-                                   "incremental": {"source_column": "id"}})
+                                   "incremental": {"contract": {"source_column": "id", "position_type": "bigint"}}})
         self.assertTrue(entity.act_snap.spark.jdbc_partitioning)
         self.assertEqual(entity.act_snap.airflow, manifest.AirflowConfig())
-        entity = self.load_entity({"incremental": {"source_column": "id",
+        entity = self.load_entity({"incremental": {"contract": {"source_column": "id", "position_type": "bigint"},
                                    "act_snap": {"spark": {"jdbc_partitioning": False}}}})
         self.assertTrue(entity.jdbc_partitioning)
         self.assertFalse(entity.act_snap.spark.jdbc_partitioning)
@@ -165,7 +179,7 @@ class TestActSnapManifest(unittest.TestCase):
         for options in ({"spark": {"jdbc_partitioning": "false"}}, {"tags": "nightly"},
                         {"spark": {"parallelism": True}}, {"airflow": {"extra": 1}}):
             with self.subTest(options=options), self.assertRaises(ValueError):
-                self.load_entity({"incremental": {"source_column": "id", "act_snap": options}})
+                self.load_entity({"incremental": {"contract": {"source_column": "id", "position_type": "bigint"}, "act_snap": options}})
 
     def test_restricted_dataclass_contract(self):
         from dataclasses import fields

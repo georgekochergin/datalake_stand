@@ -102,7 +102,7 @@ class TestLoadPipeline(unittest.TestCase):
             "entities:\n"
             "  - fqn: retail_bank.clients\n"
             "  - fqn: retail_bank.transactions\n"
-            "    incremental: {source_column: transaction_id}\n"
+            "    incremental: {contract: {source_column: transaction_id, position_type: bigint}}\n"
         )
         pipeline = manifest.load_pipeline(path)
         self.assertEqual(pipeline.source_id, "bank")
@@ -115,7 +115,7 @@ class TestLoadPipeline(unittest.TestCase):
         self.assertEqual(pipeline.entities[1].incremental_column, "transaction_id")
         self.assertEqual(
             (pipeline.entities[1].lookback_size, pipeline.entities[1].lookback_unit,
-             pipeline.entities[1].lookback_specified), (3, "d", False),
+             pipeline.entities[1].lookback_specified), (0, None, False),
         )
 
     @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
@@ -152,7 +152,7 @@ class TestLoadPipeline(unittest.TestCase):
         path = write_temp_yaml(
             "source_id: bank\n"
             "entities:\n"
-            "  - incremental: {source_column: client_id}\n"
+            "  - incremental: {contract: {source_column: client_id, position_type: bigint}}\n"
         )
         with self.assertRaises(ValueError):
             manifest.load_pipeline(path)
@@ -185,7 +185,7 @@ class TestLoadPipeline(unittest.TestCase):
             "source_id: bank\n"
             "entities:\n"
             "  - fqn: retail_bank.transactions\n"
-            "    incremental: {source_column: _batch_id}\n"
+            "    incremental: {contract: {source_column: _batch_id, position_type: bigint}}\n"
         )
         pipeline = manifest.load_pipeline(path)
         self.assertEqual(pipeline.entities[0].incremental_column, "_batch_id")
@@ -196,7 +196,7 @@ class TestLoadPipeline(unittest.TestCase):
             "source_id: bank\n"
             "entities:\n"
             "  - fqn: retail_bank.clients\n"
-            "    incremental: {source_column: Client-Id}\n"
+            "    incremental: {contract: {source_column: Client-Id, position_type: bigint}}\n"
         )
         with self.assertRaises(ValueError):
             manifest.load_pipeline(path)
@@ -294,7 +294,7 @@ class TestLoadPipeline(unittest.TestCase):
                 if schedule:
                     content += f"schedule: {schedule!r}\n"
                 content += ("entities:\n  - fqn: retail_bank.transactions\n"
-                            "    incremental: {source_column: updated_at}\n")
+                             "    incremental: {contract: {source_column: updated_at, position_type: timestamp_local(7)}}\n")
                 entity = manifest.load_pipeline(write_temp_yaml(content)).entities[0]
                 self.assertEqual(
                     (entity.lookback_size, entity.lookback_unit, entity.lookback_specified),
@@ -306,7 +306,7 @@ class TestLoadPipeline(unittest.TestCase):
         entity = manifest.load_pipeline(write_temp_yaml(
             "source_id: bank\nschedule: '*/15 * * * *'\nentities:\n"
             "  - fqn: retail_bank.transactions\n"
-            "    incremental: {source_column: updated_at, lookback: {size: 1, unit: h}}\n"
+            "    incremental: {contract: {source_column: updated_at, position_type: timestamp_local(7)}, lookback: {size: 1, unit: h}}\n"
         )).entities[0]
         self.assertEqual((entity.lookback_size, entity.lookback_unit, entity.lookback_specified),
                          (1, "h", True))
@@ -316,7 +316,7 @@ class TestLoadPipeline(unittest.TestCase):
         entity = manifest.load_pipeline(write_temp_yaml(
             "source_id: bank\nentities:\n"
             "  - fqn: retail_bank.transactions\n"
-            "    incremental: {source_column: updated_at, lookback: {size: 0}}\n"
+            "    incremental: {contract: {source_column: updated_at, position_type: timestamp_local(7)}, lookback: {size: 0}}\n"
         )).entities[0]
         self.assertEqual((entity.lookback_size, entity.lookback_unit, entity.lookback_specified),
                          (0, None, True))
@@ -326,7 +326,7 @@ class TestLoadPipeline(unittest.TestCase):
         entity = manifest.load_pipeline(write_temp_yaml(
             "source_id: bank\nentities:\n"
             "  - fqn: retail_bank.transactions\n"
-            "    incremental: {source_column: updated_at, lookback: {size: 0, unit: nonsense}}\n"
+            "    incremental: {contract: {source_column: updated_at, position_type: timestamp_local(7)}, lookback: {size: 0, unit: nonsense}}\n"
         )).entities[0]
         self.assertEqual((entity.lookback_size, entity.lookback_unit), (0, None))
 
@@ -335,7 +335,7 @@ class TestLoadPipeline(unittest.TestCase):
         path = write_temp_yaml(
             "source_id: bank\nentities:\n"
             "  - fqn: retail_bank.transactions\n"
-            "    incremental: {source_column: updated_at, lookback: {size: 0.33, unit: d}}\n"
+            "    incremental: {contract: {source_column: updated_at, position_type: timestamp_local(7)}, lookback: {size: 0.33, unit: d}}\n"
         )
         with self.assertRaises(ValueError):
             manifest.load_pipeline(path)
@@ -345,7 +345,7 @@ class TestLoadPipeline(unittest.TestCase):
         path = write_temp_yaml(
             "source_id: bank\nentities:\n"
             "  - fqn: retail_bank.transactions\n"
-            "    incremental: {source_column: updated_at, lookback: {size: 1, unit: w}}\n"
+            "    incremental: {contract: {source_column: updated_at, position_type: timestamp_local(7)}, lookback: {size: 1, unit: w}}\n"
         )
         with self.assertRaises(ValueError):
             manifest.load_pipeline(path)

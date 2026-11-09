@@ -67,6 +67,7 @@ class EntityConfig:
     lookback_unit: str | None = None
     lookback_specified: bool = False
     act_snap: ActSnapConfig = field(default_factory=ActSnapConfig)
+    incremental_config: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -258,9 +259,14 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
     lookback_unit = None
     lookback_specified = False
     act_snap = ActSnapConfig()
+    incremental_config = None
     if "incremental" in entity:
-        incremental = _strict_object(entity["incremental"], {"source_column", "lookback", "act_snap"}, "incremental")
-        incremental_column = incremental.get("source_column")
+        from ingestion.sources.rdbms.incremental_config import validate
+        from ingestion.sources.rdbms import positions
+
+        incremental = _strict_object(entity["incremental"], {"contract", "lookback", "act_snap"}, "incremental")
+        contract = _strict_object(incremental.get("contract"), {"source_column", "position_type"}, "incremental.contract")
+        incremental_column = contract.get("source_column")
         if not isinstance(incremental_column, str) or not _COLUMN_PATTERN.fullmatch(incremental_column):
             raise ValueError("incremental.source_column must be a lowercase identifier")
         if "lookback" in incremental:
@@ -275,7 +281,15 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
                 lookback_unit = None
             lookback_specified = True
         else:
-            lookback_size, lookback_unit = temporal_default
+            family = positions.kind_info(contract.get("position_type"))[0]
+            lookback_size, lookback_unit = (
+                (0, None) if family == "integral" else
+                (3, "d") if family == "date" else temporal_default
+            )
+        incremental_config = validate({
+            "contract": contract,
+            "lookback": {"size": lookback_size, "unit": lookback_unit},
+        })
         if "act_snap" in incremental:
             act_snap = _parse_act_snap(incremental["act_snap"])
 
@@ -292,6 +306,7 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
         lookback_unit=lookback_unit,
         lookback_specified=lookback_specified,
         act_snap=act_snap,
+        incremental_config=incremental_config,
     )
 
 

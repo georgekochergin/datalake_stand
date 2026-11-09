@@ -71,9 +71,6 @@ def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str
     """Render logging, loading, and separate Asset publication for one entity."""
     target = resolve_fully_qualified(source.source_id, entity.fqn)
     group_id = f"load_{target.split('.')[-1]}"
-    incremental_line = (
-        f'incremental_column="{entity.incremental_column}",' if entity.incremental_column else None
-    )
     lines = [
         f'        with TaskGroup(group_id="{group_id}") as load_group:',
         '            log_start = TableLogOperator(',
@@ -95,11 +92,8 @@ def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str
         f'                fqn={json.dumps(entity.fqn)},',
         f'                target_table="{target}",',
     ]
-    if incremental_line:
-        lines.append(f"                {incremental_line}")
-        lines.append(f"                lookback_size={entity.lookback_size},")
-        lines.append(f"                lookback_unit={entity.lookback_unit!r},")
-        lines.append(f"                lookback_specified={entity.lookback_specified!r},")
+    if entity.incremental_config is not None:
+        lines.append(f"                incremental_config={entity.incremental_config!r},")
     lines.extend(
         [
             '            )',

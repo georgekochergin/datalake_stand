@@ -224,7 +224,8 @@ WHERE username = 'SYDAFA' AND program LIKE 'JDBC%';
 
 3. **В логе load-таска**: открыть лог
    `ingest_group.load_retail_bank__transactions.load` и показать команду
-   Spark с `--num-jdbc-partitions 4` и `--incremental-column _batch_id`;
+   Spark с `--num-jdbc-partitions 4` и JSON `--incremental-config`, содержащим
+   contract (колонку и канонический тип позиции) и конкретный lookback;
    у deals и таблиц refs передаётся `--no-jdbc-partitioning`. Ниже в том же
    логе — строка выбора колонки нарезки вида
 
@@ -574,7 +575,9 @@ WHERE key = 'snapshot.process_id';
 
 ```yaml
 incremental:
-  source_column: _batch_id
+  contract:
+    source_column: _batch_id
+    position_type: bigint
   act_snap:
     schedule: "0 2 * * *"
     tags: [nightly]
