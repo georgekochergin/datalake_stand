@@ -797,6 +797,11 @@ def main() -> None:
         airflow_wait_run(token, dag_id, run_id, timeout=900, name=dag_id + " snap 1")
     snapshot_counts: dict[str, int] = {}
     try:
+        never = trino_query(
+            "WITH expected(table_name) AS (VALUES 'e2e_never_published__act_snap') "
+            "SELECT e.table_name FROM expected e LEFT JOIN raw.information_schema.tables t "
+            "ON t.table_schema = 'bank' AND t.table_name = e.table_name WHERE t.table_name IS NULL")
+        check("freshness inventory distinguishes never published", len(never), 1)
         for table, raw_table in ACT_SNAPSHOT_TABLES.items():
             namespace, name = table.split(".")[1:]
             expected = f"s3://datalake/raw/{namespace}/{name}/"
@@ -847,6 +852,43 @@ def main() -> None:
             check(table + ": row count stable across overwrite", snap[0], snapshot_counts[table])
     except Exception as e:
         check("snapshot table query (run 2)", str(e), "ok")
+
+    print("\n==> Шаг 12: Совместный запуск инкремента и снимка...")
+    concurrent = []
+    for dag in (INGEST_DAGS[0], SNAPSHOT_DAGS[0]):
+        run = "e2e-concurrent-" + dag + stamp
+        code, _ = airflow_trigger_retry(token, dag, run)
+        check("trigger concurrent " + dag, code, 200)
+        concurrent.append((dag, run))
+    for dag, run in concurrent:
+        airflow_wait_run(token, dag, run, timeout=900, name=dag + " concurrent")
+
+    print("\n==> Шаг 13: Полный и частичный Clear старого DagRun...")
+    dag = INGEST_DAGS[0]
+    run = "e2e-clear-" + stamp
+    code, _ = airflow_trigger_retry(token, dag, run)
+    check("trigger Clear fixture", code, 200)
+    if airflow_wait_run(token, dag, run, timeout=900):
+        url = f"{AIRFLOW}/api/v2/dags/{dag}/dagRuns/{run}/taskInstances?limit=100"
+        code, raw = http("GET", url, headers={"Authorization": "Bearer " + token})
+        if not check("Clear task inventory", code, 200):
+            return
+        inventory = json.loads(raw)
+        tasks = [task["task_id"] for task in inventory["task_instances"]]
+        if not check("Clear task inventory complete", len(tasks), inventory["total_entries"]):
+            return
+        for phase in ("full", "partial"):
+            selected = tasks if phase == "full" else [
+                task for task in tasks if task == "generate_process_id" or "transactions" in task]
+            check(phase + " Clear includes generator", "generate_process_id" in selected, True)
+            check(phase + " Clear includes load", any(task.endswith(".load") for task in selected), True)
+            code, raw = http(
+                "POST", f"{AIRFLOW}/api/v2/dags/{dag}/clearTaskInstances",
+                {"dag_run_id": run, "task_ids": selected, "dry_run": False,
+                 "only_failed": False, "only_running": False, "reset_dag_runs": True},
+                {"Authorization": "Bearer " + token})
+            if check(phase + " Clear accepted", code, 200):
+                airflow_wait_run(token, dag, run, timeout=900, name=phase + " Clear rerun")
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import importlib.util
 import os
 import re
 from argparse import Namespace
+from datetime import datetime, timezone
 from uuid import uuid4
 from unittest.mock import patch
 
@@ -233,6 +234,170 @@ def check_post_append_retry(spark, hook, jdbc, token):
             "both commits retain the same process identity")
 
 
+def check_snapshot_recovery(spark, hook, source, jdbc, token):
+    """Exercise controlled JDBC visibility, bootstrap and snapshot recovery on both engines.
+
+    Immutable SQL projections model successive visible source sets without admin
+    writes to sydafa. They do not prove the source transaction commit ordering.
+    The logical entity remains constant while real JDBC reads use each projection.
+    """
+    from ingestion import meta
+    from ingestion.spark.raw.rdbms.incremental import load_entity, load_act_snap
+
+    target = f"raw.e2e_contract.{source}_snapshot_recovery"
+    args = Namespace(
+        jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
+        source_table=f"fixture.{source}_late_rows", target_table=target,
+        source_id=f"e2e_snapshot_{source}", incremental_column="position",
+        no_jdbc_partitioning=True, num_partitions=1, dag_id="e2e_snapshot_recovery",
+        run_id=token, process_id=None, lookback_size=2, lookback_unit=None,
+        lookback_given=True,
+    )
+
+    def allocate():
+        """Allocate a fresh execution while preserving the logical entity."""
+        args.process_id = meta.allocate_process_id(
+            dag_id=args.dag_id, run_id=token, db_connect=hook.get_conn)
+        return args.process_id
+
+    def projection(values):
+        """Render real JDBC rows or an empty result with a stable bigint schema."""
+        suffix = " FROM dual" if source == "broker" else ""
+        sql_type = "NUMBER(18,0)" if source == "broker" else "bigint"
+        alias = '"position"' if source == "broker" else "position"
+        query = " UNION ALL ".join(
+            f"SELECT CAST({value} AS {sql_type}) AS {alias}{suffix}"
+            for value in values or (0,))
+        if not values:
+            query += " WHERE 1 = 0"
+        return f"({query}) visibility_fixture"
+
+    def registry():
+        """Capture every state field and batch, including timestamps and revisions."""
+        connection = hook.get_conn()
+        try:
+            with connection.cursor() as cursor:
+                result = []
+                for table in ("incremental_state", "incremental_batches"):
+                    cursor.execute(
+                        f"SELECT * FROM ingestion.{table} WHERE source_id = %s ORDER BY 1",
+                        (args.source_id,))
+                    result.append(cursor.fetchall())
+                return result
+        finally:
+            connection.close()
+
+    real_position = load_entity.source_position
+    real_read = load_entity.reader.read_extract_frame
+
+    def incremental(values):
+        """Execute the unchanged loader with controlled JDBC source visibility."""
+        visible = Namespace(**vars(args))
+        visible.source_table = projection(values)
+        with patch.object(load_entity, "source_position",
+                          side_effect=lambda session, _: real_position(session, visible)), \
+                patch.object(load_entity.reader, "read_extract_frame",
+                             side_effect=lambda session, _, *bounds: real_read(session, visible, *bounds)):
+            load_entity.managed_load(spark, args)
+
+    snapshot_args = Namespace(**vars(args))
+    snapshot_args.incremental_column = None
+    snapshot_args.target_table = target + "__act_snap"
+
+    def snapshot(values, crash=False):
+        """Read a real JDBC projection and optionally fail after the RTAS commit."""
+        snapshot_args.process_id = args.process_id
+        snapshot_args.source_table = projection(values)
+        before = registry()
+        overwrite = load_act_snap._overwrite_snapshot
+
+        def commit_then_crash(*arguments):
+            """Leave a genuine committed Iceberg version behind the injected crash."""
+            overwrite(*arguments)
+            raise RuntimeError("injected post-snapshot commit crash")
+
+        try:
+            if crash:
+                with patch.object(load_act_snap, "_overwrite_snapshot", side_effect=commit_then_crash):
+                    load_act_snap.managed_snapshot(spark, snapshot_args)
+            else:
+                load_act_snap.managed_snapshot(spark, snapshot_args)
+        finally:
+            require(registry() == before, f"{source}: snapshot leaves all registry fields and batches untouched")
+
+    def version():
+        """Capture publication identity and time independently from table rows."""
+        return spark.sql(
+            f"SELECT snapshot_id, committed_at FROM {snapshot_args.target_table}.snapshots "
+            "ORDER BY committed_at DESC LIMIT 1").collect()
+
+    allocate()
+    snapshot(())
+    require(spark.table(snapshot_args.target_table).count() == 0,
+            f"{source}: snapshot before bootstrap publishes an empty table")
+    require(load_act_snap.current_snapshot_author(spark, snapshot_args.target_table) == args.process_id,
+            f"{source}: first empty publication has an Iceberg author")
+    allocate()
+    incremental(())
+    require(metadata_row(hook, "incremental_state", args.source_id, args.source_table)["watermark"] is None,
+            f"{source}: empty bootstrap preserves NULL watermark after snapshot")
+    allocate()
+    incremental((12,))
+    require(metadata_row(hook, "incremental_state", args.source_id, args.source_table)["watermark"] == "12",
+            f"{source}: nonempty bootstrap advances watermark")
+    allocate()
+    incremental((9, 11, 12))
+    values = {int(row[0]) for row in spark.table(target).select("position").collect()}
+    require(values == {11, 12}, f"{source}: late row inside lookback arrives, outside row is missed")
+    batch = metadata_row(hook, "incremental_batches", args.source_id, args.source_table)
+    require(batch["reason"] == "regular" and batch["lower_bound"] == "10",
+            f"{source}: post-bootstrap execution uses the regular lookback window")
+    allocate()
+    try:
+        snapshot((9, 11, 12), crash=True)
+    except RuntimeError as exc:
+        require(str(exc) == "injected post-snapshot commit crash",
+                f"{source}: fault occurs after the real snapshot commit")
+    else:
+        raise AssertionError("snapshot fault injection did not execute")
+    committed = version()
+    snapshot_args.source_table = projection(())
+    with patch.object(load_act_snap, "read_extract_frame", side_effect=AssertionError("retry must not read")):
+        load_act_snap.managed_snapshot(spark, snapshot_args)
+    require(version() == committed, f"{source}: committed retry does not change freshness or version")
+    require({int(row[0]) for row in spark.table(snapshot_args.target_table).select("position").collect()}
+            == {9, 11, 12}, f"{source}: snapshot recovers the row outside lookback")
+    require(spark.table(snapshot_args.target_table).select("__process_id").distinct().collect()[0][0]
+            == args.process_id, f"{source}: recovered publication still carries current process for Asset")
+    allocate()
+    with patch.object(load_act_snap.LOGGER, "warning") as warning:
+        snapshot(())
+        require(warning.call_count == 1, f"{source}: empty source emits a warning")
+    require(version() == committed and spark.table(snapshot_args.target_table).count() == 3,
+            f"{source}: empty check preserves data and publication freshness")
+    require(load_act_snap.current_snapshot_author(spark, snapshot_args.target_table) != args.process_id,
+            f"{source}: empty check cannot claim the previous publication")
+    allocate()
+    snapshot_args.source_table = projection((20, 21))
+    frame = load_act_snap.read_extract_frame(spark, snapshot_args, None, None)
+    try:
+        with patch.object(spark, "sql", side_effect=RuntimeError("injected pre-commit failure")):
+            try:
+                load_act_snap._overwrite_snapshot(spark, snapshot_args, frame, datetime.now(timezone.utc))
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("pre-commit failure must propagate")
+    finally:
+        frame.unpersist()
+    require(version() == committed, f"{source}: failed attempt leaves previous publication intact")
+    snapshot((20, 21))
+    rows = spark.table(snapshot_args.target_table).select("position", "__process_id").collect()
+    require({int(row[0]) for row in rows} == {20, 21}
+            and {row[1] for row in rows} == {args.process_id},
+            f"{source}: retry replaces the complete selection without old rows")
+
+
 def jdbc_count(spark, args, query):
     """Count rows of a source query over one JDBC connection."""
     connection = spark._jvm.java.sql.DriverManager.getConnection(
@@ -424,6 +589,8 @@ def main():
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     try:
         check_post_append_retry(spark, hook, source_jdbc["bank"], token)
+        for source, jdbc in source_jdbc.items():
+            check_snapshot_recovery(spark, hook, source, jdbc, token)
         check_partitioning(spark, source_jdbc)
         check_partitioned_load_path(spark, source_jdbc)
         for source, table, kind in (
