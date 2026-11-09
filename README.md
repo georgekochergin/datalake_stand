@@ -179,7 +179,7 @@ requirements соответствующих образов):
 | Путь | Назначение |
 |---|---|
 | `airflow/` | Пользовательский код оркестрации: DAG-и обновления источников (`dags/update_source_*.py`), сгенерированные DAG-и загрузки (`dags/generated/`, артефакт, в git не попадают), плагины `plugins/ingestion` (операторы и реестр pg-meta) и `plugins/migrations` (батчи операций обновления источников) |
-| `ingestion/spark/` | Spark-приложения загрузки по слоям и типам источников: `ingestion/spark/raw/rdbms/load_entity.py` — append-загрузчик одной сущности RDBMS (JDBC → Iceberg); compose монтирует каталог как `/opt/spark-jobs` |
+| `ingestion/spark/` | Spark-приложения загрузки, сгруппированы по потокам: `spark/raw/rdbms/incremental/load_entity.py` — окна инкремента, `.../incremental/load_act_snap.py` — таблицы-снимки `__act_snap`, `.../full/load_entity.py` — полный срез; общие чтение и запись raw — `.../rdbms/reader.py` и `raw_append.py`. Compose монтирует каталог как `/opt/spark-jobs` |
 | `ingestion/sources/` | Диалекты СУБД и общий JDBC-слой: `sources/rdbms/positions.py` — типизированные позиции инкремента, `sources/rdbms/dialects/` — адаптеры MSSQL/Oracle (URL, quoting, литералы, temporal-выражения), `sources/rdbms/registry.py` — реестр диалектов по conn_type/JDBC URL, `sources/rdbms/jdbc.py` — соединения и метаданные |
 | `trino/` | Пользовательский SQL (каркас) |
 | `ingestion/` | Единый пакет процесса загрузки: `conf/` — манифесты источников (`sources.yaml`), пайплайнов (`pipelines/**/*.yaml`) и технические настройки (`settings.yaml`); `generator/` — генератор DAG-ов и валидация манифестов (`generate_dags.py`, `manifest.py`, `naming.py`, запуск `python3 -m ingestion.generator.generate_dags`); `operators.py` — операторы Airflow; `meta.py` — клиент pg-meta (партии и watermark); `iceberg.py` — DDL целевых raw-таблиц. Пакет целиком доставляется в контейнеры Airflow и Spark-драйвер (том + `PYTHONPATH=/opt/python`) |
@@ -635,6 +635,16 @@ false` у сущности. Раздел 6 architecture.md.
 (`>` или включительный `>=` у выровненного lookback), default-отступ по
 фактическому типу колонки и расписанию DAG-а; watermark и партии — в pg-meta
 с CAS-защитой от повторов и конкуренции. Раздел 7 architecture.md.
+
+**DAG-и снимков.** У каждой инкрементальной сущности всегда есть отдельный
+DAG `<пайплайн>__act_snap_<alias>` (штатная активация источника;
+расписание и независимые настройки чтения/пула — блок `incremental.act_snap`, без него —
+ручной запуск). Он читает источник целиком и одной атомарной операцией
+Iceberg перезаписывает таблицу-снимок `raw.<источник>.<таблица>__act_snap`
+(мета-колонки `__process_id`/`__load_dttm`, без партиционирования): читатель
+всегда видит целиком предыдущий или целиком новый снимок. Реестр инкремента
+не трогает; автор последней публикации и её время видны из метаданных
+Iceberg (`snapshot.process_id` и `committed_at`). Раздел 7.7 architecture.md.
 
 **Метаданные.** pg-meta — операционная база фреймворка: идентификаторы
 процессов, журналы DAG-ов и тасков, состояние и партии инкрементальных

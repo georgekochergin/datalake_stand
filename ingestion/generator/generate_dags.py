@@ -21,7 +21,14 @@ from ingestion.generator.manifest import (
     load_settings,
     validate_pipeline,
 )
-from ingestion.generator.naming import CATALOG, resolve_fully_qualified
+from ingestion.generator.naming import (
+    CATALOG,
+    SNAPSHOT_TAG,
+    resolve_fully_qualified,
+    resolve_snapshot_fully_qualified,
+    resolve_target_table_name,
+    snapshot_alias,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOURCES = REPO_ROOT / "ingestion" / "conf" / "sources.yaml"
@@ -29,6 +36,7 @@ DEFAULT_PIPELINES = REPO_ROOT / "ingestion" / "conf" / "pipelines"
 DEFAULT_OUTPUT = REPO_ROOT / "airflow" / "dags" / "generated"
 DEFAULT_SETTINGS = REPO_ROOT / "ingestion" / "conf" / "settings.yaml"
 ACTIVATE_TTL_MINUTES = 15
+MAX_ACTIVE_RUNS = 1
 
 
 def dag_id_for(source: SourceConfig, pipeline_name: str) -> str:
@@ -47,6 +55,16 @@ def file_name_for(source: SourceConfig, pipeline_name: str) -> str:
 def asset_uri(source_id: str, fqn: str) -> str:
     """Asset URI: raw entity FQN, percent-encoded where needed."""
     return f"{CATALOG}://{source_id}/{quote(fqn)}"
+
+
+def snapshot_dag_id(source: SourceConfig, pipeline_name: str, fqn: str) -> str:
+    """Airflow dag_id of the actual-snapshot DAG for one incremental entity."""
+    return f"{dag_id_for(source, pipeline_name)}__act_snap_{snapshot_alias(fqn)}"
+
+
+def snapshot_asset_uri(source_id: str, fqn: str) -> str:
+    """Asset URI of the actual-snapshot table."""
+    return f"{asset_uri(source_id, fqn)}/act_snap"
 
 
 def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str]:
@@ -95,13 +113,117 @@ def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str
     )
     lines.extend([
         '            )',
-        '            publish_asset = EmptyOperator(',
+        '            publish_asset = PythonOperator(',
         '                task_id="publish_asset",',
+        '                python_callable=publish_asset_event,',
         f'                outlets=[Asset("{asset_uri(source.source_id, entity.fqn)}")],',
         '            )',
         '            log_start >> load >> log_end >> publish_asset',
     ])
     return lines
+
+
+def _snapshot_entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str]:
+    """Render the snapshot load task group for one incremental entity."""
+    target = resolve_snapshot_fully_qualified(source.source_id, entity.fqn)
+    group_id = f"snap_{resolve_target_table_name(entity.fqn)}"
+    config = entity.act_snap
+    pool = config.airflow.pool
+    pool_slots = config.airflow.pool_slots
+    lines = [
+        f'    with TaskGroup(group_id="{group_id}") as snap_group:',
+        '        log_start = TableLogOperator(',
+        '            task_id="log_start",',
+        f'            source_id="{source.source_id}",',
+        f'            entity_fqn={json.dumps(entity.fqn)},',
+        f'            datalake_table="{target}",',
+        '            status="START",',
+        '        )',
+        '        load = IngestActSnapOperator(',
+        '            task_id="load",',
+        f'            pool={json.dumps(pool)},',
+        f'            pool_slots={pool_slots},',
+        f'            source_type={json.dumps(source.type)},',
+        f'            jdbc_partitioning={config.spark.jdbc_partitioning!r},',
+        f'            num_partitions={num_partitions},',
+        f'            source_id="{source.source_id}",',
+        f'            airflow_conn_id={json.dumps(source.airflow_conn_id)},',
+        f'            fqn={json.dumps(entity.fqn)},',
+        f'            target_table="{target}",',
+        '        )',
+        '        log_end = TableLogOperator(',
+        '            task_id="log_end",',
+        f'            source_id="{source.source_id}",',
+        f'            entity_fqn={json.dumps(entity.fqn)},',
+        f'            datalake_table="{target}",',
+        '            status="END",',
+        '        )',
+        '        publish_asset = PythonOperator(',
+        '            task_id="publish_asset",',
+        '            python_callable=publish_asset_event,',
+        f'            op_kwargs={{"target_table": "{target}"}},',
+        f'            outlets=[Asset("{snapshot_asset_uri(source.source_id, entity.fqn)}")],',
+        '        )',
+        '        log_start >> load >> log_end >> publish_asset',
+    ]
+    return lines
+
+
+def generate_snapshot_dag_source(
+    source: SourceConfig, pipeline: PipelineManifest, entity,
+    pipeline_name: str | None = None, num_partitions: int | None = None,
+) -> str:
+    """Render the snapshot DAG module source for one incremental entity."""
+    description = (
+        f"Actual snapshot for source {pipeline.source_id} entity {entity.fqn} (generated)"
+    )
+    if num_partitions is None:
+        num_partitions = load_settings(DEFAULT_SETTINGS).num_partitions
+    dag_id = snapshot_dag_id(source, pipeline_name or pipeline.source_id, entity.fqn)
+    tags = [SNAPSHOT_TAG, source.source_id, resolve_target_table_name(entity.fqn), *entity.act_snap.tags]
+    lines = [
+        f'"""Generated snapshot DAG for pipeline "{pipeline.source_id}" entity {entity.fqn} — '
+        'regenerate via python3 -m ingestion.generator.generate_dags, do not edit."""',
+        "from datetime import datetime",
+        "",
+        "from airflow import DAG",
+        "from airflow.providers.standard.operators.python import PythonOperator",
+        "from airflow.sdk import Asset",
+        "from airflow.utils.task_group import TaskGroup",
+        "from sydafa_airflow.operators import SydafaActivateOperator",
+        "",
+        "from ingestion.operators import (",
+        "    GenerateProcessIdOperator,",
+        "    IngestActSnapOperator,",
+        "    publish_asset_event,",
+        "    TableLogOperator,",
+        "    dagrun_failure_callback,",
+        "    dagrun_success_callback,",
+        ")",
+        "",
+        "with DAG(",
+        f'    dag_id="{dag_id}",',
+        f"    description={description!r},",
+        "    start_date=datetime(2026, 1, 1),",
+        f"    schedule={entity.act_snap.schedule!r},",
+        "    catchup=False,",
+        f"    max_active_runs={MAX_ACTIVE_RUNS},",
+        f"    tags={tags!r},",
+        "    on_success_callback=dagrun_success_callback,",
+        "    on_failure_callback=dagrun_failure_callback,",
+        ") as dag:",
+        '    activate_source = SydafaActivateOperator(',
+        '        task_id="activate_source",',
+        '        conn_id="sydafa_default",',
+        f'        source="{source.source_id}",',
+        f"        ttl_minutes={ACTIVATE_TTL_MINUTES},",
+        "    )",
+        '    generate_process_id = GenerateProcessIdOperator(task_id="generate_process_id")',
+        *_snapshot_entity_block(source, entity, num_partitions),
+        "    generate_process_id >> activate_source >> snap_group",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def generate_dag_source(
@@ -118,7 +240,7 @@ def generate_dag_source(
         "from datetime import datetime",
         "",
         "from airflow import DAG",
-        "from airflow.providers.standard.operators.empty import EmptyOperator",
+        "from airflow.providers.standard.operators.python import PythonOperator",
         "from airflow.sdk import Asset",
         "from airflow.utils.task_group import TaskGroup",
         "from sydafa_airflow.operators import SydafaActivateOperator",
@@ -126,6 +248,7 @@ def generate_dag_source(
         "from ingestion.operators import (",
         "    GenerateProcessIdOperator,",
         "    IngestAppendOperator,",
+        "    publish_asset_event,",
         "    TableLogOperator,",
         "    dagrun_failure_callback,",
         "    dagrun_success_callback,",
@@ -137,7 +260,7 @@ def generate_dag_source(
         "    start_date=datetime(2026, 1, 1),",
         f"    schedule={pipeline.schedule!r},",
         f"    catchup={pipeline.catchup!r},",
-        "    max_active_runs=1,",
+        f"    max_active_runs={MAX_ACTIVE_RUNS},",
         f"    tags={list(pipeline.tags)!r},",
         "    on_success_callback=dagrun_success_callback,",
         "    on_failure_callback=dagrun_failure_callback,",
@@ -186,7 +309,24 @@ def generate_all(
             if target in targets:
                 raise ValueError(f"target collision {target}: {targets[target]} and {path}")
             targets[target] = path
+            if entity.incremental_column:
+                snapshot_target = resolve_snapshot_fully_qualified(source.source_id, entity.fqn)
+                if snapshot_target in targets:
+                    raise ValueError(
+                        f"target collision {snapshot_target}: {targets[snapshot_target]} and {path}"
+                    )
+                targets[snapshot_target] = path
         generated[name] = generate_dag_source(source, pipeline, path.stem, settings.num_partitions)
+        for entity in pipeline.entities:
+            if not entity.incremental_column:
+                continue
+            snapshot_name = f"{snapshot_dag_id(source, path.stem, entity.fqn)}.py"
+            if snapshot_name in owners:
+                raise ValueError(f"DAG collision {snapshot_name}: {owners[snapshot_name]} and {path}")
+            owners[snapshot_name] = path
+            generated[snapshot_name] = generate_snapshot_dag_source(
+                source, pipeline, entity, path.stem, settings.num_partitions
+            )
     return generated
 
 
@@ -225,12 +365,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"check: {len(drift)} difference(s)")
         return 1 if drift else 0
     args.output.mkdir(parents=True, exist_ok=True)
+    generated_prefixes = (
+        '"""Generated DAG for pipeline ',
+        '"""Generated snapshot DAG for pipeline ',
+    )
     for name in generated:
         path = args.output / name
-        if path.exists() and not path.read_text(encoding="utf-8").startswith('"""Generated DAG for pipeline '):
+        if path.exists() and not path.read_text(encoding="utf-8").startswith(generated_prefixes):
             raise ValueError(f"refusing to overwrite non-generated file: {path}")
     for path in args.output.glob("ingest__*.py"):
-        if path.name not in generated and path.read_text(encoding="utf-8").startswith('"""Generated DAG for pipeline '):
+        if path.name not in generated and path.read_text(encoding="utf-8").startswith(generated_prefixes):
             path.unlink()
     for name, content in sorted(generated.items()):
         path = args.output / name

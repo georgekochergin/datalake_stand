@@ -82,9 +82,9 @@ class TestConfiguration(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     load_pipeline(self.pipeline("pipeline.yaml", **config))
 
-    def test_old_parallelism_key_rejected_with_rename_hint(self):
+    def test_unknown_spark_key_rejected(self):
         path = self.pipeline("pipeline.yaml", spark={"parallelism": False})
-        with self.assertRaisesRegex(ValueError, "renamed to spark.jdbc_partitioning"):
+        with self.assertRaisesRegex(ValueError, "unknown keys.*parallelism"):
             load_pipeline(path)
 
     def test_settings_strict_and_propagated(self):

@@ -4,11 +4,15 @@ Every dot in an entity FQN becomes the "__" delimiter: the structural
 schema.table separator and dots embedded inside quoted fragments alike.
 """
 
+import base64
+import hashlib
 import re
 from collections.abc import Iterable
 
 CATALOG = "raw"
 DELIMITER = "__"
+SNAPSHOT_TABLE_SUFFIX = "__act_snap"
+SNAPSHOT_TAG = "act_snap"
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -71,3 +75,25 @@ def assert_unique_targets(fqns: Iterable[str]) -> None:
         if target in seen:
             raise ValueError(f"FQNs {seen[target]!r} and {fqn!r} both resolve to target {target!r}")
         seen[target] = fqn
+
+
+def snapshot_alias(fqn: str) -> str:
+    """First 8 lowercase base32 characters of the SHA-256 digest of the FQN.
+
+    Deterministic and collision-checked at generation time; no dictionaries
+    or configuration are involved.
+    """
+    digest = hashlib.sha256(fqn.encode("utf-8")).digest()
+    return base64.b32encode(digest).decode("ascii").lower()[:8]
+
+
+def resolve_snapshot_table_name(fqn: str) -> str:
+    """Resolve an entity FQN to its actual-snapshot table name."""
+    return _validate_identifier(
+        resolve_target_table_name(fqn) + SNAPSHOT_TABLE_SUFFIX, "snapshot table name", fqn
+    )
+
+
+def resolve_snapshot_fully_qualified(source_id: str, fqn: str) -> str:
+    """Resolve a source id and entity FQN to the full snapshot table identifier."""
+    return f"{CATALOG}.{resolve_namespace(source_id)}.{resolve_snapshot_table_name(fqn)}"

@@ -11,11 +11,16 @@
 5. Исполнение четырёх DAG-ов ингестии main/refs (raw-слой) и проверку
    данных в Iceberg через Trino REST: append-only семантика, общий __process_id
    на запуск, работа инкрементального режима по _batch_id (watermark).
+6. Запуск DAG-ов снимков каждой инкрементальной сущности и проверку
+   таблиц-снимков __act_snap: полное соответствие источнику, единый
+   __process_id и __load_dttm, атомарная перезапись при повторе (одна порция),
+   свежесть и автор публикации по метаданным Iceberg ($snapshots, $properties).
 """
 from __future__ import annotations
 
 import ast
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -39,6 +44,23 @@ INGEST_DAGS = tuple(
     f"ingest__rdbms__{source}__{pipeline}"
     for source in ("bank", "broker") for pipeline in ("main", "refs")
 )
+
+
+def snapshot_dag_id(source: str, pipeline: str, fqn: str) -> str:
+    """DAG id снимка: имя DAG-а пайплайна + __act_snap_<alias>; alias = первые 8 символов base32(sha256(FQN))."""
+    digest = hashlib.sha256(fqn.encode("utf-8")).digest()
+    alias = base64.b32encode(digest).decode("ascii").lower()[:8]
+    return f"ingest__rdbms__{source}__{pipeline}__act_snap_{alias}"
+
+
+SNAPSHOT_DAGS = (
+    snapshot_dag_id("bank", "main", "retail_bank.transactions"),
+    snapshot_dag_id("broker", "main", "trading_core.transactions"),
+)
+ACT_SNAPSHOT_TABLES = {
+    "raw.bank.retail_bank__transactions__act_snap": "raw.bank.retail_bank__transactions",
+    "raw.broker.trading_core__transactions__act_snap": "raw.broker.trading_core__transactions",
+}
 
 RAW_SNAPSHOT_TABLES = [
     "raw.bank.retail_bank__clients",
@@ -503,10 +525,20 @@ def validate_manifests_and_dags() -> None:
         load_sources(ws / "ingestion" / "conf" / "sources.yaml"),
         ws / "ingestion" / "conf" / "pipelines", ws / "ingestion" / "conf" / "settings.yaml",
     )
-    check("generated DAG set", sorted(generated), sorted(name + ".py" for name in INGEST_DAGS))
+    check("generated DAG set", sorted(generated), sorted(name + ".py" for name in INGEST_DAGS + SNAPSHOT_DAGS))
     for name, content in generated.items():
         ast.parse(content, filename=name)
         check("generated DAG %s syntax valid" % name, True, True)
+    for dag_id in SNAPSHOT_DAGS:
+        content = generated[dag_id + ".py"]
+        check("snapshot DAG %s renders snapshot loader" % dag_id, "IngestActSnapOperator(" in content, True)
+        check("snapshot DAG %s has no schedule" % dag_id, "schedule=None" in content, True)
+        check("snapshot DAG %s tagged act_snap" % dag_id, "'act_snap'" in content, True)
+        check("snapshot DAG %s uses Python publication task" % dag_id,
+              "python_callable=publish_asset_event" in content, True)
+        check("snapshot DAG %s uses slash Asset URI" % dag_id, "/act_snap\")" in content, True)
+        check("snapshot DAG %s uses explicitly configured shared pool" % dag_id, 'pool="ingest_loads"' in content, True)
+        check("snapshot DAG %s uses configured pool weight" % dag_id, "pool_slots=2" in content, True)
 
 
 def main() -> None:
@@ -610,6 +642,26 @@ def main() -> None:
     check("trigger update_source_broker", code, 200)
     broker_success = airflow_wait_run(token, "update_source_broker", run_id_broker, timeout=360, name="update_source_broker")
     check("update_source_broker completed successfully", broker_success, True)
+
+    print("\n==> Шаг 5а: Снимок банка до первой raw-загрузки (снимок сам создаёт namespace)...")
+    early_snap_dag = SNAPSHOT_DAGS[0]
+    registered = airflow_wait_dag_registered(token, early_snap_dag, timeout=240)
+    check("DAG %s registered before first ingest" % early_snap_dag, registered, True)
+    if registered:
+        early_run = "e2e-snap0-%s-%d" % (early_snap_dag, time.time())
+        code, _ = airflow_trigger_retry(token, early_snap_dag, early_run)
+        check("trigger %s (run 0)" % early_snap_dag, code, 200)
+        early_ok = airflow_wait_run(token, early_snap_dag, early_run, timeout=900, name=early_snap_dag + " snap 0")
+        if early_ok:
+            try:
+                table = "raw.bank.retail_bank__transactions__act_snap"
+                snap = trino_query(
+                    "SELECT count(*), count(DISTINCT __process_id) FROM %s" % table
+                )[0]
+                check(table + ": first snapshot publish on a fresh namespace", snap[0] > 0, True)
+                check(table + ": single portion", snap[1], 1)
+            except Exception as e:
+                check("snapshot table query (run 0)", str(e), "ok")
 
     print("\n==> Шаг 6: Регистрация и запуск DAG-ов ингестии (raw-слой), первая загрузка...")
     for dag_id in INGEST_DAGS:
@@ -730,6 +782,71 @@ def main() -> None:
             check(table + ": history + delta count", total, first_counts[table] + delta)
     except Exception as e:
         check("raw tables query (run 3)", str(e), "ok")
+
+    print("\n==> Шаг 10: DAG-и снимков (таблицы-снимки __act_snap)...")
+    for dag_id in SNAPSHOT_DAGS:
+        registered = airflow_wait_dag_registered(token, dag_id, timeout=240)
+        check("DAG %s registered in Airflow" % dag_id, registered, True)
+        if not registered:
+            print("FATAL: снимочный DAG %s не зарегистрирован" % dag_id)
+            return
+    for dag_id in SNAPSHOT_DAGS:
+        run_id = "e2e-snap1-%s-%s" % (dag_id, stamp)
+        code, _ = airflow_trigger_retry(token, dag_id, run_id)
+        check("trigger %s (run 1)" % dag_id, code, 200)
+        airflow_wait_run(token, dag_id, run_id, timeout=900, name=dag_id + " snap 1")
+    snapshot_counts: dict[str, int] = {}
+    try:
+        for table, raw_table in ACT_SNAPSHOT_TABLES.items():
+            namespace, name = table.split(".")[1:]
+            expected = f"s3://datalake/raw/{namespace}/{name}/"
+            paths = trino_query(f'SELECT DISTINCT "$path" FROM {table}')
+            check(f"{table}: exact storage prefix", bool(paths) and all(row[0].startswith(expected) for row in paths), True)
+            snap = trino_query(
+                "SELECT count(*), count(DISTINCT __process_id), count(DISTINCT __load_dttm), "
+                "max(__process_id) FROM %s" % table
+            )[0]
+            check(f"{table}: rows published", snap[0] > 0, True)
+            check(f"{table}: single snapshot portion", snap[1], 1)
+            check(f"{table}: single load timestamp (freshness marker)", snap[2], 1)
+            check(f"{table}: process id recorded", snap[3] > 0, True)
+            raw_total = trino_query("SELECT count(*) FROM %s" % raw_table)[0][0]
+            matched = trino_query(
+                "SELECT count(*) FROM %s s JOIN %s r ON s.transaction_id = r.transaction_id"
+                % (table, raw_table)
+            )[0][0]
+            check(f"{table}: every snapshot row is known to raw history (by id)", matched, snap[0])
+            check(f"{table}: snapshot never exceeds raw history (source deletions allowed)",
+                  snap[0] <= raw_total, True)
+            snapshot_counts[table] = snap[0]
+            freshness = trino_query(
+                'SELECT max(committed_at) FROM "%s"."%s"."%s$snapshots"' % ("raw", namespace, name)
+            )
+            check(f"{table}: Iceberg snapshot history exists", bool(freshness[0][0]), True)
+            author = trino_query(
+                "SELECT value FROM \"%s\".\"%s\".\"%s$properties\" WHERE key = 'snapshot.process_id'"
+                % ("raw", namespace, name)
+            )
+            check(f"{table}: author property matches the published process id", int(author[0][0]), snap[3])
+    except Exception as e:
+        check("snapshot tables query (run 1)", str(e), "ok")
+
+    print("\n==> Шаг 11: Повторный снимок — атомарная перезапись, а не накопление...")
+    dag_id = SNAPSHOT_DAGS[0]
+    table = "raw.bank.retail_bank__transactions__act_snap"
+    run_id = "e2e-snap2-%s-%s" % (dag_id, stamp)
+    code, _ = airflow_trigger_retry(token, dag_id, run_id)
+    check("trigger %s (run 2)" % dag_id, code, 200)
+    airflow_wait_run(token, dag_id, run_id, timeout=900, name=dag_id + " snap 2")
+    try:
+        snap = trino_query(
+            "SELECT count(*), count(DISTINCT __process_id) FROM %s" % table
+        )[0]
+        check(table + ": replaced, not appended (one portion)", snap[1], 1)
+        if table in snapshot_counts:
+            check(table + ": row count stable across overwrite", snap[0], snapshot_counts[table])
+    except Exception as e:
+        check("snapshot table query (run 2)", str(e), "ok")
 
 
 if __name__ == "__main__":

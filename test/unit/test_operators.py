@@ -8,6 +8,10 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
+class FakeSkip(Exception):
+    """Stand-in for AirflowSkipException in the scoped module doubles."""
+
+
 class FakeOperator:
     """Preserve constructor arguments and record Spark submission."""
 
@@ -29,11 +33,12 @@ def load_operators():
     for name in (
         "airflow", "airflow.providers", "airflow.providers.apache", "airflow.providers.apache.spark",
         "airflow.providers.apache.spark.operators", "airflow.providers.apache.spark.operators.spark_submit",
-        "airflow.sdk", "_operator_test_ingestion",
+        "airflow.sdk", "airflow.sdk.exceptions", "_operator_test_ingestion",
     ):
         modules[name] = types.ModuleType(name)
     modules["airflow.sdk"].BaseHook = MagicMock()
     modules["airflow.sdk"].BaseOperator = FakeOperator
+    modules["airflow.sdk.exceptions"].AirflowSkipException = FakeSkip
     modules["airflow.providers.apache.spark.operators.spark_submit"].SparkSubmitOperator = FakeOperator
     modules["ingestion"] = types.ModuleType("ingestion")
     modules["ingestion"].meta = MagicMock()
@@ -75,13 +80,15 @@ class TestIngestOperator(unittest.TestCase):
         self.assertEqual(args[args.index("--num-partitions") + 1], "4")
         self.assertNotIn("--no-jdbc-partitioning", args)
         self.assertEqual(operator.source_type, "rdbms")
-        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/load_entity.py")
+        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/full/load_entity.py")
         self.assertEqual(operator.deploy_mode, "client")
         self.assertIn("jdbc:sqlserver://host:1433;databaseName=db;encrypt=false", args)
         operator = self.operator(jdbc_partitioning=False, num_partitions=7, incremental_column="_batch_id", lookback_size=5)
         operator.execute(self.context)
+        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/incremental/load_entity.py")
         self.assertIn("--no-jdbc-partitioning", operator.application_args)
-        self.assertEqual(operator.application_args[-2:], ["--incremental-column", "_batch_id"])
+        column = operator.application_args
+        self.assertEqual(column[column.index("--incremental-column") + 1], "_batch_id")
         self.assertIn("--lookback-size", operator.application_args)
         self.assertEqual(operator.application_args[operator.application_args.index("--lookback-size") + 1], "5")
         self.assertNotIn("--watermark-value", operator.application_args)
@@ -95,8 +102,8 @@ class TestIngestOperator(unittest.TestCase):
         self.assertIn("jdbc:oracle:thin:@//host:1521/db", operator.application_args)
 
     def test_run_identity_and_metadata_credentials_are_forwarded(self):
-        operator = self.operator(env_vars={"EXISTING": "kept"}, lookback_size=3, lookback_unit="h",
-                                 lookback_specified=True)
+        operator = self.operator(env_vars={"EXISTING": "kept"}, incremental_column="_batch_id",
+                                 lookback_size=3, lookback_unit="h", lookback_specified=True)
         operator.execute(self.context)
         args = operator.application_args
         for flag, value in (("--source-id", "bank"), ("--dag-id", "dag"), ("--run-id", "run"), ("--lookback-unit", "h")):
@@ -104,6 +111,14 @@ class TestIngestOperator(unittest.TestCase):
         self.assertIn("--lookback-given", args)
         self.assertEqual(operator.env_vars, {"EXISTING": "kept", "PGHOST": "pg", "PGPORT": "5432", "PGDATABASE": "metadata", "PGUSER": "writer", "PGPASSWORD": "pg-secret"})
         self.assertNotIn("pg-secret", args)
+
+    def test_full_slice_operator_omits_incremental_flags(self):
+        operator = self.operator(lookback_size=3, lookback_unit="h", lookback_specified=True)
+        operator.execute(self.context)
+        args = operator.application_args
+        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/full/load_entity.py")
+        for flag in ("--incremental-column", "--lookback-size", "--lookback-unit", "--lookback-given"):
+            self.assertNotIn(flag, args)
 
     def test_unspecified_lookback_omits_given_flag(self):
         for kwargs in ({}, {"lookback_size": 0}, {"lookback_size": 5}):
@@ -294,6 +309,115 @@ class TestMetaConnect(unittest.TestCase):
             module._meta_connect("custom_meta")
         hook.assert_called_once_with(postgres_conn_id="custom_meta")
         hook.return_value.get_conn.assert_called_once_with()
+
+
+class TestIngestActSnapOperator(unittest.TestCase):
+    """The snapshot submission: CLI arguments, marker channel, no pg-meta."""
+
+    def setUp(self):
+        self.module = load_operators()
+        self.module.BaseHook.get_connection.return_value = types.SimpleNamespace(
+            conn_type="mssql", conn_id="source", host="host", port=None,
+            schema="db", login="reader", password="secret",
+        )
+        self.context = {"ti": MagicMock(), "dag_run": types.SimpleNamespace(dag_id="dag", run_id="run", conf={})}
+        self.context["ti"].xcom_pull.return_value = 42
+
+    def operator(self, **kwargs):
+        return self.module.IngestActSnapOperator(
+            task_id="load", source_id="bank", airflow_conn_id="source", fqn="s.t",
+            target_table="raw.bank.s__t__act_snap", **kwargs,
+        )
+
+    def test_application_path_and_arguments(self):
+        operator = self.operator()
+        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/incremental/load_act_snap.py")
+        self.assertEqual(operator.deploy_mode, "client")
+        self.assertIsNone(operator.execute(self.context))
+        args = operator.application_args
+        self.assertEqual(args[args.index("--source-table") + 1], "s.t")
+        self.assertEqual(args[args.index("--target-table") + 1], "raw.bank.s__t__act_snap")
+        self.assertEqual(args[args.index("--process-id") + 1], "42")
+        self.assertEqual(args[args.index("--num-partitions") + 1], "4")
+        self.assertNotIn("--no-jdbc-partitioning", args)
+        self.assertIn("jdbc:sqlserver://host:1433;databaseName=db;encrypt=false", args)
+        self.assertTrue(operator.submissions)
+
+    def test_partitioning_disabled_appends_flag(self):
+        operator = self.operator(jdbc_partitioning=False)
+        operator.execute(self.context)
+        self.assertIn("--no-jdbc-partitioning", operator.application_args)
+
+    def test_no_pg_meta_environment_forwarded(self):
+        operator = self.operator()
+        operator.execute(self.context)
+        self.assertNotIn("PGHOST", operator.env_vars or {})
+        self.assertNotIn("--lookback-size", operator.application_args)
+        self.assertNotIn("--incremental-column", operator.application_args)
+
+    def test_no_marker_protocol(self):
+        operator = self.operator()
+        operator.execute(self.context)
+        self.assertNotIn("--result-marker", operator.application_args)
+        self.assertTrue(operator.submissions)
+
+    def test_strict_constructor_types(self):
+        for kwargs in (
+            {"jdbc_partitioning": "false"}, {"num_partitions": 0}, {"num_partitions": True},
+            {"source_type": None},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                self.operator(**kwargs)
+
+    def test_missing_pid_fails_before_submit(self):
+        self.context["ti"].xcom_pull.return_value = None
+        operator = self.operator()
+        with self.assertRaisesRegex(ValueError, "process_id"):
+            operator.execute(self.context)
+        self.assertFalse(operator.submissions)
+
+
+class TestPublishAsset(unittest.TestCase):
+    """Publication policy is independent of Spark and the generated task structure."""
+
+    def setUp(self):
+        self.module = load_operators()
+        self.context = {"ti": MagicMock()}
+        self.context["ti"].xcom_pull.return_value = 42
+
+    def test_regular_load_has_no_condition(self):
+        with patch.object(self.module, "snapshot_has_current_process") as condition:
+            self.module.publish_asset_event(**self.context)
+        condition.assert_not_called()
+        self.context["ti"].xcom_pull.assert_not_called()
+
+    def test_snapshot_policy(self):
+        for result in (True, False):
+            with patch.object(self.module, "snapshot_has_current_process", return_value=result) as condition:
+                if result:
+                    self.module.publish_asset_event("raw.bank.s__t__act_snap", **self.context)
+                else:
+                    with self.assertRaises(FakeSkip):
+                        self.module.publish_asset_event("raw.bank.s__t__act_snap", **self.context)
+                condition.assert_called_once_with("raw.bank.s__t__act_snap", 42)
+
+    def test_missing_process_is_error(self):
+        self.context["ti"].xcom_pull.return_value = None
+        with self.assertRaisesRegex(ValueError, "process_id"):
+            self.module.publish_asset_event("raw.bank.s__t__act_snap", **self.context)
+
+    def test_single_row_query_and_errors(self):
+        hook_module = types.ModuleType("airflow.providers.trino.hooks.trino")
+        hook_module.TrinoHook = MagicMock()
+        hook = hook_module.TrinoHook.return_value
+        with patch.dict(sys.modules, {"airflow.providers.trino.hooks.trino": hook_module}):
+            for row, expected in ((None, False), ([], False), ((41,), False), ((42,), True)):
+                hook.get_first.return_value = row
+                self.assertEqual(self.module.snapshot_has_current_process("raw.bank.s__t__act_snap", 42), expected)
+            hook.get_first.assert_called_with("SELECT __process_id FROM raw.bank.s__t__act_snap LIMIT 1")
+            hook.get_first.side_effect = RuntimeError("Trino unavailable")
+            with self.assertRaisesRegex(RuntimeError, "Trino unavailable"):
+                self.module.publish_asset_event("raw.bank.s__t__act_snap", **self.context)
 
 
 if __name__ == "__main__":

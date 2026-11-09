@@ -506,3 +506,86 @@ FROM ingestion.incremental_batches ORDER BY process_id DESC LIMIT 8;
 
 Все партии загрузок после эволюции — `SUCCEEDED`: смена схемы источника не
 требует правок манифестов и не трогает контракты инкремента.
+
+## Шаг 9. Таблица-снимок: DAG `__act_snap`
+
+1. В Airflow (DAGs) найти снимочный DAG банка: фильтр по тегу `act_snap` или
+   по префиксу имени `ingest__rdbms__bank__main__act_snap_` (суффикс-алиас
+   вычисляется из FQN сущности; у каждого инкрементального источника свой
+   DAG-снимок — их ровно два: банк и брокер). Расписание не задано —
+   запустить вручную (Trigger), без параметров.
+2. Структура запуска та же, что у пайплайна: `generate_process_id`
+   (свой номер процесса) → `activate_source` → группа `snap_...`:
+   `log_start → load → log_end → publish_asset`. В манифестах явно задан
+   `incremental.act_snap.airflow.pool`: `ingest_loads`, вес 2, чтобы снимки
+   разделяли ограничение числа Spark-приложений с обычными загрузками.
+   Это самостоятельная настройка, а не наследование пула основной загрузки.
+   Исполнитель — `IngestActSnapOperator`, Spark-приложение — `load_act_snap.py`.
+3. По завершении — запросы в Trino (DBeaver):
+
+```sql
+SELECT count(*) AS raw_rows FROM raw.bank.retail_bank__transactions;
+SELECT count(*) AS snap_rows, count(DISTINCT __process_id) AS portions,
+       count(DISTINCT __load_dttm) AS load_marks
+FROM raw.bank.retail_bank__transactions__act_snap;
+```
+
+**Что показать:** `snap_rows = raw_rows` — снимок содержит **весь** источник,
+а не окно инкремента; `portions = 1` и `load_marks = 1` — у снимка одна
+порция с единой отметкой времени.
+
+4. Запустить DAG-снимок ещё раз, затем сравнить:
+
+```sql
+SELECT __process_id, count(*) AS rows
+FROM raw.bank.retail_bank__transactions__act_snap GROUP BY 1 ORDER BY 1;
+```
+
+**Что рассказать:** после повтора порция по-прежнему **одна** с новым
+`__process_id` — таблица-снимок **перезаписывается целиком одной атомарной
+операцией Iceberg** (RTAS), а не дополняется, как raw. Читатель в любой
+момент видит целиком предыдущий или целиком новый снимок.
+
+5. Свежесть и автор публикации — из метаданных Iceberg:
+
+```sql
+SELECT max(committed_at) AS last_published_at
+FROM "raw"."bank"."retail_bank__transactions__act_snap$snapshots";
+
+SELECT value AS published_by_process_id
+FROM "raw"."bank"."retail_bank__transactions__act_snap$properties"
+WHERE key = 'snapshot.process_id';
+```
+
+**Что рассказать:** время последней публикации — момент коммита Iceberg,
+автор — табличное свойство `snapshot.process_id`; оба читаются без pg-meta.
+Реестр инкремента (`incremental_batches`) снимком не пополняется — у
+инкремента и снимка раздельные потоки, а пустое чтение источника не
+перезаписывает существующий непустой снимок (защита от затирания данных).
+
+**Публикация готовности:** постоянная задача `publish_asset` — PythonOperator.
+Для снимка она читает одну строку `__process_id` через Trino и публикует
+`raw://bank/retail_bank.transactions/act_snap`, только если строка принадлежит
+текущему процессу. Пустая таблица или старый процесс означают пропуск задачи
+без события; ошибка Trino — ошибку задачи. Локальный файл результата не нужен.
+У обычных загрузок тот же PythonOperator публикует Asset без проверки.
+
+Пример независимых настроек снимка внутри инкрементальной сущности:
+
+```yaml
+incremental:
+  source_column: _batch_id
+  act_snap:
+    schedule: "0 2 * * *"
+    tags: [nightly]
+    spark:
+      jdbc_partitioning: true
+    airflow:
+      pool:
+        name: ingest_loads
+        slots: 2
+```
+
+`catchup`, `incremental`, `fqn`, `entities`, `max_active_runs` внутри `act_snap`
+запрещены. Старый ключ `full_snapshot` не поддерживается. Снимок всегда имеет
+`catchup=False`, все генерируемые DAG-и — `max_active_runs=1`.

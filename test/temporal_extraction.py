@@ -42,7 +42,7 @@ def metadata_row(hook, table, source_id, entity_fqn):
 
 def source_count(spark, args, lower, upper, kind, lower_op=">"):
     """Count the exact source predicate without Spark temporal conversion."""
-    load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
+    reader = load_module("reader", "/opt/spark-jobs/raw/rdbms/reader.py")
     from ingestion.sources.rdbms import positions
     from ingestion.sources.rdbms import registry as dialects
 
@@ -54,7 +54,7 @@ def source_count(spark, args, lower, upper, kind, lower_op=">"):
             predicates.append(
                 f"{column} {operator} {dialect.position_literal(positions.canonical(value, kind), kind)}"
             )
-    query = f"SELECT COUNT(*) FROM {load_entity.render_source_table(dialect, args.source_table, allow_expression=True)}"
+    query = f"SELECT COUNT(*) FROM {reader.render_source_table(dialect, args.source_table, allow_expression=True)}"
     if predicates:
         query += " WHERE " + " AND ".join(predicates)
     connection = spark._jvm.java.sql.DriverManager.getConnection(
@@ -78,7 +78,7 @@ def source_count(spark, args, lower, upper, kind, lower_op=">"):
 def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, token,
              expected_upper=None):
     """Verify bootstrap, aligned lookback, empty resume, and successful retry."""
-    load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
+    load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/incremental/load_entity.py")
     from ingestion import meta
     from ingestion.sources.rdbms import positions
 
@@ -197,7 +197,7 @@ def precision_fixtures(source):
 
 def check_post_append_retry(spark, hook, jdbc, token):
     """Inject a real post-append metadata failure and accept a repeated append."""
-    load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
+    load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/incremental/load_entity.py")
     from ingestion import meta
 
     args = Namespace(
@@ -253,7 +253,7 @@ def jdbc_count(spark, args, query):
         connection.close()
 
 
-def derived_day_frame(spark, load_entity, dialect, args, source_sql, info, kind):
+def derived_day_frame(spark, reader, dialect, args, source_sql, info, kind):
     """Read one temporal column through a partitioned calendar-day derivative."""
     from ingestion.sources.rdbms import jdbc, jdbc_partitioning
 
@@ -269,19 +269,19 @@ def derived_day_frame(spark, load_entity, dialect, args, source_sql, info, kind)
         f"(SELECT {projected} AS {column}, {expression} AS {alias} "
         f"FROM (SELECT * FROM {source_sql}) extract_source) day_probe"
     )
-    reader = load_entity._jdbc_reader(spark, args, query)
-    low, high = load_entity._read_bounds(spark, args, query, jdbc_partitioning.DAY_ALIAS)
+    jdbc_reader = reader.jdbc_reader(spark, args, query)
+    low, high = reader.read_bounds(spark, args, query, jdbc_partitioning.DAY_ALIAS)
     require(low is not None and high is not None and low != high,
             f"derived day bounds of {info.name} span multiple calendar days")
-    return (reader.option("partitionColumn", jdbc_partitioning.DAY_ALIAS)
-            .option("lowerBound", load_entity._bound_literal(low))
-            .option("upperBound", load_entity._bound_literal(high))
+    return (jdbc_reader.option("partitionColumn", jdbc_partitioning.DAY_ALIAS)
+            .option("lowerBound", reader.bound_literal(low))
+            .option("upperBound", reader.bound_literal(high))
             .option("numPartitions", 4).load())
 
 
 def check_partitioning(spark, source_jdbc):
     """Prove heuristic metadata choice and real partitioned reads per engine."""
-    load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
+    reader = load_module("reader", "/opt/spark-jobs/raw/rdbms/reader.py")
     from ingestion.sources.rdbms import jdbc, jdbc_partitioning
     from ingestion.sources.rdbms import registry as dialects
 
@@ -310,14 +310,14 @@ def check_partitioning(spark, source_jdbc):
         require(choice is not None and choice.column == "transaction_id"
                 and choice.step == jdbc_partitioning.STEP_PRIMARY_KEY,
                 f"{source}: heuristic picks the primary key")
-        table_sql = load_entity.render_source_table(dialect, table, allow_expression=True)
+        table_sql = reader.render_source_table(dialect, table, allow_expression=True)
         total = jdbc_count(spark, args, table_sql)
         require(total > 0, f"{source}: source table has rows")
         day_info = keys.columns[column.lower()]
         require(day_info is not None,
                 f"{source}: temporal column {column} present in metadata")
         day_kind = dialect.position_kind(day_info.type_name, day_info.precision, day_info.scale)
-        day_frame = derived_day_frame(spark, load_entity, dialect, args, table_sql, day_info, day_kind)
+        day_frame = derived_day_frame(spark, reader, dialect, args, table_sql, day_info, day_kind)
         simple = day_frame.schema[jdbc_partitioning.DAY_ALIAS].dataType.simpleString()
         require(simple in ("int", "bigint") or re.fullmatch(r"decimal\(\d+,0\)", simple),
                 f"{source}: derived day column is integral in Spark ({simple})")
@@ -327,8 +327,8 @@ def check_partitioning(spark, source_jdbc):
         zone_kind = dialect.position_kind(zone_info.type_name, zone_info.precision, zone_info.scale)
         require(zone_kind.startswith("timestamp_instant"),
                 f"{source}: zone fixture column classifies as an instant")
-        zone_sql_rendered = load_entity.render_source_table(dialect, zone_sql, allow_expression=True)
-        zone_frame = derived_day_frame(spark, load_entity, dialect, args, zone_sql_rendered,
+        zone_sql_rendered = reader.render_source_table(dialect, zone_sql, allow_expression=True)
+        zone_frame = derived_day_frame(spark, reader, dialect, args, zone_sql_rendered,
                                        zone_info, zone_kind)
         require(zone_frame.count() == 2,
                 f"{source}: time-zone derived-day partitioned read returns both fixture rows")
@@ -340,13 +340,13 @@ def check_partitioning(spark, source_jdbc):
                 f"(SELECT extract_source.{date_column} AS {date_column} "
                 f"FROM (SELECT * FROM {table_sql}) extract_source) date_probe"
             )
-            reader = load_entity._jdbc_reader(spark, args, date_query)
-            low, high = load_entity._read_bounds(spark, args, date_query, column)
+            jdbc_reader = reader.jdbc_reader(spark, args, date_query)
+            low, high = reader.read_bounds(spark, args, date_query, column)
             require(low is not None and high is not None and low != high,
                     "bank: date column bounds span multiple days")
-            date_frame = (reader.option("partitionColumn", column)
-                          .option("lowerBound", load_entity._bound_literal(low))
-                          .option("upperBound", load_entity._bound_literal(high))
+            date_frame = (jdbc_reader.option("partitionColumn", column)
+                          .option("lowerBound", reader.bound_literal(low))
+                          .option("upperBound", reader.bound_literal(high))
                           .option("numPartitions", 4).load())
             require(date_frame.schema[column].dataType.simpleString() == "date",
                     "bank: MSSQL date column reads as Spark DateType")
@@ -356,7 +356,8 @@ def check_partitioning(spark, source_jdbc):
 
 def check_partitioned_load_path(spark, source_jdbc):
     """Run the real read-and-append path with a forced date or timestamp step."""
-    load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/load_entity.py")
+    reader = load_module("reader", "/opt/spark-jobs/raw/rdbms/reader.py")
+    raw_append = load_module("raw_append", "/opt/spark-jobs/raw/rdbms/raw_append.py")
     from ingestion.sources.rdbms import jdbc, jdbc_partitioning
     from ingestion.sources.rdbms import registry as dialects
 
@@ -382,13 +383,13 @@ def check_partitioned_load_path(spark, source_jdbc):
         require(choice is not None and choice.step == expected_steps[source],
                 f"{source}: without keys, with a NOT NULL {column}, the heuristic"
                 f" picks the {expected_steps[source]} step")
-        with patch.object(load_entity.jdbc, "key_metadata", return_value=forced):
-            frame = load_entity._read_extract_frame(spark, args, None, None)
+        with patch.object(reader.jdbc, "key_metadata", return_value=forced):
+            frame = reader.read_extract_frame(spark, args, None, None)
             try:
-                rows, observed = load_entity._append_raw(spark, args, frame, None)
+                rows, observed = raw_append.append_raw(spark, args, frame, None)
             finally:
                 frame.unpersist()
-        total = jdbc_count(spark, args, load_entity.render_source_table(dialect, table))
+        total = jdbc_count(spark, args, reader.render_source_table(dialect, table))
         require(rows == total, f"{source}: partitioned full-slice append writes every source row")
         require(observed is None, f"{source}: full-slice append reports no extraction position")
         schema_names = {field.name for field in spark.table(target).schema.fields}
