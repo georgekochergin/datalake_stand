@@ -646,6 +646,47 @@ Iceberg перезаписывает таблицу-снимок `raw.<исто�
 не трогает; автор последней публикации и её время видны из метаданных
 Iceberg (`snapshot.process_id` и `committed_at`). Раздел 7.7 architecture.md.
 
+Пулы снимков задаются независимо: в манифестах стенда явно выбран
+`incremental.act_snap.airflow.pool` = `ingest_loads`, вес 2. Без настройки
+фреймворк использует `default_pool`, вес 1. Для периодического обновления
+задайте `incremental.act_snap.schedule`; сейчас снимки запускаются вручную.
+
+**Регламент контроля снимков.** Сначала сравните ожидаемые таблицы из
+манифестов с каталогом (отсутствующая таблица — «никогда не публиковался»):
+
+```sql
+WITH expected(table_name) AS (
+    VALUES 'retail_bank__transactions__act_snap'
+)
+SELECT e.table_name,
+       CASE WHEN t.table_name IS NULL THEN 'никогда не публиковался'
+            ELSE 'проверить метаданные публикации' END AS publication_status
+FROM expected e
+LEFT JOIN raw.information_schema.tables t
+    ON t.table_schema = 'bank' AND t.table_name = e.table_name;
+```
+
+Для каждой существующей таблицы выполните запрос без сканирования её данных:
+
+```sql
+SELECT
+    (SELECT max(committed_at)
+     FROM raw.bank."retail_bank__transactions__act_snap$snapshots") AS published_at,
+    (SELECT value
+     FROM raw.bank."retail_bank__transactions__act_snap$properties"
+     WHERE key = 'snapshot.process_id') AS process_id;
+```
+
+Для брокера замените схему на `broker`, имя — на
+`trading_core__transactions__act_snap`. При отсутствии автора публикация не
+подтверждена; пустая первая таблица может иметь автора без строк и без Asset.
+Проверка пустого источника не обновляет прежнюю публикацию и её время.
+При плановом расписании сравнивайте `published_at` с последним ожидаемым
+срабатыванием cron и допустимой задержкой, а не с фиксированным интервалом:
+календарные интервалы неодинаковы. Ручные снимки исключаются из автоматического
+SLA; периодичность их проверки задаётся отдельно. Успешный DagRun сам по себе
+не доказывает свежесть. Автоматическая сверка и alerting здесь не реализованы.
+
 **Метаданные.** pg-meta — операционная база фреймворка: идентификаторы
 процессов, журналы DAG-ов и тасков, состояние и партии инкрементальных
 сущностей, аудит миграций контракта. Раздел 8 architecture.md.
