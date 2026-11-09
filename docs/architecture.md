@@ -526,8 +526,8 @@ ADD COLUMN` внутри коммита записи). Существующие 
 `ingest__rdbms__bank__main`, запуск
 `manual__2026-11-09T15:54:58.294859+00:00`,
 `ingest_group.load_retail_bank__transactions.load`, попытка 1.
-В предоставленном логе `logs_ingest__rdbms__bank__main_manual__2026-11-09T15_54_58.294859+00_00_ingest_group.load_retail_bank__transactions.load_-1_1.txt`
-видна следующая последовательность (время ниже — UTC из Spark):
+В логе этой задачи видна следующая последовательность
+(самодостаточные фрагменты ниже; время — UTC из Spark):
 
 1. В 15:55:05 `Spark-Submit cmd` содержит `--num-partitions 4`,
    `--incremental-column _batch_id`, `--process-id 14`. Число 4 —
@@ -876,7 +876,7 @@ p/scale не подходят. Метаданные JDBC преобразуют�
 {"contract":{"source_column":"_batch_id","position_type":"bigint"},"lookback":{"size":0,"unit":null}}
 ```
 
-`act_snap` в JSON не входит. Старые YAML-поле `incremental.source_column`
+`act_snap` в JSON не входит. Старое YAML-поле `incremental.source_column`
 и CLI-флаги колонки/lookback не поддерживаются. Расписание и контекст
 дефолтов в Spark не передаются: JSON содержит конкретные значения.
 

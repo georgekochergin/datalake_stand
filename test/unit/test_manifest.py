@@ -114,8 +114,7 @@ class TestLoadPipeline(unittest.TestCase):
         self.assertIsNone(pipeline.entities[0].incremental_column)
         self.assertEqual(pipeline.entities[1].incremental_column, "transaction_id")
         self.assertEqual(
-            (pipeline.entities[1].lookback_size, pipeline.entities[1].lookback_unit,
-             pipeline.entities[1].lookback_specified), (0, None, False),
+            pipeline.entities[1].incremental_config["lookback"], {"size": 0, "unit": None},
         )
 
     @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
@@ -297,8 +296,8 @@ class TestLoadPipeline(unittest.TestCase):
                              "    incremental: {contract: {source_column: updated_at, position_type: timestamp_local(7)}}\n")
                 entity = manifest.load_pipeline(write_temp_yaml(content)).entities[0]
                 self.assertEqual(
-                    (entity.lookback_size, entity.lookback_unit, entity.lookback_specified),
-                    (expected[0], expected[1], False),
+                    entity.incremental_config["lookback"],
+                    {"size": expected[0], "unit": expected[1]},
                 )
 
     @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
@@ -308,8 +307,7 @@ class TestLoadPipeline(unittest.TestCase):
             "  - fqn: retail_bank.transactions\n"
             "    incremental: {contract: {source_column: updated_at, position_type: timestamp_local(7)}, lookback: {size: 1, unit: h}}\n"
         )).entities[0]
-        self.assertEqual((entity.lookback_size, entity.lookback_unit, entity.lookback_specified),
-                         (1, "h", True))
+        self.assertEqual(entity.incremental_config["lookback"], {"size": 1, "unit": "h"})
 
     @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
     def test_lookback_size_zero_needs_no_unit(self):
@@ -318,8 +316,7 @@ class TestLoadPipeline(unittest.TestCase):
             "  - fqn: retail_bank.transactions\n"
             "    incremental: {contract: {source_column: updated_at, position_type: timestamp_local(7)}, lookback: {size: 0}}\n"
         )).entities[0]
-        self.assertEqual((entity.lookback_size, entity.lookback_unit, entity.lookback_specified),
-                         (0, None, True))
+        self.assertEqual(entity.incremental_config["lookback"], {"size": 0, "unit": None})
 
     @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
     def test_lookback_size_zero_ignores_any_unit(self):
@@ -328,7 +325,7 @@ class TestLoadPipeline(unittest.TestCase):
             "  - fqn: retail_bank.transactions\n"
             "    incremental: {contract: {source_column: updated_at, position_type: timestamp_local(7)}, lookback: {size: 0, unit: nonsense}}\n"
         )).entities[0]
-        self.assertEqual((entity.lookback_size, entity.lookback_unit), (0, None))
+        self.assertEqual(entity.incremental_config["lookback"], {"size": 0, "unit": None})
 
     @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
     def test_lookback_fractional_size_rejected(self):

@@ -162,10 +162,10 @@ def window_bounds(watermark, kind, size=0, unit=None):
 
 
 def resolve_lookback(kind, size, unit, specified):
-    """Apply the schedule-derived default to the runtime-discovered kind.
+    """Resolve a schedule-derived default for the declared canonical position type.
 
-    Generator bakes one temporal default (3 h or 3 d by DAG schedule) into
-    the DAG; the actual position kind is only known at runtime. Explicitly
+    The manifest parser resolves the temporal default (3 h or 3 d by schedule)
+    before generating the DAG; JDBC verifies the declared type at runtime. Explicitly
     configured lookback passes through unchanged and is validated by kind in
     window_bounds; integral defaults collapse to 0 and date defaults are
     always 3 days regardless of schedule.

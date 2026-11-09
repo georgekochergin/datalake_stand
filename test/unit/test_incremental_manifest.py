@@ -25,9 +25,7 @@ class TestIncrementalManifest(unittest.TestCase):
     def test_snapshot_defaults(self):
         entity = self.load_entity({})
         self.assertIsNone(entity.incremental_column)
-        self.assertEqual(entity.lookback_size, 0)
-        self.assertIsNone(entity.lookback_unit)
-        self.assertFalse(entity.lookback_specified)
+        self.assertIsNone(entity.incremental_config)
 
     def test_contract_type_required_and_strict(self):
         for contract in ({"source_column": "id"}, {"source_column": "id", "position_type": "int"},
@@ -40,15 +38,14 @@ class TestIncrementalManifest(unittest.TestCase):
         for kind, expected in (("bigint", (0, None)), ("decimal(38,0)", (0, None)),
                                ("date", (3, "d")), ("timestamp_instant(9)", (3, "d"))):
             entity = self.load_entity({"incremental": {"contract": {"source_column": "id", "position_type": kind}}})
-            self.assertEqual((entity.lookback_size, entity.lookback_unit), expected)
+            self.assertEqual(entity.incremental_config["lookback"], dict(zip(("size", "unit"), expected)))
 
     def test_nested_source_column_and_default_lookback(self):
         for column in ("_batch_id", "updated_at"):
             with self.subTest(column=column):
                 entity = self.load_entity({"incremental": {"contract": {"source_column": column, "position_type": "timestamp_local(7)"}}})
                 self.assertEqual(entity.incremental_column, column)
-                self.assertEqual((entity.lookback_size, entity.lookback_unit), (3, "d"))
-                self.assertFalse(entity.lookback_specified)
+                self.assertEqual(entity.incremental_config["lookback"], {"size": 3, "unit": "d"})
 
     def test_numeric_and_temporal_lookback(self):
         for size, unit, stored in ((0, None, None), (10, None, None), (0, "h", None),
@@ -59,9 +56,7 @@ class TestIncrementalManifest(unittest.TestCase):
             with self.subTest(size=size, unit=unit):
                 kind = "bigint" if stored is None else "timestamp_local(7)"
                 entity = self.load_entity({"incremental": {"contract": {"source_column": "updated_at", "position_type": kind}, "lookback": lookback}})
-                self.assertEqual(entity.lookback_size, size)
-                self.assertEqual(entity.lookback_unit, stored)
-                self.assertTrue(entity.lookback_specified)
+                self.assertEqual(entity.incremental_config["lookback"], {"size": size, "unit": stored})
 
     def test_legacy_and_unknown_entity_keys_rejected(self):
         for fields in ({"incremental_column": "_batch_id"}, {"lookback": {"size": 1}},

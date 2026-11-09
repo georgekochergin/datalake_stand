@@ -63,9 +63,6 @@ class EntityConfig:
     jdbc_partitioning: bool = True
     pool: str = "default_pool"
     pool_slots: int = 1
-    lookback_size: int = 0
-    lookback_unit: str | None = None
-    lookback_specified: bool = False
     act_snap: ActSnapConfig = field(default_factory=ActSnapConfig)
     incremental_config: dict | None = None
 
@@ -257,7 +254,6 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
     incremental_column = None
     lookback_size = 0
     lookback_unit = None
-    lookback_specified = False
     act_snap = ActSnapConfig()
     incremental_config = None
     if "incremental" in entity:
@@ -279,12 +275,9 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
                 raise ValueError("lookback.unit must be h or d")
             if not lookback_size:
                 lookback_unit = None
-            lookback_specified = True
         else:
-            family = positions.kind_info(contract.get("position_type"))[0]
-            lookback_size, lookback_unit = (
-                (0, None) if family == "integral" else
-                (3, "d") if family == "date" else temporal_default
+            lookback_size, lookback_unit = positions.resolve_lookback(
+                contract.get("position_type"), *temporal_default, False
             )
         incremental_config = validate({
             "contract": contract,
@@ -302,9 +295,6 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
         jdbc_partitioning=spark_config.jdbc_partitioning,
         pool=airflow_config.pool,
         pool_slots=airflow_config.pool_slots,
-        lookback_size=lookback_size,
-        lookback_unit=lookback_unit,
-        lookback_specified=lookback_specified,
         act_snap=act_snap,
         incremental_config=incremental_config,
     )

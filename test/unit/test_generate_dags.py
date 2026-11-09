@@ -28,8 +28,7 @@ PIPELINE = PipelineManifest(
     tags=("ingestion", "bank"),
     entities=(
         EntityConfig("retail_bank.clients", "retail_bank__clients", None),
-        EntityConfig("retail_bank.transactions", "retail_bank__transactions", "_batch_id", lookback_size=12,
-                     lookback_unit="h", lookback_specified=True,
+        EntityConfig("retail_bank.transactions", "retail_bank__transactions", "_batch_id",
                      incremental_config={"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 12, "unit": None}}),
     ),
 )
