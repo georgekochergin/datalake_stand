@@ -65,6 +65,8 @@ def check_registry_recovery():
     second = meta.allocate_process_id(dag_id="e2e_registry", run_id=source,
                                       execution_date=None, db_connect=connect)
     require(first != second, "every generating-task execution allocates a fresh process_id")
+    orphan = meta.allocate_process_id(dag_id="e2e_registry", run_id=source,
+                                      execution_date=None, db_connect=connect)
 
     def arguments(process_id):
         """Planning arguments for one execution of the synthetic entity."""
@@ -80,6 +82,8 @@ def check_registry_recovery():
                     entity_fqn=batch["entity_fqn"], db_connect=connect)
 
     planned = meta.plan_batch(**arguments(first))
+    require(planned["process_id"] != orphan,
+            "an orphan generating-task START does not prevent another execution from planning")
     meta.start_batch(**key(planned))
     meta.fail_batch(**key(planned))
     retry = meta.plan_batch(**dict(arguments(first), upper_bound="999"))
@@ -219,8 +223,12 @@ def main():
                             label + " no-op records zero rows")
                     require(batch["watermark_after"] == batch["watermark_before"],
                             label + " no-op preserves watermark")
-            require(all(len(ids) == 1 for ids in processes.values()),
+            require(all(len(ids) == 1 for (_, run), ids in processes.items()
+                        if not run.startswith("e2e-clear-")),
                     "each DagRun in the flow scenario shares one process ID")
+            clear_runs = [ids for (_, run), ids in processes.items() if run.startswith("e2e-clear-")]
+            require(len(clear_runs) == 1 and len(clear_runs[0]) == 3,
+                    "full and partial Clear each create new batches despite retained history")
             for state in states:
                 history = grouped[state["source_id"], state["entity_fqn"]]
                 label = f"{state['source_id']}/{state['entity_fqn']}"
