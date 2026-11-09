@@ -25,7 +25,7 @@ Spark driver — управляющий процесс приложения: в�
 - `client`: driver работает там, где запущен `spark-submit`.
 - `cluster`: driver размещается менеджером вычислительного кластера.
 
-Сейчас стенд использует Spark Standalone 3.5.5, Airflow LocalExecutor и `IngestAppendOperator`, унаследованный от `SparkSubmitOperator`, с `deploy_mode=client`. `spark-submit` и driver запускаются в контейнере `airflow-scheduler`, executors — на `spark-worker`. Код загрузчика: `spark/raw/load_entity.py`; оператор: `airflow/plugins/ingestion/operators.py`; конфигурация запуска: `docker-compose.yaml` и `conf/airflow/Dockerfile`.
+Сейчас стенд использует Spark Standalone 3.5.5, Airflow LocalExecutor и `IngestAppendOperator`, унаследованный от `SparkSubmitOperator`, с `deploy_mode=client`. `spark-submit` и driver запускаются в контейнере `airflow-scheduler`, executors — на `spark-worker`. Код загрузчиков: `ingestion/spark/raw/rdbms/incremental/load_entity.py` и `ingestion/spark/raw/rdbms/full/load_entity.py`; оператор: `ingestion/operators.py`; конфигурация запуска: `docker-compose.yaml` и `conf/airflow/Dockerfile`.
 
 Spark Standalone 3.5.5 не поддерживает `cluster` deploy mode для Python-приложений. Поэтому одной сменой `deploy_mode` изолировать текущий PySpark driver нельзя. Production не требует именно cluster mode: важны изоляция ресурсов и управляемый жизненный цикл driver.
 

@@ -797,11 +797,22 @@ def main() -> None:
         airflow_wait_run(token, dag_id, run_id, timeout=900, name=dag_id + " snap 1")
     snapshot_counts: dict[str, int] = {}
     try:
-        never = trino_query(
-            "WITH expected(table_name) AS (VALUES 'e2e_never_published__act_snap') "
-            "SELECT e.table_name FROM expected e LEFT JOIN raw.information_schema.tables t "
-            "ON t.table_schema = 'bank' AND t.table_name = e.table_name WHERE t.table_name IS NULL")
-        check("freshness inventory distinguishes never published", len(never), 1)
+        unpublished = ("bank", "e2e_never_published__act_snap")
+        expected_tables = [tuple(table.split(".")[1:]) for table in ACT_SNAPSHOT_TABLES]
+        inventory_values = ", ".join(
+            "('%s', '%s')" % (namespace, name)
+            for namespace, name in [*expected_tables, unpublished])
+        inventory = trino_query(
+            "WITH expected(table_schema, table_name) AS (VALUES " + inventory_values + ") "
+            "SELECT e.table_schema, e.table_name, EXISTS ("
+            "SELECT 1 FROM raw.information_schema.tables t "
+            "WHERE t.table_schema = e.table_schema AND t.table_name = e.table_name) "
+            "FROM expected e")
+        check("freshness inventory includes every expected table", len(inventory), len(expected_tables) + 1)
+        check("freshness inventory finds all configured snapshots",
+              {(row[0], row[1]) for row in inventory if row[2]}, set(expected_tables))
+        check("freshness inventory distinguishes never published",
+              [(row[0], row[1]) for row in inventory if not row[2]], [unpublished])
         for table, raw_table in ACT_SNAPSHOT_TABLES.items():
             namespace, name = table.split(".")[1:]
             expected = f"s3://datalake/raw/{namespace}/{name}/"
