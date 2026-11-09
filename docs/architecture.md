@@ -205,9 +205,14 @@ DAG ingest__rdbms__bank__main
         └── TaskGroup "load_retail_bank__deals" ...
 ```
 
-Зависимости: `generate_process_id >> activate_source >> ingest_group`; внутри
+Зависимости: `generate_process_id >> activate_source >> ingest_group` и
+прямая `generate_process_id >> ingest_group`; внутри
 группы сущности независимы, внутри сущности —
 `log_start >> load >> log_end >> publish_asset`.
+Прямая зависимость от генератора применяется и к корням снимочных групп.
+Она нужна при частичном Clear генератора и группы без `activate_source`:
+оставшаяся успешной активация не должна разрешать START до завершения
+новой генерации и публикации process_id в XCom.
 `max_active_runs=1` сериализует запуски одного DAG-а — «последний снапшот» и
 watermark каждой сущности однозначен.
 

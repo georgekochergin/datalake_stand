@@ -221,6 +221,7 @@ def generate_snapshot_dag_source(
         '    generate_process_id = GenerateProcessIdOperator(task_id="generate_process_id")',
         *_snapshot_entity_block(source, entity, num_partitions),
         "    generate_process_id >> activate_source >> snap_group",
+        "    generate_process_id >> snap_group",
         "",
     ]
     return "\n".join(lines)
@@ -279,6 +280,7 @@ def generate_dag_source(
     lines.extend(
         [
             "    generate_process_id >> activate_source >> ingest_group",
+            "    generate_process_id >> ingest_group",
             "",
         ]
     )

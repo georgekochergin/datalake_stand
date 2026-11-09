@@ -55,6 +55,7 @@ class TestGenerateDagSource(unittest.TestCase):
         self.assertIn('GenerateProcessIdOperator(task_id="generate_process_id")', self.source)
         self.assertNotIn("entities=", self.source)
         self.assertIn("generate_process_id >> activate_source >> ingest_group", self.source)
+        self.assertIn("    generate_process_id >> ingest_group\n", self.source)
 
     def test_no_dag_params(self):
         """The trigger dialog must open with an active button, without required fields."""
@@ -165,6 +166,10 @@ class TestGenerateSnapshotDagSource(unittest.TestCase):
 
     def setUp(self):
         self.source = generate_snapshot_dag_source(BANK, SNAPSHOT_PIPELINE, SNAPSHOT_PIPELINE.entities[0], "main")
+
+    def test_snapshot_group_waits_directly_for_process_generator(self):
+        self.assertIn("generate_process_id >> activate_source >> snap_group", self.source)
+        self.assertIn("    generate_process_id >> snap_group\n", self.source)
 
     def test_dag_header(self):
         expected = f"ingest__rdbms__bank__main__act_snap_{snapshot_alias('retail_bank.transactions')}"
