@@ -358,7 +358,7 @@ class TestManagedLoad(unittest.TestCase):
     def batch(self, **changes):
         values = {"process_id": 7, "status": "RUNNING", "incremental_type": "bigint",
                   "lower_bound": "5", "lower_bound_op": ">",
-                  "upper_bound": "10", "lookback_size": 0,
+                  "upper_bound": "10", "lookback_size": 0, "empty_at_plan": False,
                   "watermark_before": None, "reason": "bootstrap"}
         values.update(changes)
         return values

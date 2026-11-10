@@ -17,6 +17,7 @@ import os
 from ingestion.spark.raw.iceberg import validate_target_table
 from ingestion.spark.raw.rdbms import reader
 from ingestion.spark.raw.rdbms import raw_append
+from ingestion.spark.raw.rdbms.incremental import window
 from ingestion.spark.raw.rdbms.reader import render_source_table
 from ingestion.sources.rdbms import jdbc
 from ingestion.sources.rdbms import positions
@@ -209,7 +210,7 @@ def managed_load(spark, args):
         return
     registry.start_batch(**key)
     try:
-        source = reader.read_extract_frame(spark, args, batch, kind)
+        source = window.read_window_frame(spark, args, batch, kind)
         try:
             rows, observed = raw_append.append_raw(spark, args, source, kind)
             watermark = batch["watermark_before"]

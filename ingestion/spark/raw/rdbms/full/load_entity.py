@@ -41,7 +41,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def managed_load(spark, args):
     """Read the whole source frame and append it to the raw table."""
-    frame = reader.read_extract_frame(spark, args, None, None)
+    frame = reader.read_extract_frame(spark, args)
     try:
         raw_append.append_raw(spark, args, frame, None)
     finally:

@@ -110,8 +110,8 @@ class TestManagedLoad(unittest.TestCase):
         ) as append:
             load_entity.managed_load(self.spark, load_entity.parse_args(build_argv()))
         read_frame.assert_called_once()
-        self.assertIsNone(read_frame.call_args.args[2])
-        self.assertIsNone(read_frame.call_args.args[3])
+        self.assertEqual(len(read_frame.call_args.args), 2)
+        self.assertEqual(read_frame.call_args.kwargs, {})
         append.assert_called_once()
         self.assertIs(append.call_args.args[2], self.source)
         self.assertIsNone(append.call_args.args[3])

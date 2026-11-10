@@ -102,7 +102,7 @@ def managed_snapshot(spark, args) -> None:
             args.target_table, args.process_id,
         )
         return
-    frame = read_extract_frame(spark, args, None, None)
+    frame = read_extract_frame(spark, args)
     try:
         rows = frame.count()
         if rows == 0 and spark.catalog.tableExists(args.target_table):
