@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from ingestion import meta
+from ingestion.meta import registry
 
 
 class TransactionTests(unittest.TestCase):
@@ -27,7 +28,7 @@ class TransactionTests(unittest.TestCase):
         code = (
             "import sys; "
             f"sys.path.insert(0, {str(ROOT)!r}); "
-            "import ingestion.meta; "
+            "import ingestion.meta, ingestion.meta.registry; "
             "assert not any(k == 'airflow' or k.startswith('airflow.') for k in sys.modules)"
         )
         subprocess.run([sys.executable, "-c", code], check=True)
@@ -60,9 +61,9 @@ class TransactionTests(unittest.TestCase):
         batch = {"status": "RUNNING", "process_id": 1,
                  "incremental_column": "id", "source_id": "bank", "entity_fqn": "s.t",
                  "expected_revision": 1}
-        with patch.object(meta, "_lock_batch", return_value=(state, batch)):
+        with patch.object(registry, "_lock_batch", return_value=(state, batch)):
             with self.assertRaisesRegex(ValueError, "CAS"):
-                meta.finalize_batch(process_id=1, source_id="bank", entity_fqn="s.t",
+                registry.finalize_batch(process_id=1, source_id="bank", entity_fqn="s.t",
                                     row_count=1, observed_max="10", watermark_after="10",
                                     db_connect=lambda: conn)
         self.assertEqual(cur.execute.call_count, 1)
@@ -116,11 +117,11 @@ class PostgresTests(unittest.TestCase):
 
     def plan(self, **changes):
         """Plan a batch with test-specific overrides."""
-        return meta.plan_batch(**(self.args | changes))
+        return registry.plan_batch(**(self.args | changes))
 
     def finish(self, batch, count=1, observed="10"):
         """Finalize using an integer comparator rather than textual ordering."""
-        return meta.finalize_batch(
+        return registry.finalize_batch(
             process_id=batch["process_id"], source_id=batch["source_id"],
             entity_fqn=batch["entity_fqn"], row_count=count, observed_max=observed,
             db_connect=self.connect,
@@ -138,23 +139,23 @@ class PostgresTests(unittest.TestCase):
         batch = self.plan()
         self.assertEqual((batch["reason"], batch["expected_revision"]),
                          ("bootstrap", 1))
-        meta.start_batch(process_id=batch["process_id"], source_id=batch["source_id"],
+        registry.start_batch(process_id=batch["process_id"], source_id=batch["source_id"],
                          entity_fqn=batch["entity_fqn"], db_connect=self.connect)
-        meta.fail_batch(process_id=batch["process_id"], source_id=batch["source_id"],
+        registry.fail_batch(process_id=batch["process_id"], source_id=batch["source_id"],
                         entity_fqn=batch["entity_fqn"], db_connect=self.connect)
         retry = self.plan(upper_bound="99")
         self.assertEqual(retry["process_id"], batch["process_id"])
         self.assertEqual(retry["upper_bound"], "10")
         self.assertEqual(retry["status"], "FAILED")
         self.assertIsNone(self.state()["watermark"])
-        started = meta.start_batch(process_id=batch["process_id"], source_id=batch["source_id"],
+        started = registry.start_batch(process_id=batch["process_id"], source_id=batch["source_id"],
                                    entity_fqn=batch["entity_fqn"], db_connect=self.connect)
         self.assertEqual(started["attempt_count"], 2)
         result = self.finish(batch)
         self.assertEqual(result["watermark_after"], "10")
         self.assertEqual(self.finish(batch, 99, "99"), result)
         self.assertEqual(self.state()["revision"], 2)
-        self.assertEqual(meta.fail_batch(process_id=batch["process_id"],
+        self.assertEqual(registry.fail_batch(process_id=batch["process_id"],
                                          source_id=batch["source_id"],
                                          entity_fqn=batch["entity_fqn"],
                                          db_connect=self.connect), result)
@@ -202,9 +203,9 @@ class PostgresTests(unittest.TestCase):
             cur.execute("UPDATE ingestion.incremental_state SET revision = revision + 1 WHERE source_id = %s",
                         (self.source,))
         for operation in (
-            lambda: meta.get_batch(process_id=batch["process_id"], source_id=batch["source_id"],
+            lambda: registry.get_batch(process_id=batch["process_id"], source_id=batch["source_id"],
                                    entity_fqn=batch["entity_fqn"], db_connect=self.connect),
-            lambda: meta.start_batch(process_id=batch["process_id"], source_id=batch["source_id"],
+            lambda: registry.start_batch(process_id=batch["process_id"], source_id=batch["source_id"],
                                      entity_fqn=batch["entity_fqn"], db_connect=self.connect),
             lambda: self.finish(batch),
         ):
@@ -233,7 +234,7 @@ class PostgresTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "regressed"):
             self.plan(process_id=2, run_id="run2", upper_bound="9",
                       compare_positions=lambda left, right: int(left) - int(right))
-        self.assertIsNone(meta.get_batch(process_id=2, source_id=self.source,
+        self.assertIsNone(registry.get_batch(process_id=2, source_id=self.source,
                                          entity_fqn="s.t", db_connect=self.connect))
 
     def test_last_process_fk_rejects_unknown_batch(self):

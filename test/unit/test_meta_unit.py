@@ -2,7 +2,7 @@
 
 The integration suite in test_meta.py needs EXTRACTION_TEST_DSN; these cases
 exercise the same client against a fake database that interprets exactly the
-statements meta.py issues, so branch logic runs on every host without
+statements ingestion/meta issues, so branch logic runs on every host without
 PostgreSQL.
 """
 
@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from ingestion import meta
+from ingestion.meta import registry
 
 
 STATE_COLUMNS = (
@@ -220,11 +221,11 @@ class BatchTestCase(unittest.TestCase):
 
     def plan(self, **changes):
         """Plan a batch with test-specific overrides."""
-        return meta.plan_batch(**(self.args | changes))
+        return registry.plan_batch(**(self.args | changes))
 
     def finish(self, batch, count=1, observed="10", **changes):
         """Finalize with the integer comparator."""
-        return meta.finalize_batch(process_id=batch["process_id"], source_id=batch["source_id"],
+        return registry.finalize_batch(process_id=batch["process_id"], source_id=batch["source_id"],
                                    entity_fqn=batch["entity_fqn"], row_count=count,
                                    observed_max=observed, db_connect=self.db.connect,
                                    compare_positions=self.int_compare, **changes)
@@ -308,15 +309,15 @@ class TestBatchLifecycle(BatchTestCase):
 
     def test_start_marks_running_and_counts_attempts(self):
         batch = self.plan()
-        started = meta.start_batch(**(self.key(batch) | dict(db_connect=self.db.connect)))
+        started = registry.start_batch(**(self.key(batch) | dict(db_connect=self.db.connect)))
         self.assertEqual((started["status"], started["attempt_count"]), ("RUNNING", 1))
-        again = meta.start_batch(**(self.key(batch) | dict(db_connect=self.db.connect)))
+        again = registry.start_batch(**(self.key(batch) | dict(db_connect=self.db.connect)))
         self.assertEqual(again["attempt_count"], 2)
 
     def test_start_after_success_is_noop(self):
         batch = self.plan()
         self.finish(batch)
-        started = meta.start_batch(**(self.key(batch) | dict(db_connect=self.db.connect)))
+        started = registry.start_batch(**(self.key(batch) | dict(db_connect=self.db.connect)))
         self.assertEqual((started["status"], started["attempt_count"]), ("SUCCEEDED", 0))
 
     def test_finalize_bootstrap_sets_watermark(self):
@@ -339,10 +340,10 @@ class TestBatchLifecycle(BatchTestCase):
         self.finish(self.plan())
         batch = self.plan(process_id=2, run_id="run2")
         with self.assertRaisesRegex(ValueError, "typed maximum"):
-            meta.finalize_batch(**(self.key(batch) | dict(row_count=1, observed_max="9",
+            registry.finalize_batch(**(self.key(batch) | dict(row_count=1, observed_max="9",
                                                           watermark_after="999",
                                                           db_connect=self.db.connect)))
-        self.assertEqual(meta.finalize_batch(
+        self.assertEqual(registry.finalize_batch(
             **(self.key(batch) | dict(row_count=1, observed_max="9", watermark_after="10",
                                       db_connect=self.db.connect)))["watermark_after"], "10")
 
@@ -350,13 +351,13 @@ class TestBatchLifecycle(BatchTestCase):
         self.finish(self.plan())
         batch = self.plan(process_id=2, run_id="run2")
         with self.assertRaisesRegex(ValueError, "required"):
-            meta.finalize_batch(**(self.key(batch) | dict(row_count=1, observed_max="11",
+            registry.finalize_batch(**(self.key(batch) | dict(row_count=1, observed_max="11",
                                                           db_connect=self.db.connect)))
 
     def test_finalize_stale_revision_rejected_before_update(self):
         self.finish(self.plan())
         batch = self.plan(process_id=2, run_id="run2")
-        meta.start_batch(**(self.key(batch) | dict(db_connect=self.db.connect)))
+        registry.start_batch(**(self.key(batch) | dict(db_connect=self.db.connect)))
         self.state()["revision"] += 1
         with self.assertRaisesRegex(ValueError, "revision"):
             self.finish(batch)
@@ -381,13 +382,13 @@ class TestBatchLifecycle(BatchTestCase):
         batch = self.plan()
         for bad in ("5", -1, True, 1.0):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
-                meta.finalize_batch(**(self.key(batch) | dict(row_count=bad, observed_max="10",
+                registry.finalize_batch(**(self.key(batch) | dict(row_count=bad, observed_max="10",
                                                               db_connect=self.db.connect)))
 
     def test_fail_marks_failed_without_state_change(self):
         batch = self.plan()
-        meta.start_batch(**(self.key(batch) | dict(db_connect=self.db.connect)))
-        failed = meta.fail_batch(**(self.key(batch) | dict(db_connect=self.db.connect)))
+        registry.start_batch(**(self.key(batch) | dict(db_connect=self.db.connect)))
+        failed = registry.fail_batch(**(self.key(batch) | dict(db_connect=self.db.connect)))
         self.assertEqual(failed["status"], "FAILED")
         self.assertIsNone(self.state()["watermark"])
         self.assertEqual(self.state()["revision"], 1)
@@ -395,7 +396,7 @@ class TestBatchLifecycle(BatchTestCase):
     def test_fail_after_success_is_noop(self):
         batch = self.plan()
         succeeded = self.finish(batch)
-        failed = meta.fail_batch(**(self.key(batch) | dict(db_connect=self.db.connect)))
+        failed = registry.fail_batch(**(self.key(batch) | dict(db_connect=self.db.connect)))
         self.assertEqual(failed["status"], "SUCCEEDED")
         self.assertEqual(failed, succeeded)
 
@@ -404,12 +405,12 @@ class TestGetBatch(BatchTestCase):
     """Persisted batch lookup and the stale-executor fence."""
 
     def test_missing_identity_returns_none(self):
-        self.assertIsNone(meta.get_batch(process_id=1, source_id="bank", entity_fqn="s.t",
+        self.assertIsNone(registry.get_batch(process_id=1, source_id="bank", entity_fqn="s.t",
                                          db_connect=self.db.connect))
 
     def test_lookup_by_composite_key(self):
         planned = self.plan()
-        found = meta.get_batch(process_id=1, source_id="bank", entity_fqn="s.t",
+        found = registry.get_batch(process_id=1, source_id="bank", entity_fqn="s.t",
                                db_connect=self.db.connect)
         self.assertEqual(found, planned)
 
@@ -417,29 +418,29 @@ class TestGetBatch(BatchTestCase):
         self.plan()
         self.state()["revision"] += 1
         with self.assertRaisesRegex(ValueError, "revision"):
-            meta.get_batch(process_id=1, source_id="bank", entity_fqn="s.t",
+            registry.get_batch(process_id=1, source_id="bank", entity_fqn="s.t",
                            db_connect=self.db.connect)
         with self.assertRaisesRegex(ValueError, "revision"):
-            meta.start_batch(process_id=1, source_id="bank", entity_fqn="s.t",
+            registry.start_batch(process_id=1, source_id="bank", entity_fqn="s.t",
                              db_connect=self.db.connect)
 
     def test_succeeded_batch_escapes_the_fence(self):
         self.plan()
         self.finish(self.plan())
         self.state()["revision"] += 1
-        found = meta.get_batch(process_id=1, source_id="bank", entity_fqn="s.t",
+        found = registry.get_batch(process_id=1, source_id="bank", entity_fqn="s.t",
                                db_connect=self.db.connect)
         self.assertEqual(found["status"], "SUCCEEDED")
 
     def test_unknown_batch_key_rejected(self):
         with self.assertRaisesRegex(ValueError, "does not exist"):
-            meta.fail_batch(process_id=999, source_id="bank", entity_fqn="s.t",
+            registry.fail_batch(process_id=999, source_id="bank", entity_fqn="s.t",
                             db_connect=self.db.connect)
 
     def test_missing_state_rejected(self):
         with meta.connection(db_connect=self.db.connect) as conn, conn.cursor() as cur:
             with self.assertRaisesRegex(ValueError, "does not exist"):
-                meta._lock_state(cur, "ghost", "s.t")
+                registry._lock_state(cur, "ghost", "s.t")
 
 
 class TestProcessAndEvents(unittest.TestCase):
@@ -483,18 +484,18 @@ class TestPureHelpers(unittest.TestCase):
         values = dict(column="id", type="bigint", lookback_size=0, lookback_unit=None,
                       calculate_lower=None, compare_positions=None)
         values.update(changes)
-        return meta._IncrementalConfig(**values)
+        return registry._IncrementalConfig(**values)
 
     def test_reason_matrix(self):
-        self.assertEqual(meta._batch_reason(None), "bootstrap")
-        self.assertEqual(meta._batch_reason("5"), "regular")
+        self.assertEqual(registry._batch_reason(None), "bootstrap")
+        self.assertEqual(registry._batch_reason("5"), "regular")
 
     def test_incremental_bounds_regular(self):
-        bounds = meta._incremental_bounds("5", "10", False, self.config())
+        bounds = registry._incremental_bounds("5", "10", False, self.config())
         self.assertEqual(bounds, ("5", ">", "10", False, 0, None))
 
     def test_incremental_bounds_lookback(self):
-        bounds = meta._incremental_bounds(
+        bounds = registry._incremental_bounds(
             "5", "10", False,
             self.config(lookback_size=2, lookback_unit=None,
                         calculate_lower=lambda value: (str(int(value) - 2), ">=")),
@@ -503,14 +504,14 @@ class TestPureHelpers(unittest.TestCase):
 
     def test_incremental_bounds_regression_rejected(self):
         with self.assertRaisesRegex(ValueError, "regressed"):
-            meta._incremental_bounds(
+            registry._incremental_bounds(
                 "10", "9", False,
                 self.config(compare_positions=lambda left, right: int(left) - int(right)),
             )
 
     def test_incremental_bounds_lookback_needs_calculator(self):
         with self.assertRaisesRegex(ValueError, "calculate_lower"):
-            meta._incremental_bounds("5", "10", False, self.config(lookback_size=1))
+            registry._incremental_bounds("5", "10", False, self.config(lookback_size=1))
 
 
 if __name__ == "__main__":

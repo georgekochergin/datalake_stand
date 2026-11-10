@@ -415,7 +415,7 @@ lines = [
 
 SQL также встроен в Python, но используется по-разному:
 
-- `ingestion/meta.py`: статические запросы PostgreSQL, включая многострочные INSERT/UPDATE реестра [инкремента](glossary.md#term-increment); значения передаются отдельно через DB-API-параметры `%s`. Транзакции, порядок блокировок и [CAS revision](glossary.md#term-cas) управляются Python-кодом.
+- Пакет `ingestion/meta/`: статические запросы PostgreSQL, включая многострочные INSERT/UPDATE реестра [инкремента](glossary.md#term-increment); значения передаются отдельно через DB-API-параметры `%s`. Транзакции, порядок блокировок и [CAS revision](glossary.md#term-cas) управляются Python-кодом.
 - `ingestion/spark/raw/rdbms/reader.py`: `build_extract_query` собирает вложенный SELECT с проекциями и необязательным WHERE; `read_bounds` строит MIN/MAX по запросу чтения.
 - `ingestion/iceberg.py::build_create_table_sql` и `ingestion/spark/raw/rdbms/incremental/load_act_snap.py::build_rtas_sql`: составные Spark SQL DDL для создания [raw](glossary.md#term-raw)-таблицы и атомарной замены актуального снимка.
 - `ingestion/sources/rdbms/dialects/mssql.py` и `oracle.py`: короткие диалектные выражения, quoting идентификаторов и точное представление временных позиций. Это не самостоятельные запросы.
@@ -450,7 +450,7 @@ SQL также встроен в Python, но используется по-ра
 
 ##### SQL-файлы и шаблоны
 
-- Вынести полные статические запросы `ingestion/meta.py` в `.sql`, загружать их как текст без Jinja. Сохранить `%s` и отдельную передачу параметров в `execute`; не менять транзакции, порядок блокировок, [retry](glossary.md#term-retry)/[idempotency](glossary.md#term-idempotency) и [CAS revision](glossary.md#term-cas).
+- Вынести полные статические запросы пакета `ingestion/meta/` в `.sql`, загружать их как текст без Jinja. Сохранить `%s` и отдельную передачу параметров в `execute`; не менять транзакции, порядок блокировок, [retry](glossary.md#term-retry)/[idempotency](glossary.md#term-idempotency) и [CAS revision](glossary.md#term-cas).
 - Вынести составные запросы `build_extract_query`, `read_bounds`, `build_create_table_sql` и `build_rtas_sql` в `.sql` с именованными полями подстановки через стандартный `str.format_map`. Сохранить существующие функции как точки подготовки SQL-фрагментов и подстановки, без изменения их контрактов и семантики запросов. Необязательный WHERE и списки проекций готовить в Python, без условий и циклов в SQL-файлах.
 - Оставить в Python валидацию, выбор диалекта, quoting идентификаторов, канонизацию и экранирование литералов, вычисление временных выражений, границ и предикатов. В именованные поля SQL-файлов подставлять только подготовленные фрагменты, а не произвольные непроверенные значения. Строковая подстановка не заменяет bind-параметры и не защищает от SQL injection; значения запросов pg-meta по-прежнему передаются отдельно через `%s`.
 - Короткие запросы-проверки и диалектные выражения не выносить ради единообразия; не заменять DataFrame API SQL-шаблонами. SQL инициализации `conf/pg-meta/init/` не затрагивать.

@@ -1152,8 +1152,8 @@ JDBC-метаданные типа: границы и `empty_at_plan` уже з�
 
 Загрузкой инкрементального [окна](glossary.md#term-window) управляет `managed_load()` в
 `ingestion/spark/raw/rdbms/incremental/load_entity.py`. Она вызывает
-`ingestion/meta.py` для коротких транзакций pg-meta и общие модули
-`reader.py`/`raw_append.py` для JDBC-чтения и записи [raw](glossary.md#term-raw). [Полный срез](glossary.md#term-full)
+реестр партий `ingestion/meta/registry.py` на общем helper транзакций пакета
+`ingestion/meta` и общие модули `reader.py`/`raw_append.py` для JDBC-чтения и записи [raw](glossary.md#term-raw). [Полный срез](glossary.md#term-full)
 исполняет `full/load_entity.py` без обращений к реестру, снимочный поток —
 `incremental/load_act_snap.py` (раздел 7.7).
 **[Партия](glossary.md#term-batch)** — одна загрузка одной [сущности](glossary.md#term-entity) в одном [исполнении](glossary.md#term-execution) DAG-а; ключ —

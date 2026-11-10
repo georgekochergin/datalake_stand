@@ -180,12 +180,12 @@ class TestSourcePosition(unittest.TestCase):
         aggregate.assert_not_called()
 
     def test_retry_checks_metadata_without_replanning(self):
-        from ingestion import meta
+        from ingestion.meta import registry
 
         args = self.args()
         batch = {"target_table": args.target_table, "incremental_column": "_batch_id",
                  "incremental_type": "bigint", "status": "FAILED"}
-        with patch.object(meta, "get_batch", return_value=batch), patch.object(
+        with patch.object(registry, "get_batch", return_value=batch), patch.object(
             load_entity, "source_kind", return_value="bigint"
         ) as metadata, patch.object(load_entity, "source_position") as aggregate:
             self.assertIs(load_entity._plan_batch(MagicMock(), args, MagicMock()), batch)
@@ -212,9 +212,9 @@ class TestPlanBatch(unittest.TestCase):
     """Batch resolution and planning before any source window is read."""
 
     def setUp(self):
-        from ingestion import meta
+        from ingestion.meta import registry
 
-        self.meta = meta
+        self.registry = registry
         self.spark = MagicMock()
 
     def args(self, *extra):
@@ -222,8 +222,8 @@ class TestPlanBatch(unittest.TestCase):
         return load_entity.parse_args(argv)
 
     def plan(self, batch, planned=None, position=None, args=None):
-        with patch.object(self.meta, "get_batch", return_value=batch) as got, patch.object(
-            self.meta, "plan_batch", return_value=planned
+        with patch.object(self.registry, "get_batch", return_value=batch) as got, patch.object(
+            self.registry, "plan_batch", return_value=planned
         ) as plan, patch.object(load_entity, "source_position", return_value=position) as probe, patch.object(
             load_entity, "source_kind", return_value="bigint"
         ):
@@ -330,9 +330,9 @@ class TestManagedLoad(unittest.TestCase):
     """Managed execution: planning, empty windows, finalization, and failure."""
 
     def setUp(self):
-        from ingestion import meta
+        from ingestion.meta import registry
 
-        self.meta = meta
+        self.registry = registry
         self.spark = MagicMock()
         self.source = MagicMock()
         psycopg2 = types.ModuleType("psycopg2")
@@ -361,9 +361,9 @@ class TestManagedLoad(unittest.TestCase):
             load_entity.raw_append,
             "append_raw",
             **({"side_effect": append_error} if append_error else {"return_value": appended}),
-        ) as append, patch.object(self.meta, "start_batch") as started, patch.object(
-            self.meta, "finalize_batch"
-        ) as finalize, patch.object(self.meta, "fail_batch") as failed:
+        ) as append, patch.object(self.registry, "start_batch") as started, patch.object(
+            self.registry, "finalize_batch"
+        ) as finalize, patch.object(self.registry, "fail_batch") as failed:
             load_entity.managed_load(self.spark, args)
         return types.SimpleNamespace(read_frame=read_frame, append=append, started=started,
                                      finalize=finalize, failed=failed)
@@ -379,7 +379,7 @@ class TestManagedLoad(unittest.TestCase):
         with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.object(
             load_entity, "_plan_batch", return_value=self.batch(lower_bound="10")
         ), patch.object(load_entity.reader, "read_extract_frame") as read_frame, patch.object(
-            self.meta, "finalize_batch"
+            self.registry, "finalize_batch"
         ) as finalize:
             load_entity.managed_load(self.spark, self.args())
         read_frame.assert_not_called()
@@ -395,7 +395,7 @@ class TestManagedLoad(unittest.TestCase):
                                     watermark_before="10")
         ), patch.object(load_entity.reader, "read_extract_frame", return_value=self.source) as read_frame, patch.object(
             load_entity.raw_append, "append_raw", return_value=(2, "10")
-        ), patch.object(self.meta, "start_batch"), patch.object(self.meta, "finalize_batch"):
+        ), patch.object(self.registry, "start_batch"), patch.object(self.registry, "finalize_batch"):
             load_entity.managed_load(self.spark, self.args())
         read_frame.assert_called_once()
 
@@ -416,7 +416,7 @@ class TestManagedLoad(unittest.TestCase):
             load_entity, "_plan_batch", return_value=self.batch()
         ), patch.object(load_entity.reader, "read_extract_frame", return_value=self.source), patch.object(
             load_entity.raw_append, "append_raw", side_effect=RuntimeError("secret boom")
-        ), patch.object(self.meta, "start_batch"), patch.object(self.meta, "fail_batch") as failed:
+        ), patch.object(self.registry, "start_batch"), patch.object(self.registry, "fail_batch") as failed:
             with self.assertRaisesRegex(RuntimeError, "secret boom"):
                 load_entity.managed_load(self.spark, self.args())
         self.assertEqual(
@@ -431,8 +431,8 @@ class TestManagedLoad(unittest.TestCase):
             load_entity, "_plan_batch", return_value=self.batch()
         ), patch.object(load_entity.reader, "read_extract_frame", return_value=self.source), patch.object(
             load_entity.raw_append, "append_raw", side_effect=RuntimeError("secret boom")
-        ), patch.object(self.meta, "start_batch"), patch.object(
-            self.meta, "fail_batch", side_effect=RuntimeError("meta down")
+        ), patch.object(self.registry, "start_batch"), patch.object(
+            self.registry, "fail_batch", side_effect=RuntimeError("meta down")
         ):
             with self.assertRaisesRegex(RuntimeError, "secret boom"), self.assertLogs(load_entity.LOGGER, level="WARNING"):
                 load_entity.managed_load(self.spark, self.args())

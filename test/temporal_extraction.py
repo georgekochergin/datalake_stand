@@ -210,6 +210,7 @@ def check_post_append_retry(spark, hook, jdbc, token):
     """Inject a real post-append metadata failure and accept a repeated append."""
     load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/incremental/load_entity.py")
     from ingestion import meta
+    from ingestion.meta import registry
 
     args = Namespace(
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
@@ -222,7 +223,7 @@ def check_post_append_retry(spark, hook, jdbc, token):
         lookback_size=0, lookback_unit=None,
         position_type="bigint",
     )
-    with patch.object(meta, "finalize_batch", side_effect=RuntimeError("injected metadata failure")):
+    with patch.object(registry, "finalize_batch", side_effect=RuntimeError("injected metadata failure")):
         try:
             load_entity.managed_load(spark, args)
         except RuntimeError as exc:
