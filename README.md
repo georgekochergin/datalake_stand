@@ -78,7 +78,7 @@ flowchart TB
 
 Spark и Trino видят один каталог `raw` и одни таблицы. Например:
 `raw.bank.retail_bank__clients`. Данные находятся в [бакете](docs/glossary.md#term-bucket) `datalake`
-S3-хранилища silo. [Бакет](docs/glossary.md#term-bucket) — контейнер объектов, аналог верхнего уровня каталога файлов.
+S3-хранилища silo.
 
 ### Docker-образы и приложения
 
@@ -113,7 +113,7 @@ S3-хранилища silo. [Бакет](docs/glossary.md#term-bucket) — ко�
 | Airflow и Spark [driver](docs/glossary.md#term-driver) | Python 3.11, JDK 17, PySpark 3.5.5, Spark provider 6.3.2, Trino provider 6.7.0, `sydafa-airflow` |
 | Spark [executors](docs/glossary.md#term-executor) | Python 3.10, Spark 3.5.5, Iceberg 1.8.1 |
 | JDBC-драйверы | MSSQL `12.10.0.jre11`, Oracle `23.8.0.25.04` |
-| Генератор и [unit-проверки](docs/glossary.md#term-unit) на хосте | Python 3.11+, зависимости из `ingestion/generator/requirements.txt` |
+| Генератор и [unit-тесты](docs/glossary.md#term-unit) на хосте | Python 3.11+, зависимости из `ingestion/generator/requirements.txt` |
 | Тестовый контейнер | Python 3.12, PyYAML 6.0.3 |
 
 [Driver](docs/glossary.md#term-driver) — управляющий процесс Spark-приложения, [executors](docs/glossary.md#term-executor) — рабочие процессы.
@@ -244,7 +244,7 @@ Spark использует Nessie API `/api/v2`, Trino — Iceberg REST `/iceber
 - Catalog/Database: `raw`.
 - Username и Password: значения из `.env`, по умолчанию `admin123` / `admin123`.
 - SSL: включён.
-- [Driver](docs/glossary.md#term-driver) properties: `SSL=true`, `SSLVerification=NONE`.
+- Driver properties: `SSL=true`, `SSLVerification=NONE`.
 - JDBC URL: `jdbc:trino://localhost:8443/raw?SSL=true&SSLVerification=NONE`.
 
 Отключение проверки сертификата допустимо здесь только для локального стенда
@@ -289,7 +289,6 @@ sydafa — отдельный [проект](https://github.com/georgekochergin/
 ### Активация и подключение
 
 Источник запускается по запросу, а после истечения [TTL](docs/glossary.md#term-ttl) останавливается.
-**[TTL](docs/glossary.md#term-ttl)** — время, на которое источник оставляют работающим.
 
 1. Откройте http://localhost:8090/docs.
 2. Выполните `POST /sources/bank/activate?ttl_minutes=20`
@@ -438,7 +437,7 @@ SELECT * FROM "trading_core"."transactions";
 Реализованы:
 
 - загрузки из MSSQL 2022 и Oracle Free 23;
-- [полные срезы](docs/glossary.md#term-full), [инкременты](docs/glossary.md#term-increment) и отдельные таблицы текущего состояния;
+- [полные срезы](docs/glossary.md#term-full), [инкременты](docs/glossary.md#term-increment) и вспомогательные [таблицы-снимки](docs/glossary.md#term-snapshot);
 - хранение истории загрузок в Iceberg;
 - обработка добавления, удаления и переименования колонок источника;
 - эмуляция источников и изолированный тестовый контур.

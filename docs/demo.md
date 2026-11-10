@@ -106,7 +106,7 @@ http://localhost:8090/health должен вернуть HTTP 200. При пер
 1. Airflow UI → DAG-и `update_source_bank` и `update_source_broker`
    (расписания нет — запуск только ручной, кнопкой ▶ справа).
 2. Запустить оба (можно параллельно), открыть Grid View.
-3. Пока идут: таски `migrate_bank` и `migrate_broker` применяют [батчи](glossary.md#term-migration) из
+3. Пока идут: таски `migrate_bank` и `migrate_broker` применяют наборы операций из
    `airflow/plugins/migrations/{bank,broker}.json`. На каждый запуск каждого
    источника: +20 клиентов, +20 счетов, +200 сделок, +5000 транзакций;
    каскадное удаление 10 сделок и связанных с ними строк. Поэтому итоговый
@@ -162,7 +162,7 @@ SELECT * FROM "trading_core"."clients" ORDER BY "client_id" DESC FETCH FIRST 10 
 ```
 
 **Что рассказать:** в каждой таблице видна служебная колонка `_batch_id` — номер
-[партии](glossary.md#term-batch) наполнения; по ней работает инкрементальная загрузка transactions.
+наполнения источника. По ней работает инкрементальная загрузка transactions.
 Читатель `sydafa` имеет права только на чтение.
 
 ## Шаг 3. Генерация DAG-ов загрузки (имитация CI/CD) и запуск
@@ -383,7 +383,7 @@ WHERE entity_fqn = 'retail_bank.transactions' ORDER BY process_id;
    вида `__load_dttm_day=2026-10-26` — дневные партиции загрузки; внутри —
    Parquet-файлы данных.
 3. Рядом `datalake / raw / bank / retail_bank__transactions / metadata` —
-   файлы метаданных Iceberg ([манифесты](glossary.md#term-manifest) и снапшоты — история коммитов таблицы).
+   файлы метаданных Iceberg (manifest-файлы и [снапшоты Iceberg](glossary.md#term-iceberg-snapshot) — история коммитов таблицы).
 
 **Что рассказать:**
 
@@ -401,8 +401,8 @@ WHERE entity_fqn = 'retail_bank.transactions' ORDER BY process_id;
 
 Все запросы — Swagger UI, по одному «Try it out» на операцию (migrate сам
 будит базу, даже если [TTL](glossary.md#term-ttl) активации из шага 2 истёк). Каждая операция — отдельная
-транзакция; при желании три операции одного источника можно отправить и одним
-[батчем](glossary.md#term-migration).
+транзакция. При желании отправьте три операции одного источника вместе:
+они выполнятся в одной транзакции.
 
 ### 7.1. Удаление колонки
 

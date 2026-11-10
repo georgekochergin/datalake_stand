@@ -49,7 +49,7 @@
 
 Есть два метода загрузки:
 
-1. **Полный снапшот** — каждая итерация читает всю таблицу источника и
+1. **[Полный срез](glossary.md#term-full)** — каждая итерация читает всю таблицу источника и
    дописывает её [полный срез](glossary.md#term-full) с новыми техническими метаданными. Удалённой строки
    не будет в новом срезе, но её ранее загруженные версии останутся в [raw](glossary.md#term-raw).
 2. **[Инкремент](glossary.md#term-increment)** — изменения отслеживаются по выбранной колонке таблицы
@@ -262,7 +262,7 @@ DAG ingest__rdbms__bank__main
 Она нужна при частичном [Clear](glossary.md#term-clear) генератора и группы без `activate_source`:
 оставшаяся успешной активация не должна разрешать START до завершения
 новой генерации и публикации process_id в XCom.
-`max_active_runs=1` сериализует запуски одного DAG-а — «последний снапшот» и
+`max_active_runs=1` сериализует запуски одного DAG-а — последний [полный срез](glossary.md#term-full) и
 [watermark](glossary.md#term-watermark) каждой [сущности](glossary.md#term-entity) однозначен.
 
 ### Назначение задач
@@ -453,7 +453,8 @@ SELECT count(*) FROM raw.bank.retail_bank__transactions WHERE __process_id = 42;
 ```
 
 Запрос с `max(__load_dttm)` возвращает последнюю **непустую** [порцию](glossary.md#term-portion); про
-пустой снапшот смотрите пояснение выше (раздел «Режимы наполнения»).
+пустой [полный срез](glossary.md#term-full) смотрите пояснение в подразделе
+[«Полный срез и инкремент»](#полный-срез-и-инкремент).
 
 `__load_dttm` — `timestamp_ltz` (абсолютный момент); партиции следуют UTC-дням,
 а «сегодня» — календарное понятие. Сравнивайте с зоной:
@@ -667,7 +668,7 @@ ADD COLUMN` внутри коммита записи). Существующие 
    и завершились за 732–733 мс. Ранее [executor](glossary.md#term-executor) получил 10 ядер; четыре
    партиции могут исполняться на одном [executor](glossary.md#term-executor), четыре [executor](glossary.md#term-executor) не нужны.
    Эти строки подтверждают перекрытие Spark-задач, но сами по себе не
-   доказывают одновременный старт SQL на сервере или единую [snapshot](glossary.md#term-snapshot)-точку.
+   доказывают одновременный старт SQL на сервере или чтение данных на единый момент времени.
 6. Последующие стадии `first`, shuffle и `append` относятся к дальнейшей
    обработке и записи. Их `4 output partitions` нельзя считать ещё четырьмя
    независимыми JDBC-запросами: чтение кешируется, повторное обращение к
@@ -908,7 +909,7 @@ JDBC/DataFrame-загрузки не запускают Python-worker'ов, но
 
 JDBC-метаданные типа и метаданные выбора нарезки — разные проверки.
 Подтверждение типа не фиксирует схему на время всех последующих запросов;
-общей [snapshot](glossary.md#term-snapshot)-транзакции источника для этих этапов нет.
+общей транзакции, фиксирующей состояние источника для всех этих этапов, нет.
 
 ## 7. Инкрементальная загрузка
 
@@ -1126,7 +1127,7 @@ JDBC-метаданные типа: границы и `empty_at_plan` уже з�
 запланированный upper, продвигает [watermark](glossary.md#term-watermark). MIN/MAX для JDBC-нарезки —
 другая операция, выполняемая над уже ограниченным [окном](glossary.md#term-window).
 Даже фиксированные границы **не фиксируют содержимое** источника: общей
-[snapshot](glossary.md#term-snapshot)-транзакции на все JDBC-запросы и повторы у загрузчика нет.
+транзакции, фиксирующей состояние источника для всех JDBC-запросов и повторов, у загрузчика нет.
 
 #### Требования к колонке инкремента
 
@@ -1291,7 +1292,7 @@ Iceberg.
 
 | Колонка | Тип | Смысл |
 |---|---|---|
-| `process_id` | bigint, PK | Идентификатор [исполнения](glossary.md#term-execution) DAG-а; же значение, что и `__process_id` в [raw](glossary.md#term-raw) |
+| `process_id` | bigint, PK | Идентификатор [исполнения](glossary.md#term-execution) DAG-а; то же значение, что и `__process_id` в [raw](glossary.md#term-raw) |
 | `dag_id`, `run_id` | text | Принадлежность [DagRun](glossary.md#term-dagrun) (корреляция и логи, не ключ идентичности) |
 | `source_id`, `entity_fqn` | text, PK | [Сущность](glossary.md#term-entity); FK на `incremental_state` |
 | `target_table` | text | Целевая [raw](glossary.md#term-raw)-таблица |
@@ -1516,7 +1517,7 @@ CHECK (status = 'SUCCEEDED' OR
 - Изменить [манифест](glossary.md#term-manifest) и регенерировать DAG. Запустить **новый [DagRun](glossary.md#term-dagrun)**:
   неуспешную [партию](glossary.md#term-batch) старой ревизии повторно использовать нельзя.
 - При инкрементальном новом контракте отсутствие [watermark](glossary.md#term-watermark) запускает
-  [bootstrap](glossary.md#term-bootstrap); при полном режиме — обычный снапшот. Проверить результат
+  [bootstrap](glossary.md#term-bootstrap); при полном режиме — обычный [полный срез](glossary.md#term-full). Проверить результат
   и аудит до возобновления расписания.
 
 В коде **нет автоматического заполнения** `incremental_state_migrations`,
@@ -2003,7 +2004,7 @@ bank.yaml:
 
 - [Raw](glossary.md#term-raw) — зеркало источника (фреймворк). Не трогать при добавлении [ODS](glossary.md#term-ods).
 - [ODS](glossary.md#term-ods) — дедупликация и построение состояния [сущностей](glossary.md#term-entity) поверх [raw](glossary.md#term-raw).
-- [DDS](glossary.md#term-dds) и витрины — бизнес-логика. Живут вне фреймворка [raw](glossary.md#term-raw)-инжесшена.
+- [DDS](glossary.md#term-dds) и витрины — бизнес-логика. Живут вне фреймворка загрузки [raw](glossary.md#term-raw).
 
 Добавляя [ODS](glossary.md#term-ods), **не переименовывать** [raw](glossary.md#term-raw) и **не обобщать** `iceberg.py`. Каждый
 слой — свой файл `load_entity.py` с собственной логикой [идемпотентности](glossary.md#term-idempotency).
