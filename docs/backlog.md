@@ -164,7 +164,7 @@ Airflow: IngestAppendOperator(DockerOperator)
 
 - Подключать контейнер к сети соответствующего compose-проекта; не смешивать основной и тестовый контуры.
 - Обеспечить доступ к Spark master, источникам, Nessie/SILO и обратное подключение executors к driver. Настроить уникальные имена/адреса попыток, `spark.driver.host`, bind address и отсутствие конфликтов портов параллельных drivers.
-- Расширить `ingestion/settings.yaml` настройками образа, CPU/memory limits и необходимых Spark resources. Точные ключи определить по версии DockerOperator.
+- Определить конфигурацию образа, CPU/memory limits и необходимых Spark resources; точные ключи — по версии DockerOperator. Согласовать место хранения с задачей [«Разделить реестр источников на YAML-файлы и настроить JDBC-параллелизм по источникам»](#разделить-реестр-источников-на-yaml-файлы-и-настроить-jdbc-параллелизм-по-источникам): существующий `ingestion/conf/settings.yaml` содержит только глобальный JDBC-параллелизм и в рамках той миграции удаляется. Не расширять его настройками DockerOperator и не восстанавливать после удаления; отдельный контракт конфигурации запуска определить при проектировании DockerOperator, независимо от порядка реализации задач. Ресурсы Spark на уровне сущности согласовать с задачей [«Управление ресурсами Spark на уровне отдельной джобы»](#управление-ресурсами-spark-на-уровне-отдельной-джобы), не создавая второй источник тех же значений.
 - Согласовать JVM memory с лимитом контейнера, оставив запас для Python, JVM overhead и native memory.
 - Разделять Airflow slots (admission control), Docker limits (ресурсы driver) и Spark/JDBC parallelism (распределённое выполнение).
 
@@ -516,7 +516,7 @@ Runtime-кейс в рамках оформления задачи не пров
 
 #### Контекст
 
-`IngestAppendOperator.execute()` в `ingestion/operators.py` получает реквизиты источника из Airflow Connection и передаёт пароль через `--jdbc-password` в `application_args` для `SparkSubmitOperator`. Загрузчик `ingestion/spark/raw/rdbms/load_entity.py` принимает этот аргумент и использует его при JDBC-подключениях. Реквизиты pg-meta уже передаются переменными окружения `PG*`.
+`IngestAppendOperator.execute()` в `ingestion/operators.py` получает реквизиты источника из Airflow Connection и передаёт пароль через `--jdbc-password` в `application_args` для `SparkSubmitOperator`. Загрузчики `ingestion/spark/raw/rdbms/full/load_entity.py` и `ingestion/spark/raw/rdbms/incremental/load_entity.py` принимают этот аргумент и используют его при JDBC-подключениях. Реквизиты pg-meta уже передаются переменными окружения `PG*`.
 
 В закреплённом Spark provider 6.3.2 штатное логирование команды и сообщение об ошибке её выполнения используют маскирование аргументов с `password`/`secret`. Это не удаляет настоящий пароль из аргументов запущенного процесса. Источники: `conf/airflow/requirements.txt`, `IngestAppendOperator.execute()`, `parse_args()` загрузчика и `SparkSubmitHook._mask_cmd()` провайдера.
 
