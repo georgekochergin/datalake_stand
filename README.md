@@ -1,560 +1,375 @@
-# datalake_stand — стенд КХД → DLH (raw-слой)
+# datalake_stand — стенд хранилища и озера данных
 
-Локальный docker-compose стенд корпоративного хранилища данных: Airflow
-оркестрирует загрузку таблиц из реляционных источников (MSSQL, Oracle) в
-**raw-слой** озера на Iceberg. Raw-слой — точное зеркало таблиц источника «AS IS»
-плюс технические колонки загрузки: без бизнес-логики, без преобразований, без
-отбора колонок. Добавление новой таблицы в озеро — одна строка в манифесте
-пайплайна и регенерация DAG-ов. Обработка данных (слои ods/dds/dma) строится
-поверх raw в будущих этапах и raw при этом не меняется. Работа с данными —
-SQL через Trino (DBeaver, BI) и Spark.
+Локальный стенд на Docker Compose: данные из MSSQL и Oracle загружаются
+в озеро на Apache Iceberg. Загрузками управляет Airflow, вычисления выполняет
+Spark, SQL-запросы — Trino. Источники с тестовыми данными создаёт сервис sydafa.
 
-**Карта документации.** За каждым документом закреплена одна зона
-ответственности; правила ведения документов — в [`AGENTS.md`](AGENTS.md),
-раздел «Документация и процессы».
+Сейчас реализован **[raw-слой](docs/glossary.md#term-raw)**: данные источников без бизнес-преобразований
+с техническими отметками загрузки. Слои обработки и витрины пока планируются.
+Стенд предназначен для разработки и демонстраций, а не для размещения
+в открытой сети: часть интерфейсов не требует авторизации.
 
-| Документ | О чём | Когда читать |
-|---|---|---|
-| `README.md` (этот файл) | Эксплуатация: архитектура и состав стенда, запуск и проверки, источники sydafa, обзор логики загрузки, тестирование; статус и планы проекта | поднять стенд, подключиться, проверить работу |
-| [`docs/architecture.md`](docs/architecture.md) | Устройство: слои данных (raw/ods/dds), механика загрузки (манифесты, DAG-и, партии, инкремент), типы и гарантии, известные ограничения | понять, как устроена загрузка и где её границы |
-| [`docs/demo.md`](docs/demo.md) | Пошаговый сценарий демонстрации с готовыми SQL- и JSON-запросами; документ самодостаточен и читается без остальной документации | показать стенд или познакомиться с ним быстро |
-| [`docs/backlog.md`](docs/backlog.md) | Проработанные отложенные задачи | узнать открытые проблемы и согласованные решения |
-| [`docs/graphify.md`](docs/graphify.md), [`docs/speckit.md`](docs/speckit.md) | Тулинг ИИ-агентов: граф кодовой базы; спек-цикл Spec Kit | настроить graphify / спек-цикл изменений |
-| [`AGENTS.md`](AGENTS.md) | Правила для ИИ-агентов: маршруты по скиллам, зоны документов, git-процесс, стандарты кода | понять, по каким правилам агент работает с репозиторием |
+## Содержание
 
-**Содержание** README (эксплуатация стенда) — пять разделов: архитектура
-стенда, работа со стендом, эмуляция источников, логика работы datalake
-(обзор; подробно — `docs/architecture.md`), тестирование.
+- [Документация](#документация)
+- [Глоссарий](docs/glossary.md)
+- [1. Устройство стенда](#1-устройство-стенда)
+  - [Схема взаимодействия](#схема-взаимодействия)
+  - [Docker-образы и приложения](#docker-образы-и-приложения)
+  - [Языки и библиотеки](#языки-и-библиотеки)
+    - [JDBC-драйверы в образах Airflow и Spark](#почему-jdbc-драйверы-установлены-в-обоих-образах)
+- [2. Требования и запуск](#2-требования-и-запуск)
+  - [Требования к среде](#требования-к-среде)
+  - [Первый запуск](#первый-запуск)
+  - [Остановка и обновление](#остановка-и-обновление)
+  - [Полный сброс данных](#полный-сброс-данных)
+- [3. Подключения](#3-подключения)
+  - [Веб-интерфейсы и порты](#веб-интерфейсы-и-порты)
+  - [Trino в DBeaver](#trino-в-dbeaver)
+  - [PostgreSQL pg-meta в DBeaver](#postgresql-pg-meta-в-dbeaver)
+  - [Учётные данные](#учётные-данные)
+- [4. Источники sydafa](#4-источники-sydafa)
+  - [Активация и подключение](#активация-и-подключение)
+  - [API и обновление данных](#api-и-обновление-данных)
+  - [Добавление источника](#добавление-источника)
+- [5. Проверка стенда](#5-проверка-стенда)
+- [6. Структура репозитория](#6-структура-репозитория)
+- [7. Статус и планы](#7-статус-и-планы)
 
-**Содержание**
+## Документация
 
-1. [Архитектура стенда](#1-архитектура-стенда)
-2. [Работа со стендом](#2-работа-со-стендом)
-3. [Эмуляция источников (sydafa)](#3-эмуляция-источников-sydafa)
-4. [Логика работы datalake](#4-логика-работы-datalake)
-5. [Тестирование стенда](#5-тестирование-стенда)
+| Документ | Когда читать |
+|---|---|
+| README (этот файл) | Запустить стенд, узнать состав и подключиться к сервисам |
+| [Архитектура загрузчика](docs/architecture.md) | Настроить загрузку, разобраться в DAG-ах, таблицах и гарантиях |
+| [Расширение стенда](docs/extending.md) | Подключить новую JDBC-СУБД, спроектировать другой тип источника или слой данных |
+| [Демонстрация](docs/demo.md) | Пройти готовый сценарий с SQL и API-запросами |
+| [Бэклог](docs/backlog.md) | Посмотреть согласованные отложенные задачи |
+| [Глоссарий](docs/glossary.md) | Найти определения терминов проекта |
+| [graphify](docs/agents/graphify.md) | Настроить граф кодовой базы для ИИ-агентов |
+| [Spec Kit](docs/agents/speckit.md) | Работать над функциональными изменениями по спецификациям |
+| [AGENTS.md](AGENTS.md) | Узнать правила работы агента с репозиторием |
 
----
+## 1. Устройство стенда
 
-## 1. Архитектура стенда
-
-### 1.1. Назначение и ключевые решения
-
-Стенд демонстрирует контур загрузки данных production-архитектуры DLH:
-
-- **Слой = каталог.** Каждый слой озера — отдельный warehouse в Nessie и
-  отдельный каталог в движках (`raw` сейчас; `ods`, `dds`, `dma` — будущие).
-  Движки адресуют таблицы как `каталог.схема.таблица`, поэтому слой занимает
-  слот каталога: `raw.bank.retail_bank__clients`.
-- **Append-only.** Каждая загрузка дописывает новую порцию строк; строки в raw
-  никогда не обновляются и не удаляются на месте. Полная история всех загрузок
-  сохраняется как данные. Семантика — at-least-once: сбой после фиксации данных,
-  но до фиксации watermark может привести к повторной записи порции при
-  повторе (`docs/architecture.md`, разделы 4 и 7).
-- **Устойчивость к эволюции схемы источника.** Новые колонки источника
-  добавляются в таблицу озера автоматически, исчезнувшие заполняются NULL,
-  изменение типа не проходит молча (`docs/architecture.md`, раздел 5).
-- **Два контура.** Контур A — сам датахаб (Airflow, Spark, Nessie, Trino, silo,
-  pg-catalog, pg-meta). Контур B — подключаемый эмулятор источников sydafa,
-  который поднимает и наполняет СУБД-источники; в production вместо него были бы
-  реальные базы.
-
-### 1.2. Состав инстансов
-
-| Инстанс | Образ/версия | Назначение |
-|---|---|---|
-| `sydafa` | `ghcr.io/georgekochergin/sydafa:latest` | Эмулятор источников: REST API для активации СУБД, транзакционных миграций схемы/данных и генерации синтетических данных (раздел 3) |
-| `sydafa-src-mssql-bank` | `mcr.microsoft.com/mssql/server:2022-CU27` | Источник **bank** (MSSQL 2022, база `sydafa`, схема `retail_bank`); запускается sydafa лениво, по требованию |
-| `sydafa-src-oracle-broker` | `gvenzl/oracle-free:23-slim-faststart` | Источник **broker** (Oracle Free 23, PDB `sydafa`, схема `trading_core`); запускается sydafa лениво |
-| `spark-master` / `spark-worker` | `tabulario/spark-iceberg:3.5.5_1.8.1` + JDBC-драйверы MSSQL/Oracle | Spark 3.5.5 standalone-кластер; загрузка источников в Iceberg по JDBC, каталог `raw` через нативный NessieCatalog |
-| `airflow-webserver` / `airflow-scheduler` / `airflow-dag-processor` | `apache/airflow:3.3.2-python3.11` (+ Spark, JDK 17, JDBC-jars) | Оркестрация: DAG-и обновления источников и DAG-и загрузки raw-слоя, LocalExecutor |
-| `airflow-postgres` | `postgres:16.15` | Собственная база Airflow (метаданные DAG-ов, XCom) |
-| `nessie` | `ghcr.io/projectnessie/nessie:0.99.0` | Каталог метаданных Iceberg (REST API), warehouse `raw` → `s3://datalake/raw/` |
-| `pg-catalog` | `postgres:16.15` | Хранилище самого Nessie (JDBC version store) |
-| `silo` + `silo-init` | `pgsty/silo` (MinIO-совместимый S3) | Объектное хранилище: bucket `datalake` (данные Iceberg); `silo-init` — одноразовое создание bucket |
-| `trino` | `trinodb/trino:479` | SQL-движок над Iceberg: аналитика, проверка результатов загрузок; каталог `raw` |
-| `pg-meta` | `postgres:16.15` | Операционная база фреймворка загрузки: идентификаторы процессов, события DAG-ов и тасков, состояние инкрементальных извлечений (`docs/architecture.md`, разделы 7–8) |
-| `test-runner` (профиль `test`) | `python:3.12-slim` | Одноразовый контейнер e2e-тестов; на живом стенде не запускается (раздел 5) |
-
-Spark подключается к Nessie через `NessieCatalog` (`/api/v2`, ветка `main`),
-Trino — через Iceberg REST (`/iceberg`). Оба видят одни и те же таблицы.
-Загрузчик RAW явно задаёт `LOCATION`: таблица
-`raw.bank.retail_bank__accounts` хранится под
-`s3://datalake/raw/bank/retail_bank__accounts/`, без UUID в имени директории.
-Одного переключения каталога недостаточно: без явного `LOCATION` Nessie
-по-прежнему добавляет UUID. Прямое создание таблиц через REST также не гарантирует
-этот путь в используемой версии Nessie.
-
-Существующие таблицы автоматически не переносятся. На тестовом стенде для перехода
-можно выполнить полный сброс `docker compose down --remove-orphans --volumes`,
-затем пересобрать образы через `docker compose up -d --build` и повторить загрузку.
-Нельзя независимо создавать одноимённые таблицы в разных ветках Nessie с одним
-`LOCATION`; нельзя вручную удалять или переименовывать их файлы в бакете.
-Повторное создание удалённой таблицы по прежнему пути требует учитывать данные
-и ссылки, оставшиеся в истории каталога; штатные загрузки таблицу не пересоздают.
-
-### 1.3. Общая схема
+### Схема взаимодействия
 
 ```mermaid
 flowchart TB
-    ANALYST["Аналитик\n(DBeaver / BI)"]
-
-    subgraph Stand["Стенд"]
-        subgraph Sources["Источники данных"]
-            MSSQL[("bank — MSSQL")]
-            ORA[("broker — Oracle")]
-        end
-
-        SYDAFA["sydafa — эмулятор источников\n(REST API :8090)"]
-        AF["Airflow\n(оркестрация)"]
-        PGMETA[("pg-meta — метаданные\nзагрузок и инкрементов")]
-        SPARK["Spark standalone\n(master + worker)"]
-        NESSIE["Nessie — каталог Iceberg"]
-        PGC[("pg-catalog")]
-        SILO[("silo — S3\nbucket datalake")]
-        TRINO["Trino — SQL"]
-    end
-
-    SYDAFA -- "запуск и наполнение СУБД" --> MSSQL
-    SYDAFA -- "запуск и наполнение СУБД" --> ORA
-    AF -- "активация источника,\nмиграции данных" --> SYDAFA
-    AF -- "process_id, события,\nсостояние извлечений" --> PGMETA
-    AF -- "load: spark-submit (client)" --> SPARK
-    MSSQL -- "чтение JDBC" --> SPARK
-    ORA -- "чтение JDBC" --> SPARK
-    SPARK -- "границы batch,\nфинализация watermark" --> PGMETA
-    SPARK -- "append данных (Iceberg)" --> SILO
-    SPARK -- "коммиты таблиц" --> NESSIE
-    NESSIE --- PGC
-    TRINO -- "чтение таблиц raw" --> NESSIE
-    TRINO -- "чтение файлов" --> SILO
-    ANALYST --> TRINO
-
-    style Sources stroke-dasharray: 6 4,stroke:#888,fill:#f5f5f5,color:#555
+    USER["Аналитик: DBeaver / BI"] --> TRINO["Trino: SQL"]
+    AF["Airflow: управление загрузками"] --> SPARK["Spark: вычисления"]
+    AF --> SYDAFA["sydafa: управление источниками"]
+    SYDAFA --> SOURCES[("MSSQL bank / Oracle broker")]
+    SOURCES -- JDBC --> SPARK
+    AF --> META[("pg-meta: состояние загрузок")]
+    SPARK --> META
+    SPARK -- "файлы данных" --> SILO[("silo: S3-хранилище")]
+    SPARK -- "метаданные таблиц" --> NESSIE["Nessie: каталог Iceberg"]
+    TRINO --> NESSIE
+    TRINO --> SILO
+    NESSIE --> PGC[("pg-catalog: база Nessie")]
+    AF --> AFP[("airflow-postgres: база Airflow")]
 ```
 
-Поток данных одной загрузки: Airflow выделяет `process_id` в pg-meta → будит
-источник через sydafa → таск `load` отправляет spark-job в Spark → job читает
-таблицу источника по JDBC, фиксирует границы извлечения в pg-meta **до**
-чтения, дописывает порцию строк в Iceberg (физически — новые Parquet-файлы в
-silo, метаданные таблицы — коммит в Nessie) и атомарно финализирует watermark
-в pg-meta. Аналитик видит результат через Trino.
+- **sydafa** запускает СУБД и наполняет их синтетическими данными.
+- **Airflow** запускает загрузки в Spark.
+- **Spark** читает источники по JDBC и записывает таблицы Iceberg в silo.
+- **Nessie** хранит каталог таблиц. Собственные данные Nessie размещены в pg-catalog.
+- **Trino** получает описание таблиц из Nessie, а файлы читает из silo.
+- **pg-meta** хранит журналы и состояние загрузок. Это не база Airflow и не каталог Iceberg.
 
-### 1.4. Требования к среде
+Spark и Trino видят один каталог `raw` и одни таблицы. Например:
+`raw.bank.retail_bank__clients`. Данные находятся в [бакете](docs/glossary.md#term-bucket) `datalake`
+S3-хранилища silo.
 
-Стенду нужен Docker-хост (для Docker Desktop — его виртуальная машина) с
-**минимум 16 ГБ RAM**. Одновременно работают до двух СУБД-источников (MSSQL +
-Oracle), кластер Spark, Airflow, Trino, Nessie, silo и три инстанса
-PostgreSQL, а при параллельных загрузках — несколько Spark-приложений разом.
-Дефолтных для Docker Desktop 8 ГБ не хватает: OOM-killer останавливает
-контейнеры СУБД-источников и Trino прямо посреди загрузки (симптом — падение
-load-тасков по JDBC-коннекту).
+### Docker-образы и приложения
 
-Проверка выделенной памяти:
+Версии ниже заданы конфигурацией репозитория. Это состав сборки, а не
+проверенные минимальные версии. Основной файл — [docker-compose.yaml](docker-compose.yaml).
+
+| Сервис | Образ или базовый образ | Назначение |
+|---|---|---|
+| `sydafa` | `ghcr.io/georgekochergin/sydafa:latest` | API эмулятора источников |
+| `sydafa-src-mssql-bank` | `mcr.microsoft.com/mssql/server:2022-CU27` | Источник bank, MSSQL 2022 |
+| `sydafa-src-oracle-broker` | `gvenzl/oracle-free:23-slim-faststart` | Источник broker, Oracle Free 23 |
+| `spark-master`, `spark-worker` | `tabulario/spark-iceberg:3.5.5_1.8.1` | Spark 3.5.5 и Iceberg 1.8.1, локальная сборка с JDBC-драйверами |
+| `airflow-webserver`, `airflow-scheduler`, `airflow-dag-processor`, `airflow-init` | `apache/airflow:3.3.2-python3.11` | Локальная сборка Airflow со Spark и JDK 17, LocalExecutor |
+| `airflow-postgres`, `pg-catalog`, `pg-meta` | `postgres:16.15-bookworm` | Три отдельные базы метаданных |
+| `nessie` | `ghcr.io/projectnessie/nessie:0.99.0` | Каталог Iceberg |
+| `silo` | `pgsty/silo:RELEASE.2026-09-16T00-00-00Z` | MinIO-совместимое S3-хранилище |
+| `silo-init` | `amazon/aws-cli:2.17.0` | Одноразовое создание [бакета](docs/glossary.md#term-bucket) |
+| `trino` | `trinodb/trino:479` | SQL-доступ к озеру |
+| `trino-init` | `httpd:2-alpine` | Одноразовая подготовка авторизации Trino |
+| `test-runner` | `python:3.12-slim` | Локальная сборка тестового контейнера, профиль `test` |
+
+Контейнеры СУБД создаёт sydafa по требованию. Остальные сервисы запускает Compose.
+Теги `latest` и `2-alpine` не закрепляют точную сборку образа.
+
+### Языки и библиотеки
+
+Прикладной код написан на Python. SQL используется для запросов и описания
+таблиц, Bash — для служебных сценариев, YAML и JSON — для конфигурации.
+
+| Окружение | Версии и зависимости |
+|---|---|
+| Airflow и Spark [driver](docs/glossary.md#term-driver) | Python 3.11, JDK 17, PySpark 3.5.5, Spark provider 6.3.2, Trino provider 6.7.0, `sydafa-airflow` |
+| Spark [executors](docs/glossary.md#term-executor) | Python 3.10, Spark 3.5.5, Iceberg 1.8.1 |
+| JDBC-драйверы | MSSQL `12.10.0.jre11`, Oracle `23.8.0.25.04` |
+| Генератор и [unit-тесты](docs/glossary.md#term-unit) на хосте | Python 3.11+, зависимости из `ingestion/generator/requirements.txt` |
+| Тестовый контейнер | Python 3.12, PyYAML 6.0.3 |
+
+На стенде [driver](docs/glossary.md#term-driver) работает в `airflow-scheduler`, [executors](docs/glossary.md#term-executor) — в `spark-worker`.
+Текущие JDBC/DataFrame-загрузки не запускают Python-процессы на [executors](docs/glossary.md#term-executor).
+Для Python [UDF](docs/glossary.md#term-udf) и [RDD](docs/glossary.md#term-rdd) потребуется одинаковая minor-версия Python у [driver](docs/glossary.md#term-driver) и [executors](docs/glossary.md#term-executor).
+
+Файлы сборки: [Airflow](conf/airflow/Dockerfile),
+[его зависимости](conf/airflow/requirements.txt), [Spark](conf/spark/Dockerfile),
+[test-runner](test/Dockerfile).
+
+#### Почему JDBC-драйверы установлены в обоих образах
+
+`mssql-jdbc-12.10.0.jre11.jar` и `ojdbc11-23.8.0.25.04.jar` нужны
+в двух окружениях Spark-приложения:
+
+| Образ | Кто использует JDBC-драйверы | Для чего |
+|---|---|---|
+| Airflow (`conf/airflow/Dockerfile`) | Spark [driver](docs/glossary.md#term-driver) в `airflow-scheduler` | Подготовительные запросы к источнику: схема, типы, метаданные и границы чтения |
+| Spark (`conf/spark/Dockerfile`) | [Executors](docs/glossary.md#term-executor) в `spark-worker` | Чтение строк источника задачами Spark |
+
+Airflow запускает `spark-submit` в режиме `client`: [driver](docs/glossary.md#term-driver)
+остаётся в контейнере, откуда отправлено приложение, а не переносится на `spark-worker`.
+Поэтому JAR-файлы в образе Airflow — зависимости выполняемого там Spark-кода,
+а не JDBC-подключение самого оркестратора.
+
+Образы общие для нескольких сервисов. Поэтому эти JAR-файлы также присутствуют
+в остальных контейнерах Airflow и в `spark-master`, хотя нужны прежде всего
+[driver](docs/glossary.md#term-driver) и [executors](docs/glossary.md#term-executor).
+Планируемый перенос зависимостей в отдельный контейнер загрузки описан в
+[задаче перехода на DockerOperator](docs/backlog.md#изолировать-spark-drivers-через-dockeroperator).
+
+## 2. Требования и запуск
+
+### Требования к среде
+
+- Docker и Docker Compose.
+- Не менее **16 ГБ RAM**, выделенных Docker-хосту или виртуальной машине Docker Desktop.
+- Клон репозитория и `.env` с `STAND_USER` и `STAND_PASSWORD`.
+- Интернет для загрузки образов и зависимостей при первой сборке.
+
+Проверка памяти:
 
 ```bash
-docker info | grep "Total Memory"   # должно быть ≥ 16 GiB
+docker info | grep "Total Memory"
 ```
 
-В Docker Desktop память меняется в Settings → Resources → Memory (изменение
-требует рестарта Docker).
+В Docker Desktop лимит меняется в Settings → Resources → Memory.
+При нехватке памяти Docker может остановить Trino или СУБД прямо во время загрузки.
 
-**Python и библиотеки** по компонентам (фактические версии — в Dockerfile и
-requirements соответствующих образов):
+sydafa использует платформу `linux/amd64`. На Apple Silicon Compose запускает
+его через эмуляцию Docker Desktop.
 
-| Компонент | Python | Ключевые библиотеки |
-|---|---|---|
-| Контейнер Airflow (он же Spark-драйвер, client-mode) | 3.11 | Airflow 3.3.2; провайдеры apache-spark 6.3.2 и trino 6.7.0; pyspark 3.5.5; пакет `sydafa-airflow`; JDK 17; JDBC-драйверы mssql-jdbc 12.10 и ojdbc11 23.8 |
-| Кластер Spark (executors) | 3.10 | Spark 3.5.5 + Iceberg 1.8.1 |
-| test-runner | 3.12 | PyYAML 6.0.3 (остальное — stdlib) |
-| Генератор DAG-ов (хост/CI) | 3.11+ | PyYAML ≥ 6 |
-| Юнит-тесты на хосте | 3.11+ | PyYAML ≥ 6 (unittest) |
+### Первый запуск
 
-Рассинхрон Python 3.11 (Airflow) и 3.10 (Spark) не мешает JDBC/DataFrame-
-загрузкам: Python-worker'ы на executors не запускаются; Python UDF/RDD
-потребуют выравнивания minor-версий.
+Из корня репозитория:
 
-### 1.5. Структура репозитория
+```bash
+docker compose up -d
+docker compose ps
+```
 
-| Путь | Назначение |
+- Airflow и test-runner используют `pull_policy: build`: Compose собирает локальные образы.
+- При первом старте sydafa готовит СУБД и схемы. Healthcheck допускает до 15 минут на старт.
+- Одноразовые сервисы инициализации должны завершиться с кодом 0.
+- Начните работу с [проверки стенда](#5-проверка-стенда).
+- Для первой загрузки пройдите [сценарий демонстрации](docs/demo.md).
+  Подготовка загрузок описана в [архитектуре](docs/architecture.md#2-манифесты-и-генерация-dag-ов).
+
+### Остановка и обновление
+
+| Действие | Команда |
 |---|---|
-| `airflow/` | Пользовательский код оркестрации: DAG-и обновления источников (`dags/update_source_*.py`), сгенерированные DAG-и загрузки (`dags/generated/`, артефакт, в git не попадают), плагины `plugins/ingestion` (операторы и реестр pg-meta) и `plugins/migrations` (батчи операций обновления источников) |
-| `ingestion/spark/` | Spark-приложения загрузки, сгруппированы по потокам: `spark/raw/rdbms/incremental/load_entity.py` — окна инкремента, `.../incremental/load_act_snap.py` — таблицы-снимки `__act_snap`, `.../full/load_entity.py` — полный срез; общие чтение и запись raw — `.../rdbms/reader.py` и `raw_append.py`. Compose монтирует каталог как `/opt/spark-jobs` |
-| `ingestion/sources/` | Диалекты СУБД и общий JDBC-слой: `sources/rdbms/positions.py` — типизированные позиции инкремента, `sources/rdbms/dialects/` — адаптеры MSSQL/Oracle (URL, quoting, литералы, temporal-выражения), `sources/rdbms/registry.py` — реестр диалектов по conn_type/JDBC URL, `sources/rdbms/jdbc.py` — соединения и метаданные |
-| `trino/` | Пользовательский SQL (каркас) |
-| `ingestion/` | Единый пакет процесса загрузки: `conf/` — манифесты источников (`sources.yaml`), пайплайнов (`pipelines/**/*.yaml`) и технические настройки (`settings.yaml`); `generator/` — генератор DAG-ов и валидация манифестов (`generate_dags.py`, `manifest.py`, `naming.py`, запуск `python3 -m ingestion.generator.generate_dags`); `operators.py` — операторы Airflow; `meta.py` — клиент pg-meta (партии и watermark); `iceberg.py` — DDL целевых raw-таблиц. Пакет целиком доставляется в контейнеры Airflow и Spark-драйвер (том + `PYTHONPATH=/opt/python`) |
-| `conf/airflow` | Dockerfile и requirements образа Airflow (+ Spark, JDK, JDBC-драйверы), генератор паролей |
-| `conf/spark` | Dockerfile и `spark-defaults.conf` (каталог `raw`: нативный NessieCatalog + S3FileIO в silo) |
-| `conf/trino` | Конфигурация Trino: HTTPS + password-authenticator, каталог `raw` |
-| `conf/silo` | `init-bucket.sh` — создание bucket `datalake` |
-| `conf/pg-meta` | `init/01_ingestion.sql` — DDL операционной схемы загрузки (применяется контейнером при первом старте на пустом томе) |
-| `conf/sydafa` | `sources.json` — декларативный манифест источников: схема таблиц, правила генерации, внешние порты |
-| `docs/` | Документация: `architecture.md` (устройство загрузки и хранения), `demo.md` (сценарий демонстрации, самодостаточен), `backlog.md` (отложенные задачи), `graphify.md` и `speckit.md` (тулинг ИИ-агентов) |
-| `test/` | e2e-тесты (`test.sh`, `run_flow.py`, `check_extraction.py`, `schema_evolution.py`, `temporal_extraction.py`) и юнит-тесты (`unit/`) |
-| `.agents/skills/` | Рукописные скиллы команды (`e2e-testing`, `pull-request`, `backlog`); стандартный каталог Agent Skills — его нативно читают оба агента |
-| `.specify/` | Общая инфраструктура Spec Kit: шаблоны, bash-скрипты, конституция (`memory/constitution.md`), состояние интеграций |
-| `.opencode/commands/` | Команды для opencode (speckit-цикл); ставит и обновляет `specify` |
-| `.zcode/skills/` | Скиллы для ZCode (speckit-цикл, интерактивно); ставит и обновляет `specify` |
-| `docker-compose.yaml` | Каркас стенда (проект `dlh-poc`) |
-| `.env` | `STAND_USER` / `STAND_PASSWORD` (по умолчанию `admin123` / `admin123`) |
+| Логи сервиса | `docker compose logs -f <сервис>` |
+| Остановить, сохранив контейнеры и данные | `docker compose stop` |
+| Запустить остановленные контейнеры | `docker compose start` |
+| Удалить контейнеры и сеть, сохранив тома | `docker compose down` |
+| Пересобрать локальные образы | `docker compose build` |
+| Запустить после сборки | `docker compose up -d` |
+| Скачать свежий образ sydafa | `docker compose pull sydafa` |
 
-Каталоги `airflow/`, `trino/` — пользовательский код: compose монтирует их в
-контейнеры (`plugins` — только чтение), в git через `.gitignore` попадают лишь
-явно разрешённые поддеревья. Пакет `ingestion/` отслеживается в git целиком и
-доставляется в контейнеры Airflow томом `./ingestion:/opt/python/ingestion:ro`
-(импорт через `PYTHONPATH=/opt/python`), а его подкаталог `spark/` — ещё и в
-кластер Spark как `/opt/spark-jobs`.
+Dockerfile и requirements требуют пересборки. После изменения подключений
+томов или конфигурации Compose пересоздайте контейнеры через `up -d`.
+Предпочитайте отдельные команды `build` и `up -d`, а не `up --build`:
+это позволяет отделить сборку от получения внешних образов.
 
-Каталоги ИИ-агентов разделены по владельцу и формату, а не дублируют друг
-друга. `.agents/skills/` — общий каталог стандарта Agent Skills: его читают
-все агенты, поддерживающие стандарт, поэтому в нём живут рукописные скиллы
-команды. `.opencode/commands/` — команды Spec Kit, их ставит и обновляет
-`specify` по манифестам, вручную файлы не переносятся; общая инфраструктура
-цикла — в `.specify/`; у каждого агента свой формат команд, наборы не
-дублируются. Состав артефактов — `docs/speckit.md`, раздел 5.
-
-### 1.6. Статус и планы
-
-**Что работает** (подтверждается изолированным e2e-прогоном, раздел 5.2):
-
-- загрузка из MSSQL 2022 и Oracle Free 23 (состав и версии всех инстансов —
-  раздел 1.2);
-- полные снапшоты и инкрементальные загрузки с окном и lookback, включая
-  temporal-позиции с наносекундной точностью;
-- append-only raw-слой на Iceberg с полной историей загрузок;
-- устойчивость к эволюции схемы источника (добавление/удаление/переименование
-  колонок);
-- эмуляция источников sydafa и изолированный тестовый контур.
-
-**Что планируется:**
-
-- ODS поверх raw: дедупликация по ключам и актуальное состояние (SCD2);
-- DDS на Data Vault;
-- Kafka как тип источника;
-- новые СУБД-источники: Greenplum, ClickHouse;
-- dbt для трансформаций;
-- security: авторизация и изоляция доступа к слоям озера.
-
-Пункт планов, у которого появилось проработанное решение, переезжает задачей
-в [`docs/backlog.md`](docs/backlog.md) со ссылкой на этот список. Туда же
-попадают проблемы существующего кода, найденные в ходе разработки: решение —
-рефакторинг в том же PR либо запись в бэклог, проигнорировать находку нельзя.
-
----
-
-## 2. Работа со стендом
-
-### 2.1. Запуск и остановка
-
-Предусловия: Docker + Docker Compose, ≥16 ГБ RAM для Docker (раздел 1.4),
-склонированный репозиторий с `.env`. Образ эмулятора
-`ghcr.io/georgekochergin/sydafa:latest` загружается из GHCR автоматически,
-если его нет локально. Для обновления уже скачанного образа выполните
-`docker compose pull sydafa` перед запуском.
-
-Образ sydafa опубликован для `linux/amd64`; Compose явно задаёт эту платформу,
-поэтому на Apple Silicon он запускается через эмуляцию Docker Desktop.
-При первом старте sydafa инициализирует СУБД и схемы до готовности HTTP API;
-healthcheck допускает стартовый период 15 минут (включая загрузку образов СУБД).
-Сервисы Airflow и test-runner с локальными Dockerfile используют
-`pull_policy: build`: Compose собирает их, а не ищет локальные имена образов
-в Docker Hub. Повторный `up` запускает сборку с использованием кеша.
-
-Другой образ можно указать через `SYDAFA_IMAGE` в `.env` или окружении.
-Для локальной разработки из соседнего клона
-[sydafa](https://github.com/georgekochergin/sydafa):
+Образ sydafa можно заменить через `SYDAFA_IMAGE`. Пример локальной сборки
+из соседнего клона [sydafa](https://github.com/georgekochergin/sydafa):
 
 ```bash
 docker build -t sydafa:latest ../sydafa
 SYDAFA_IMAGE=sydafa:latest docker compose up -d
 ```
 
-Интернет нужен только для первой загрузки/сборки образов — повторные запуски
-работают офлайн.
+**Не запускайте `docker compose up --remove-orphans`.** Эта команда удаляет
+динамические контейнеры источников, поскольку они не перечислены как сервисы Compose.
 
-```bash
-docker compose up -d                # запуск стенда (используются собранные образы)
-docker compose ps                   # статус сервисов
-docker compose logs -f <сервис>     # логи конкретного сервиса
-docker compose stop                 # остановка без удаления контейнеров
-docker compose start                # повторный запуск остановленного стенда
-docker compose down                 # остановка и удаление контейнеров и сетей (тома остаются)
-```
+### Полный сброс данных
 
-> **Не используйте `docker compose up --build`.** В этой форме Docker Compose
-> пытается скачать образы сервисов без секции `build` (например, `sydafa`) из
-> внешнего репозитория и завершается ошибкой `pull access denied`, даже когда
-> образ уже есть локально. Пересборка выполняется отдельной командой:
-
-```bash
-docker compose build && docker compose up -d   # пересборка образов и запуск
-```
-
-Полный сброс с потерей всех данных (`down -v` удаляет тома: данные озера,
-источников, метаданные Airflow и pg-meta):
+**Команда удаляет все данные стенда**, включая источники, озеро и метаданные:
 
 ```bash
 docker compose down -v --remove-orphans
 ```
 
-Контейнеры источников создаёт sydafa через Docker API; Compose удаляет их как
-orphan-контейнеры по меткам родительского проекта. Тома источников явно объявлены
-в `docker-compose.yaml`, поэтому `--volumes` удаляет и их. Без `--volumes` данные
-сохраняются. Требуется образ sydafa с поддержкой Compose cleanup; после обновления
-кода sydafa пересоберите его образ. Старые контейнеры без этих меток необходимо
-однократно удалить вручную.
+- Контейнеры источников удаляются по Compose-меткам, которые устанавливает sydafa.
+- Их тома объявлены и подключены в Compose, поэтому также удаляются с `-v`.
+- Без `-v` данные томов сохраняются.
+- `SYDAFA_CONTAINER_PREFIX` должен совпадать при запуске и очистке.
+  Параллельным проектам нужны разные префиксы.
+- Старые контейнеры без Compose-меток требуют отдельной ручной очистки.
 
-Не используйте `docker compose up --remove-orphans`: динамические источники не
-описаны как сервисы YAML и также будут удалены этой командой. Для обычного запуска
-используйте `docker compose up -d`. Префикс `SYDAFA_CONTAINER_PREFIX` должен быть
-одинаковым при запуске и очистке; для параллельных проектов задавайте разные префиксы.
+После сброса источники создаются по `conf/sydafa/sources.json`,
+а pg-meta — по DDL из `conf/pg-meta/init/`.
+Не выполняйте сброс ради обычной проверки или демонстрации.
+Не удаляйте и не переименовывайте файлы Iceberg вручную в silo.
 
-После `down -v` стенд поднимается с нуля: источники пересоздаются по
-`conf/sydafa/sources.json`, pg-meta инициализируется DDL из `conf/pg-meta/init/`.
+## 3. Подключения
 
-Изменения кода в `airflow/`, `ingestion/`, `trino/`, `conf/` подхватываются
-пересозданием контейнеров; изменение Dockerfile/requirements требует пересборки
-(`docker compose build`, затем `docker compose up -d`).
+### Веб-интерфейсы и порты
 
-### 2.2. Порты
+В таблице указаны параметры по умолчанию для доступа с хоста.
 
-| Сервис | Порт на хосте | Примечание |
-|---|---|---|
-| sydafa (REST, Swagger UI) | 8090 | без авторизации |
-| nessie (Iceberg REST) | 19120 | движки используют внутреннее имя; наружу опубликован для отладки |
-| silo: S3 API / веб-консоль | 9000 / 9001 | |
-| spark-master UI | 8080 | порт 7077 (master RPC) тоже опубликован |
-| spark-worker UI | 8081 | |
-| trino (HTTPS) | 8443 | внутренний HTTP 8080 не опубликован — им пользуется только Airflow внутри сети |
-| airflow webserver | 8089 | |
-| pg-meta (PostgreSQL) | 55432 | операционная БД загрузок; подключение из DBeaver — раздел 2.5 |
-| bank, MSSQL (при активации) | 14330 | внешний порт источника из `sources.json` |
-| broker, Oracle (при активации) | 15211 | внешний порт источника из `sources.json` |
-
-Не опубликованы наружу (доступны только внутри сети стенда): `pg-catalog`,
-`airflow-postgres`.
-
-### 2.3. Веб-интерфейсы
-
-| Сервис | URL | Логин/пароль |
+| Компонент | Адрес или порт | Доступ |
 |---|---|---|
 | Airflow | http://localhost:8089 | `admin123` / `admin123` |
-| Spark Master UI | http://localhost:8080 | без авторизации |
-| Spark Worker UI | http://localhost:8081 | без авторизации |
-| silo, веб-консоль | http://localhost:9001 | `admin123` / `admin123` |
-| sydafa, Swagger UI | http://localhost:8090/docs | без авторизации |
+| Spark Master UI | http://localhost:8080 | Без авторизации |
+| Spark Worker UI | http://localhost:8081 | Без авторизации |
+| Spark master RPC | `localhost:7077` | Служебное подключение |
+| silo, консоль | http://localhost:9001 | `admin123` / `admin123` |
+| silo, S3 API | `localhost:9000` | Ключ и секрет из `.env` |
+| sydafa, Swagger UI | http://localhost:8090/docs | Без авторизации |
+| Nessie | http://localhost:19120 | API каталога, без авторизации |
+| Trino | `localhost:8443` | HTTPS, пароль |
+| pg-meta | `localhost:55432` | PostgreSQL, пароль |
+| MSSQL bank | `localhost:14330` | После активации источника |
+| Oracle broker | `localhost:15211` | После активации источника |
 
-В Airflow UI видны шесть DAG-ов: два обновления источников
-(`update_source_bank`, `update_source_broker`) и четыре загрузки raw-слоя
-(`ingest__rdbms__bank__main`, `ingest__rdbms__bank__refs`,
-`ingest__rdbms__broker__main`, `ingest__rdbms__broker__refs`). Запуск — кнопка
-треугольника справа (DAG-и не на паузе, расписания нет — только ручной запуск).
+`pg-catalog` и `airflow-postgres` доступны только внутри сети стенда.
+Внутренний HTTP-порт Trino 8080 наружу не опубликован.
+Spark использует Nessie API `/api/v2`, Trino — Iceberg REST `/iceberg`.
 
-В Health-странице триггерер (Triggerer) горит красным — это ожидаемо: сервис
-не развёрнут, потому что на стенде нет отложенных (deferrable) операторов, для
-которых он нужен. Обнаружение новых и исчезнувших файлов DAG-ов настроено
-быстрым (`AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL=10`): сгенерированные DAG-и
-появляются в UI через секунды, а после удаления каталога `generated/`
-деактивируются примерно в течение минуты.
+### Trino в DBeaver
 
-### 2.4. Подключение к Trino из DBeaver
+Создайте подключение с драйвером Trino:
 
-Драйвер «Trino» встроен в DBeaver:
-
-- Host: `localhost`, Port: `8443`;
-- Use SSL: да (Trino работает по HTTPS с самоподписанным сертификатом);
-- Catalog/Database: `raw`;
-- Username/Password: `admin123` / `admin123` (password-authenticator, конфиг в
-  `conf/trino/`);
-- Driver properties: `SSL=true;SSLVerification=NONE`;
+- Host: `localhost`.
+- Port: `8443`.
+- Catalog/Database: `raw`.
+- Username и Password: значения из `.env`, по умолчанию `admin123` / `admin123`.
+- SSL: включён.
+- Driver properties: `SSL=true`, `SSLVerification=NONE`.
 - JDBC URL: `jdbc:trino://localhost:8443/raw?SSL=true&SSLVerification=NONE`.
 
-Обзор озера и типовые запросы к raw-таблицам — `docs/architecture.md`,
-разделы 4–5.
+Отключение проверки сертификата допустимо здесь только для локального стенда
+с самоподписанным сертификатом. Примеры SQL — в
+[описании raw-таблиц](docs/architecture.md#4-таблицы-raw-слоя-структура-и-наполнение).
 
-### 2.5. Подключение к pg-meta (DBeaver)
+### PostgreSQL pg-meta в DBeaver
 
-Операционная база фреймворка загрузки опубликована на хост портом 55432.
-В DBeaver — драйвер PostgreSQL:
-
-- Host: `localhost`, Port: `55432`, Database: `meta`;
-- Username/Password: `admin123` / `admin123`;
+- Драйвер: PostgreSQL.
+- Host: `localhost`.
+- Port: `55432`.
+- Database: `meta`.
+- Username и Password: значения из `.env`.
+- Схема: `ingestion`.
 - JDBC URL: `jdbc:postgresql://localhost:55432/meta`.
 
-Схема таблиц — `ingestion`. Быстрый просмотр без DBeaver — psql в контейнере:
+Быстрый просмотр таблиц с учётными данными по умолчанию:
 
 ```bash
 docker compose exec pg-meta psql -U admin123 -d meta -c '\dt ingestion.*'
 ```
 
-Состав таблиц и смысл каждой колонки — `docs/architecture.md`, разделы 7–8.
+Назначение таблиц и полей — в [архитектуре](docs/architecture.md#8-база-метаданных-pg-meta-остальные-объекты).
 
-### 2.6. Учётные данные
+### Учётные данные
 
-В `.env` заданы только `STAND_USER` и `STAND_PASSWORD` (по умолчанию оба
-`admin123`); из них выводятся пароли Airflow, Trino, silo и трёх PostgreSQL.
-Пароль silo должен быть не короче 8 символов. Технические ключи (TLS, JWT) не
-заменяются этим паролем. Изменение env не меняет роли в уже инициализированных
-томах Postgres — для тестового стенда допустима переинициализация `down -v`.
+- `STAND_USER` и `STAND_PASSWORD` задают доступ к Airflow, Trino, silo и PostgreSQL.
+  По умолчанию оба значения — `admin123`.
+- Пароль silo должен содержать не менее восьми символов.
+- Читатель источников — `sydafa` / `sydafa`, только `SELECT`.
+  Административный доступ к источникам извне закрыт.
+- Изменение `.env` не меняет роли в уже созданных томах PostgreSQL.
+- TLS-ключи и JWT-секреты не заменяются паролем стенда.
 
-- **Источники СУБД (MSSQL, Oracle)**: `sydafa` / `sydafa` — читатель с правами
-  только `SELECT`; используется Spark-загрузчиком и подключениями из DBeaver
-  (раздел 3.3). Административный доступ извне закрыт.
-- **Trino**: `admin123` / `admin123` — SQL-запросы (CLI, DBeaver, BI).
-- **Airflow UI**: `admin123` / `admin123`.
-- **silo (консоль и S3 API)**: `admin123` / `admin123`.
-- **PostgreSQL стенда (pg-catalog, pg-meta, airflow-postgres)**: `admin123` /
-  `admin123`; наружу опубликован только pg-meta (порт 55432, раздел 2.5).
-- Без авторизации: Spark Master/Worker UI, sydafa Swagger UI.
+## 4. Источники sydafa
 
-### 2.7. Проверка после старта
+sydafa — отдельный [проект](https://github.com/georgekochergin/sydafa),
+который управляет контейнерами источников через Docker API.
+Он создаёт таблицы и тестовые данные, выполняет изменения схемы и данных.
+Описание источников стенда находится в `conf/sydafa/sources.json`.
 
-Чек-лист «стенд поднялся корректно» — проходится по порядку:
+### Активация и подключение
 
-1. **Сервисы.** `docker compose ps` — все долгоживущие сервисы в состоянии
-   `Up`: airflow-webserver, airflow-scheduler, airflow-dag-processor,
-   spark-master, spark-worker, trino, nessie, silo, pg-catalog, pg-meta,
-   airflow-postgres, sydafa. One-shot сервис `airflow-init` завершается
-   (exit 0) — это норма.
-2. **Память.** `docker info | grep "Total Memory"` — не меньше 16 GiB
-   (раздел 1.4); при нехватке OOM-killer останавливает СУБД-источники и Trino
-   посреди загрузок.
-3. **Логи Airflow.** `docker compose logs airflow-dag-processor 2>&1 | tail -50`
-   — парсинг каталога `dags/` без ошибок (в Airflow 3 парсингом занимается
-   отдельный сервис dag-processor, а не scheduler);
-   `docker compose logs airflow-scheduler 2>&1 | tail -50` — без traceback.
-4. **DAG-и в UI.** В Airflow (раздел 2.3) шесть DAG-ов: два `update_source_*`
-   и четыре `ingest__rdbms__*`; красный Triggerer на Health-странице —
-   ожидаемо. Сгенерированные DAG-и не появились — выполните генерацию
-   (раздел 4) и подождите до минуты.
-5. **Источники.** `curl -s localhost:8090/health` — sydafa отвечает (Swagger
-   UI — раздел 2.3). СУБД-источники поднимаются при первом обращении:
-   активация — раздел 3.2.
-6. **Данные после загрузки.** После успешного запуска ingest-DAG-ов проверьте
-   наполнение raw через Trino: `count(*)`, число порций по
-   `__process_id` (готовые запросы — `docs/architecture.md`,
-   раздел 4).
-7. **Контур целиком.** Полный изолированный e2e-прогон — `./test/test.sh`
-   (поднимает отдельный тестовый контур `dlh-test` и гасит его, раздел 5.2).
-   Живой стенд (`dlh-poc`) этим скриптом не проверяется: шаги 1–6 выше —
-   его ручная проверка.
+Источник запускается по запросу, а после истечения [TTL](docs/glossary.md#term-ttl) останавливается.
 
----
+1. Откройте http://localhost:8090/docs.
+2. Выполните `POST /sources/bank/activate?ttl_minutes=20`
+   или `POST /sources/broker/activate?ttl_minutes=20`. Максимум — 30 минут.
+3. Возьмите параметры из объекта `connection` в ответе.
+4. Создайте подключение в DBeaver:
 
-## 3. Эмуляция источников (sydafa)
+| Источник | Драйвер | Host и port | База / service name | Схема |
+|---|---|---|---|---|
+| bank | SQL Server | `localhost:14330` | Database: `sydafa` | `retail_bank` |
+| broker | Oracle | `localhost:15211` | Service name: `sydafa`, SID пустой | `trading_core` |
 
-### 3.1. Что такое sydafa
+Для обоих источников логин и пароль — `sydafa` / `sydafa`.
+В Oracle имена созданы в нижнем регистре. Используйте двойные кавычки:
 
-**sydafa** (Synthetic Data Factory & DB Orchestrator) — автономный сервис из
-отдельного репозитория [georgekochergin/sydafa](https://github.com/georgekochergin/sydafa).
-Полная документация, спецификация REST API и семантика генераторов — там; здесь
-только то, что нужно для работы со стендом.
-
-На стенде sydafa играет роль «настоящих» источников данных:
-
-- лениво оркеструет контейнеры СУБД `sydafa-src-mssql-bank` /
-  `sydafa-src-oracle-broker` через Docker API (данные — в named volume; пока
-  источник не нужен, контейнер СУБД остановлен и не потребляет память);
-- создаёт рабочую базу/PDB `sydafa` и читателя `sydafa` / `sydafa` (только
-  чтение);
-- генерирует синтетические данные по декларативным правилам (генераторы
-  `sequence`, `faker`, `choice`, `random_decimal`, `random_date`, `date_offset`,
-  инвариант `cumulative_balance`);
-- выполняет транзакционные батчи DDL+DML «всё или ничего» — это механизм
-  «жизни» источников: вставки, обновления, удаления, эволюция схемы.
-
-Конфигурация источников стенда: `conf/sydafa/sources.json` — декларативный
-источник правды по топологии (схемы таблиц, первичные и внешние ключи, правила
-генерации, внешний порт `external_port` для подключения с хоста).
-
-### 3.2. Активация источника и подключение из DBeaver
-
-СУБД-источник по умолчанию остановлен. Перед подключением из DBeaver его нужно
-поднять по TTL (после истечения TTL sydafa сам аккуратно остановит контейнер):
-
-1. Откройте Swagger UI: http://localhost:8090/docs.
-2. Выполните `POST /sources/{bank|broker}/activate?ttl_minutes=20` («Try it
-   out» → «Execute»). Максимум TTL — 30 минут.
-3. Из ответа возьмите объект `connection` — готовые параметры подключения:
-
-```json
-{
-  "type": "mssql",
-  "host": "localhost",
-  "port": 14330,
-  "database": "sydafa",
-  "user": "sydafa",
-  "password": "sydafa",
-  "jdbc_url": "jdbc:sqlserver://localhost:14330;databaseName=sydafa;..."
-}
+```sql
+SELECT * FROM "trading_core"."transactions";
 ```
 
-4. Подключитесь в DBeaver (реквизиты везде `sydafa` / `sydafa`):
-   - **bank, MSSQL**: драйвер SQL Server, host `localhost`, port `14330`,
-     database `sydafa` (схема `retail_bank`);
-   - **broker, Oracle**: драйвер Oracle, host `localhost`, port `15211`,
-     service name `sydafa` (схема `trading_core`), SID оставьте пустым.
-     Все объекты broker созданы в нижнем регистре (квотированные идентификаторы
-     Oracle): в SQL-запросах обращайтесь к ним в кавычках —
-     `SELECT * FROM "trading_core"."transactions"`; дерево каталога DBeaver
-     показывает их в нижнем регистре без дополнительных настроек.
-5. Ранний доступ к СУБД изнутри сети стенда (для сервисов): внутренние имена
-   `sydafa-src-mssql-bank:1433`, `sydafa-src-oracle-broker:1521` — именно их
-   использует Spark.
+Из контейнеров доступны внутренние адреса:
 
-В каждой таблице источника sydafa ведёт служебную колонку `_batch_id bigint` —
-номер партии наполнения; она растёт при вставках и служит колонкой инкремента
-для таблицы `transactions` (`docs/architecture.md`, раздел 7).
+- `sydafa-src-mssql-bank:1433`.
+- `sydafa-src-oracle-broker:1521`.
 
-Освободить память принудительно: `POST /sources/{source}/deactivate`.
-
-### 3.3. Основные эндпоинты
+### API и обновление данных
 
 | Метод | Путь | Назначение |
 |---|---|---|
-| GET | `/health` | Готовность API sydafa (не означает, что СУБД запущена) |
-| GET | `/sources` | Список сконфигурированных источников |
-| GET | `/sources/{source}` | Метаданные источника: таблицы, статус, `connection` (СУБД не будит) |
-| GET | `/sources/{source}/schema` | Живая схема: таблицы, колонки, типы, генераторы, PK/FK |
-| GET | `/sources/{source}/status` | Состояние контейнера (idle/running), остаток TTL |
-| POST | `/sources/{source}/activate` | Запуск СУБД + TTL (`?ttl_minutes=20`; сам будит базу) |
-| POST | `/sources/{source}/deactivate` | Принудительная остановка СУБД |
-| POST | `/sources/{source}/migrate` | Транзакционный батч DDL+DML «всё или ничего» (будит базу) |
-| GET/PUT/DELETE | `/sources/{source}/rules/{entity_fqn}` | Профиль генераторов таблицы: `columns` (колонка → генератор) и `invariants`; PUT перезаписывает профиль целиком |
+| GET | `/health` | Готовность API, не СУБД |
+| GET | `/sources` | Список источников |
+| GET | `/sources/{source}` | Описание и параметры подключения, без активации |
+| GET | `/sources/{source}/schema` | Текущая схема таблиц |
+| GET | `/sources/{source}/status` | Состояние контейнера и остаток [TTL](docs/glossary.md#term-ttl) |
+| POST | `/sources/{source}/activate` | Запустить СУБД на заданное время |
+| POST | `/sources/{source}/deactivate` | Остановить СУБД |
+| POST | `/sources/{source}/migrate` | Выполнить набор изменений в одной транзакции |
+| GET/PUT/DELETE | `/sources/{source}/rules/{entity_fqn}` | Прочитать, заменить или удалить правила генерации таблицы |
 
-Операции `migrate` (дискриминатор `op`): схема — `create_schema`,
-`rename_schema`, `drop_schema`; таблицы — `create_table`, `rename_table`,
-`transfer_table`, `drop_table`; колонки — `add_column`, `rename_column`,
-`drop_column`; данные — `append` (строк `rows`), `update` (`predicate` + `set`
-+ `limit`), `delete` (`predicate`/`limit`/`cascade`), `truncate`. Готовые
-примеры батчей — в `docs/demo.md`.
+`migrate` поддерживает операции над схемами, таблицами и колонками,
+а также `append`, `update`, `delete`, `truncate`. Примеры запросов — в
+[демонстрации](docs/demo.md). Полный `PUT` правил заменяет профиль целиком.
 
-### 3.4. DAG-и обновления источников
-
-`update_source_bank` и `update_source_broker` (ручной запуск) — «оживление»
-данных между раундами загрузки. Один таск `migrate` (`SydafaMigrateOperator`
-пакета `sydafa-airflow`) применяет транзакционный батч операций из
+Для обычного обновления данных запустите в Airflow `update_source_bank`
+и `update_source_broker`. Каждый запуск применяет операции из
 `airflow/plugins/migrations/{bank,broker}.json`:
 
-- вставки: +20 clients, +20 accounts, +200 deals, +5000 transactions;
-- каскадное удаление 10 случайных сделок (`cascade: true` — вместе со
-  ссылающимися транзакциями);
-- точечные обновления справочников (2 clients, 2 accounts, 10 deals — статус
-  или категория).
+- добавляет 20 клиентов, 20 счетов, 200 сделок и 5000 транзакций;
+- удаляет 10 сделок вместе со связанными транзакциями;
+- изменяет отдельные записи справочников.
 
-Именно после запуска этих DAG-ов инкрементальные загрузки видят новую дельту, а
-снапшотные — выросшие таблицы.
+После этого можно запускать загрузку в озеро. Эти операции меняют источники,
+но сами не переносят данные в [raw](docs/glossary.md#term-raw).
 
-### 3.5. Добавление источника и сброс к манифесту
+### Добавление источника
 
-Для нового источника необходимо синхронно обновить манифест и Compose:
-
-1. Добавить описание в `conf/sydafa/sources.json` (тип `mssql` / `oracle`,
-   свободный `external_port`, схема и правила генерации).
-2. В `docker-compose.yaml` объявить именованный том с точным именем по шаблону
-   `${SYDAFA_CONTAINER_PREFIX:-sydafa}-data-<тип>-<имя источника>` и подключить его
-   к сервису `sydafa` под `/source-volumes/<имя источника>`. Например, для
-   MSSQL-источника `crm`:
+1. Добавьте источник в `conf/sydafa/sources.json`: тип, свободный
+   `external_port`, таблицы и правила генерации.
+2. Объявите его именованный том в `docker-compose.yaml` и подключите к sydafa.
+   Пример для MSSQL-источника `crm`:
 
    ```yaml
    volumes:
@@ -567,205 +382,98 @@ docker compose exec pg-meta psql -U admin123 -d meta -c '\dt ingestion.*'
          - sydafa_crm_data:/source-volumes/crm
    ```
 
-   Это дополнения к существующим секциям, а не замена остальных томов.
-   Директорию на хосте создавать не нужно: путь находится внутри контейнера.
-3. Добавить то же подключение `sydafa_crm_data:/source-volumes/crm` в
-   `services.sydafa.volumes` файла `test/docker-compose.override.yaml`: его
-   `!override` заменяет весь список подключений. Имя тома берётся из базового
-   Compose-файла и использует изолированный префикс тестового запуска.
-4. Пересоздать сервис командой `docker compose up -d sydafa`: одного `restart`
-   недостаточно для применения новых подключений. Ранее инициализированные базы
-   не должны сбрасываться; наполнение нового источника выполняется через миграции.
+   Добавьте эти элементы к существующим секциям, не заменяйте их целиком.
+   Путь `/source-volumes/crm` находится внутри контейнера.
+3. Добавьте такое же подключение в `services.sydafa.volumes` файла
+   `test/docker-compose.override.yaml`. Его `!override` заменяет весь список томов.
+4. Выполните `docker compose up -d sydafa`. Обычный `restart` не применяет новые тома.
 
-**Ограничение:** sydafa не дополняет Compose-файлы автоматически. При добавлении
-источника только в `sources.json` его динамический контейнер будет удаляться через
-`--remove-orphans`, но удаление его тома через `--volumes` не гарантируется:
-Compose должен знать том из своей конфигурации, причём неиспользуемые объявления
-томов исключаются из модели. Даже будущая унификация очистки данных в `/reinit`
-не отменяет требования поддерживать эти объявления и подключения.
+Для очистки через `down -v` Compose должен знать том и его подключение.
+Одной записи в `sources.json` недостаточно. Инициализированные базы не нужно
+сбрасывать при добавлении нового источника.
+Настройка его загрузки в озеро — отдельный шаг в
+[манифестах загрузчика](docs/architecture.md#2-манифесты-и-генерация-dag-ов).
 
-Сброс источников строго по `sources.json` —
-`docker compose down --remove-orphans --volumes` (полный сброс стенда, см. 2.1).
+## 5. Проверка стенда
 
----
+### Проверка после старта
 
-## 4. Логика работы datalake
+1. `docker compose ps`: долгоживущие сервисы работают,
+   сервисы инициализации завершились с кодом 0.
+2. `curl -s localhost:8090/health`: API sydafa готов.
+3. Откройте Airflow. Должны быть видны `update_source_bank` и `update_source_broker`.
+   После подготовки загрузок также появятся четыре основных DAG-а и два DAG-а снимков.
+4. Проверьте логи `airflow-dag-processor` и `airflow-scheduler`:
+   ошибок разбора DAG-ов и traceback быть не должно.
+5. После загрузки проверьте таблицы в Trino по
+   [готовым SQL-запросам](docs/architecture.md#4-таблицы-raw-слоя-структура-и-наполнение).
 
-Подробное устройство — [`docs/architecture.md`](docs/architecture.md); здесь —
-краткая картина и указатели на его разделы.
+Красный Triggerer на странице Health ожидаем: сервис не развёрнут,
+поскольку отложенные операторы на стенде не используются.
+Новые файлы DAG-ов обнаруживаются с интервалом 10 секунд,
+обновление списка в UI может занять до минуты.
 
-**Конфигурация → DAG-и.** DAG-и загрузки не пишутся руками: генератор
-`python3 -m ingestion.generator.generate_dags` статически превращает
-YAML-манифесты (`ingestion/conf/`) в готовые файлы `airflow/dags/generated/`
-(каталог — артефакт, в git не попадает). Один YAML-файл = один DAG; ошибки
-конфигурации ловятся на генерации, до Airflow; добавление таблицы — одна
-строка в манифесте. Разделы 2–3 architecture.md.
+### Автоматические проверки
 
-**Запуск DAG-а.** `generate_process_id` (идентификатор запуска) →
-`activate_source` (разбудить СУБД через sydafa) → группы сущностей:
-`log_start → load → log_end → publish_asset`. Load — отдельное Spark-приложение
-(JDBC → Iceberg); параллельность загрузок сдерживает пул Airflow
-`ingest_loads`. Раздел 3 architecture.md.
+| Проверка | Команда | Что проверяет |
+|---|---|---|
+| [Unit](docs/glossary.md#term-unit) | `python3 -m unittest discover -s test/unit` | Чистые функции и контракты без основного стенда |
+| Полный [e2e](docs/glossary.md#term-e2e) | `./test/test.sh` | Отдельный тестовый стек и загрузки через реальные сервисы |
 
-**Raw-таблицы.** Точное зеркало схемы источника плюс технические колонки
-`__load_dttm` / `__process_id` (он же — ключ партии загрузки); append-only,
-партиционирование
-`days(__load_dttm)`; DDL создаётся автоматически по фактически прочитанной
-схеме. Одна загрузка одной таблицы = одна партия; у инкрементальной сущности её
-окно замораживается в pg-meta до чтения, полный срез живёт только в данных.
-Раздел 4 architecture.md (там же — типовые SQL-запросы проверки данных
-через Trino).
+Полный прогон использует проект `dlh-test`, собственные тома,
+`test/.workspace/` и префикс источников `sydafa-test-`. Порты на хост не публикуются.
+Основной стенд `dlh-poc` этим прогоном не проверяется и не очищается.
+Успех — `FAIL=0` и код завершения 0.
 
-**Слои.** raw — первый слой; ODS (дедупликация по ключам, актуальное
-состояние), DDS и витрины — будущие слои поверх raw, сам raw не меняется.
-Раздел 1 architecture.md.
+- `TEST_SKIP_BUILD=1 ./test/test.sh` пропускает сборку. Используйте только с актуальными образами.
+- `./test/test.sh --verify` повторяет проверки уже работающего **тестового** контура.
+  Нужен существующий `test/.workspace/`.
+- При отказе логи Airflow сохраняются в `TEST_FAILURE_LOG_DIR`.
 
-**Эволюция схемы.** Новые колонки источника добавляются в таблицу
-автоматически (`mergeSchema`), исчезнувшие читаются NULL, смена типа — честный
-отказ, порядок колонок не важен. Раздел 5 architecture.md.
+Для работы агента с тестами обязателен
+[скилл e2e-testing](.agents/skills/e2e-testing/SKILL.md):
+там описаны порядок запуска, покрытие и диагностика.
 
-**Параллелизм.** JDBC-партиции включаются только при MIN < MAX по колонке
-нарезки; колонку выбирает единая эвристика (целочисленный PK → целочисленная
-уникальная NOT NULL-колонка → дата → timestamp по номеру календарного
-дня), без кандидата — один поток; отключение — `spark.jdbc_partitioning:
-false` у сущности. Раздел 6 architecture.md.
+## 6. Структура репозитория
 
-**Инкремент.** Строго типизированные позиции (целые, `decimal(p,0)`, дата,
-моменты с точностью 0–9), окно с оператором нижней границы из партии
-(`>` или включительный `>=` у выровненного lookback), default-отступ по
-фактическому типу колонки и расписанию DAG-а; watermark и партии — в pg-meta
-с CAS-защитой от повторов и конкуренции. Раздел 7 architecture.md.
+| Путь | Назначение |
+|---|---|
+| `docker-compose.yaml` | Состав основного стенда `dlh-poc` |
+| `conf/` | Сборка образов, настройки сервисов и источников |
+| `airflow/` | DAG-и и плагины оркестрации |
+| `ingestion/` | Фреймворк загрузки: конфигурация, генератор и Spark-приложения |
+| `trino/` | Пользовательский SQL |
+| `test/` | Изолированный тестовый контур и проверки |
+| `docs/` | Архитектура, демонстрация, бэклог и настройка инструментов |
+| `.agents/skills/` | Общие скиллы команды |
+| `.specify/`, `specs/` | Инфраструктура и спецификации изменений |
+| `.opencode/commands/`, `.zcode/skills/` | Команды Spec Kit для агентов |
 
-**DAG-и снимков.** У каждой инкрементальной сущности всегда есть отдельный
-DAG `<пайплайн>__act_snap_<alias>` (штатная активация источника;
-расписание и независимые настройки чтения/пула — блок `incremental.act_snap`, без него —
-ручной запуск). Он читает источник целиком и одной атомарной операцией
-Iceberg перезаписывает таблицу-снимок `raw.<источник>.<таблица>__act_snap`
-(мета-колонки `__process_id`/`__load_dttm`, без партиционирования): читатель
-всегда видит целиком предыдущий или целиком новый снимок. Реестр инкремента
-не трогает; автор последней публикации и её время видны из метаданных
-Iceberg (`snapshot.process_id` и `committed_at`). Раздел 7.7 architecture.md.
+Пользовательский код подключается в контейнеры томами.
+В `airflow/` и `trino/` git отслеживает только разрешённые в `.gitignore` подкаталоги.
+Пакет `ingestion/` отслеживается целиком.
+Внутренняя структура загрузчика описана в [архитектуре](docs/architecture.md).
 
-Пулы снимков задаются независимо: в манифестах стенда явно выбран
-`incremental.act_snap.airflow.pool` = `ingest_loads`, вес 2. Без настройки
-фреймворк использует `default_pool`, вес 1. Для периодического обновления
-задайте `incremental.act_snap.schedule`; сейчас снимки запускаются вручную.
+## 7. Статус и планы
 
-**Регламент контроля снимков.** Сначала сравните ожидаемые таблицы из
-манифестов с каталогом (отсутствующая таблица — «никогда не публиковался»):
+Реализованы:
 
-```sql
-WITH expected(table_name) AS (
-    VALUES 'retail_bank__transactions__act_snap'
-)
-SELECT e.table_name,
-       CASE WHEN t.table_name IS NULL THEN 'никогда не публиковался'
-            ELSE 'проверить метаданные публикации' END AS publication_status
-FROM expected e
-LEFT JOIN raw.information_schema.tables t
-    ON t.table_schema = 'bank' AND t.table_name = e.table_name;
-```
+- загрузки из MSSQL 2022 и Oracle Free 23;
+- [полные срезы](docs/glossary.md#term-full), [инкременты](docs/glossary.md#term-increment) и вспомогательные [таблицы-снимки](docs/glossary.md#term-snapshot);
+- хранение истории загрузок в Iceberg;
+- обработка добавления, удаления и переименования колонок источника;
+- эмуляция источников и изолированный тестовый контур.
 
-Для каждой существующей таблицы выполните запрос без сканирования её данных:
+Ограничения и точные гарантии приведены в
+[архитектуре](docs/architecture.md#10-известные-ограничения).
+Например, инкрементальная загрузка не обнаруживает физические удаления строк.
 
-```sql
-SELECT
-    (SELECT max(committed_at)
-     FROM raw.bank."retail_bank__transactions__act_snap$snapshots") AS published_at,
-    (SELECT value
-     FROM raw.bank."retail_bank__transactions__act_snap$properties"
-     WHERE key = 'snapshot.process_id') AS process_id;
-```
+Планируются:
 
-Для брокера замените схему на `broker`, имя — на
-`trading_core__transactions__act_snap`. При отсутствии автора публикация не
-подтверждена; пустая первая таблица может иметь автора без строк и без Asset.
-Проверка пустого источника не обновляет прежнюю публикацию и её время.
-При плановом расписании сравнивайте `published_at` с последним ожидаемым
-срабатыванием cron и допустимой задержкой, а не с фиксированным интервалом:
-календарные интервалы неодинаковы. Ручные снимки исключаются из автоматического
-SLA; периодичность их проверки задаётся отдельно. Успешный DagRun сам по себе
-не доказывает свежесть. Автоматическая сверка и alerting здесь не реализованы.
+- [ODS](docs/glossary.md#term-ods): устранение повторов и построение состояния записей;
+- [DDS](docs/glossary.md#term-dds) на Data Vault и витрины данных;
+- Kafka, Greenplum и ClickHouse как новые источники;
+- dbt для преобразований;
+- авторизация и разделение доступа к слоям озера.
 
-**Метаданные.** pg-meta — операционная база фреймворка: идентификаторы
-процессов, журналы DAG-ов и тасков, состояние и партии инкрементальных
-сущностей, аудит миграций контракта. Раздел 8 architecture.md.
-
-**Типы и гарантии, известные ограничения** (at-least-once, тихие пропуски
-инкремента при поздних коммитах, поддерживаемые СУБД, границы партиций дня и
-прочее) — разделы 9–10 architecture.md.
----
-
-## 5. Тестирование стенда
-
-За проведение тестирования агентом отвечает скилл **`e2e-testing`**
-(`.agents/skills/e2e-testing/SKILL.md`): он описывает принципы, устройство
-тестового контура и траблшутинг. Правило кодовой базы: любой новый или
-изменённый функционал пайплайнов, операторов и интеграций обязан
-сопровождаться проверками в сценарии e2e-тестирования; чистые функции
-дополнительно покрываются юнит-тестами с проверкой краевых случаев.
-
-### 5.1. Юнит-тесты
-
-```bash
-python3 -m unittest discover -s test/unit
-```
-
-Покрывают чистые функции без стенда: валидацию манифестов и именование,
-детерминизм генератора DAG-ов, парсеры аргументов загрузчика, типизированные
-позиции и диалектные SQL-кодеки инкремента, реестр партий (на герметичной
-фейковой БД; полный прогон `./test/test.sh` дополнительно выполняет
-интеграционные `PostgresTests` клиента pg-meta против реального Postgres —
-в контейнере `airflow-scheduler` тестового контура; на хосте то же
-включается переменной окружения `EXTRACTION_TEST_DSN`), guard-ы стиля кода
-(запрет комментариев `#` в Python) и DDL pg-meta (запрет триггеров).
-На хосте нужны Python 3.11+ и
-PyYAML, например в изолированном окружении:
-`python3 -m venv .venv && .venv/bin/pip install 'PyYAML>=6'`.
-
-### 5.2. Полный e2e-прогон
-
-```bash
-./test/test.sh
-```
-
-Полностью изолированный тестовый проект `dlh-test` — безопасен при
-одновременно работающем живом стенде: собственное дерево файлов
-(`test/.workspace/`, удаляется по завершении), собственные тома и контейнеры,
-отключённая публикация портов, префикс `sydafa-test-` для СУБД-источников.
-Прогон по шагам:
-
-1. статическая валидация манифестов, миграций и DAG-ов (`run_flow.py
-   --validate-manifests-only`) и юнит-тесты;
-2. генерация DAG-ов генератором;
-3. сборка и подъём изолированного стека;
-4. в `test-runner` (`run_flow.py`): health-проверки sydafa/Trino/Airflow,
-   защита от SQL-инъекций (HTTP 422), запуск DAG-ов обновления источников и
-   **несколько раундов загрузки** с проверками в Trino: append-only-семантика,
-   один `__process_id` на запуск, удвоение снапшотов при повторе,
-   инкрементальный гейт (повторная загрузка без изменений источника не пишет
-   ни одной строки), дельта после обновления источника;
-5. в `airflow-scheduler`: инварианты реестра партий (`check_extraction.py`) —
-   заморозка границ, повторы, no-op без Spark, защита watermark от
-   регрессии и конкурирующих исполнителей, аудит ручной миграции; затем
-   интеграционные `PostgresTests` (`test/unit/test_meta.py`) против pg-meta —
-   реальные блокировки, CHECK-констрейнты и CAS; каждая проверка создаёт и
-   удаляет собственную одноразовую БД, база `meta` не затрагивается;
-6. отдельные Spark-приложения: эволюция схемы Iceberg (add/drop/rename колонок,
-   честный отказ при несовместимом типе) и контракты temporal-инкремента
-   (точность до наносекунд, границы окна, lookback);
-7. гашение стекa и очистка только принадлежащих тестовому контуру
-   контейнеров/томов (в т.ч. при неудаче — с выгрузкой логов Airflow в
-   `TEST_FAILURE_LOG_DIR`).
-
-Критерий: `FAIL=0`, exit-code `0`. Не допускается сдача задач при непройденных
-проверках.
-
-Опции: `TEST_SKIP_BUILD=1 ./test/test.sh` — полный сценарий без повторной
-сборки образов (использовать только после сборки текущих Dockerfile/конфигов);
-`./test/test.sh --verify` — повторные runtime-проверки на уже поднятом
-**тестовом** контуре `dlh-test` (например, при отладке после полного прогона:
-скрипт требует существующий `test/.workspace` и работает только внутри
-изолированного тестового проекта; живой стенд им не проверяется).
-
-Версии Python по компонентам и их рассинхрон — раздел 1.4.
+Проработанные задачи находятся в [бэклоге](docs/backlog.md).
