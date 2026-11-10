@@ -198,6 +198,25 @@ Airflow: IngestAppendOperator(DockerOperator)
 - Определить воспроизводимые build/tag и сборку образа до запуска DAG основного и [e2e](glossary.md#term-e2e)-контуров.
 - Добавить совместимый Docker provider. Убирать Spark/Java/SparkSubmit provider из Airflow image только после проверки остальных потребителей, включая пользовательские DAG.
 
+После перехода изменить размещение JDBC-драйверов:
+
+- Сейчас JAR-файлы установлены и в образе Airflow, и в образе Spark:
+  [driver](glossary.md#term-driver) работает в `airflow-scheduler`,
+  [executors](glossary.md#term-executor) — на `spark-worker`.
+  Описание текущего состава — в [README](../README.md#почему-jdbc-драйверы-установлены-в-обоих-образах).
+- В целевой схеме `spark-submit`, [driver](glossary.md#term-driver), Java, Spark
+  и JDBC JAR должны находиться в образе отдельного контейнера загрузки.
+  Этот образ должен включать те же версии драйверов, что и окружение
+  [executors](glossary.md#term-executor).
+- В образе Spark оставить JDBC-драйверы: рабочие процессы по-прежнему открывают соединения к источнику.
+- Удалить установку JDBC JAR из `conf/airflow/Dockerfile`, только если проверка
+  остальных потребителей подтверждает, что внутри Airflow больше не выполняется
+  Spark-код или другой код, которому нужны эти драйверы. Замена одного оператора
+  сама по себе не доказывает, что остальные потребители отсутствуют.
+- Проверить загрузки в новой схеме без JDBC JAR в Airflow и наличие нужных классов
+  как в отдельном контейнере [driver](glossary.md#term-driver),
+  так и на стороне [executors](glossary.md#term-executor).
+
 ##### Контракт оператора
 
 - Сохранить [runtime](glossary.md#term-runtime)-разрешение Airflow Connections/source.type, получение process_id и [watermark](glossary.md#term-watermark), [pool](glossary.md#term-pool)/pool_slots.

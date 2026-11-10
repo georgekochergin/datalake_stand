@@ -17,6 +17,7 @@ Spark, SQL-запросы — Trino. Источники с тестовыми д
   - [Схема взаимодействия](#схема-взаимодействия)
   - [Docker-образы и приложения](#docker-образы-и-приложения)
   - [Языки и библиотеки](#языки-и-библиотеки)
+    - [JDBC-драйверы в образах Airflow и Spark](#почему-jdbc-драйверы-установлены-в-обоих-образах)
 - [2. Требования и запуск](#2-требования-и-запуск)
   - [Требования к среде](#требования-к-среде)
   - [Первый запуск](#первый-запуск)
@@ -117,7 +118,6 @@ S3-хранилища silo.
 | Генератор и [unit-тесты](docs/glossary.md#term-unit) на хосте | Python 3.11+, зависимости из `ingestion/generator/requirements.txt` |
 | Тестовый контейнер | Python 3.12, PyYAML 6.0.3 |
 
-[Driver](docs/glossary.md#term-driver) — управляющий процесс Spark-приложения, [executors](docs/glossary.md#term-executor) — рабочие процессы.
 На стенде [driver](docs/glossary.md#term-driver) работает в `airflow-scheduler`, [executors](docs/glossary.md#term-executor) — в `spark-worker`.
 Текущие JDBC/DataFrame-загрузки не запускают Python-процессы на [executors](docs/glossary.md#term-executor).
 Для Python [UDF](docs/glossary.md#term-udf) и [RDD](docs/glossary.md#term-rdd) потребуется одинаковая minor-версия Python у [driver](docs/glossary.md#term-driver) и [executors](docs/glossary.md#term-executor).
@@ -125,6 +125,27 @@ S3-хранилища silo.
 Файлы сборки: [Airflow](conf/airflow/Dockerfile),
 [его зависимости](conf/airflow/requirements.txt), [Spark](conf/spark/Dockerfile),
 [test-runner](test/Dockerfile).
+
+#### Почему JDBC-драйверы установлены в обоих образах
+
+`mssql-jdbc-12.10.0.jre11.jar` и `ojdbc11-23.8.0.25.04.jar` нужны
+в двух окружениях Spark-приложения:
+
+| Образ | Кто использует JDBC-драйверы | Для чего |
+|---|---|---|
+| Airflow (`conf/airflow/Dockerfile`) | Spark [driver](docs/glossary.md#term-driver) в `airflow-scheduler` | Подготовительные запросы к источнику: схема, типы, метаданные и границы чтения |
+| Spark (`conf/spark/Dockerfile`) | [Executors](docs/glossary.md#term-executor) в `spark-worker` | Чтение строк источника задачами Spark |
+
+Airflow запускает `spark-submit` в режиме `client`: [driver](docs/glossary.md#term-driver)
+остаётся в контейнере, откуда отправлено приложение, а не переносится на `spark-worker`.
+Поэтому JAR-файлы в образе Airflow — зависимости выполняемого там Spark-кода,
+а не JDBC-подключение самого оркестратора.
+
+Образы общие для нескольких сервисов. Поэтому эти JAR-файлы также присутствуют
+в остальных контейнерах Airflow и в `spark-master`, хотя нужны прежде всего
+[driver](docs/glossary.md#term-driver) и [executors](docs/glossary.md#term-executor).
+Планируемый перенос зависимостей в отдельный контейнер загрузки описан в
+[задаче перехода на DockerOperator](docs/backlog.md#изолировать-spark-drivers-через-dockeroperator).
 
 ## 2. Требования и запуск
 
