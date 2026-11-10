@@ -4,7 +4,7 @@
 в озеро на Apache Iceberg. Загрузками управляет Airflow, вычисления выполняет
 Spark, SQL-запросы — Trino. Источники с тестовыми данными создаёт сервис sydafa.
 
-Сейчас реализован **raw-слой**: данные источников без бизнес-преобразований
+Сейчас реализован **[raw-слой](docs/glossary.md#term-raw)**: данные источников без бизнес-преобразований
 с техническими отметками загрузки. Слои обработки и витрины пока планируются.
 Стенд предназначен для разработки и демонстраций, а не для размещения
 в открытой сети: часть интерфейсов не требует авторизации.
@@ -12,6 +12,7 @@ Spark, SQL-запросы — Trino. Источники с тестовыми д
 ## Содержание
 
 - [Документация](#документация)
+- [Глоссарий](docs/glossary.md)
 - [1. Устройство стенда](#1-устройство-стенда)
   - [Схема взаимодействия](#схема-взаимодействия)
   - [Docker-образы и приложения](#docker-образы-и-приложения)
@@ -42,8 +43,9 @@ Spark, SQL-запросы — Trino. Источники с тестовыми д
 | [Архитектура загрузчика](docs/architecture.md) | Настроить загрузку, разобраться в DAG-ах, таблицах и гарантиях |
 | [Демонстрация](docs/demo.md) | Пройти готовый сценарий с SQL и API-запросами |
 | [Бэклог](docs/backlog.md) | Посмотреть согласованные отложенные задачи |
-| [graphify](docs/graphify.md) | Настроить граф кодовой базы для ИИ-агентов |
-| [Spec Kit](docs/speckit.md) | Работать над функциональными изменениями по спецификациям |
+| [Глоссарий](docs/glossary.md) | Найти определения терминов проекта |
+| [graphify](docs/agents/graphify.md) | Настроить граф кодовой базы для ИИ-агентов |
+| [Spec Kit](docs/agents/speckit.md) | Работать над функциональными изменениями по спецификациям |
 | [AGENTS.md](AGENTS.md) | Узнать правила работы агента с репозиторием |
 
 ## 1. Устройство стенда
@@ -75,8 +77,8 @@ flowchart TB
 - **pg-meta** хранит журналы и состояние загрузок. Это не база Airflow и не каталог Iceberg.
 
 Spark и Trino видят один каталог `raw` и одни таблицы. Например:
-`raw.bank.retail_bank__clients`. Данные находятся в бакете `datalake`
-S3-хранилища silo. Бакет — контейнер объектов, аналог верхнего уровня каталога файлов.
+`raw.bank.retail_bank__clients`. Данные находятся в [бакете](docs/glossary.md#term-bucket) `datalake`
+S3-хранилища silo. [Бакет](docs/glossary.md#term-bucket) — контейнер объектов, аналог верхнего уровня каталога файлов.
 
 ### Docker-образы и приложения
 
@@ -93,7 +95,7 @@ S3-хранилища silo. Бакет — контейнер объектов, 
 | `airflow-postgres`, `pg-catalog`, `pg-meta` | `postgres:16.15-bookworm` | Три отдельные базы метаданных |
 | `nessie` | `ghcr.io/projectnessie/nessie:0.99.0` | Каталог Iceberg |
 | `silo` | `pgsty/silo:RELEASE.2026-09-16T00-00-00Z` | MinIO-совместимое S3-хранилище |
-| `silo-init` | `amazon/aws-cli:2.17.0` | Одноразовое создание бакета |
+| `silo-init` | `amazon/aws-cli:2.17.0` | Одноразовое создание [бакета](docs/glossary.md#term-bucket) |
 | `trino` | `trinodb/trino:479` | SQL-доступ к озеру |
 | `trino-init` | `httpd:2-alpine` | Одноразовая подготовка авторизации Trino |
 | `test-runner` | `python:3.12-slim` | Локальная сборка тестового контейнера, профиль `test` |
@@ -108,16 +110,16 @@ S3-хранилища silo. Бакет — контейнер объектов, 
 
 | Окружение | Версии и зависимости |
 |---|---|
-| Airflow и Spark driver | Python 3.11, JDK 17, PySpark 3.5.5, Spark provider 6.3.2, Trino provider 6.7.0, `sydafa-airflow` |
-| Spark executors | Python 3.10, Spark 3.5.5, Iceberg 1.8.1 |
+| Airflow и Spark [driver](docs/glossary.md#term-driver) | Python 3.11, JDK 17, PySpark 3.5.5, Spark provider 6.3.2, Trino provider 6.7.0, `sydafa-airflow` |
+| Spark [executors](docs/glossary.md#term-executor) | Python 3.10, Spark 3.5.5, Iceberg 1.8.1 |
 | JDBC-драйверы | MSSQL `12.10.0.jre11`, Oracle `23.8.0.25.04` |
-| Генератор и unit-проверки на хосте | Python 3.11+, зависимости из `ingestion/generator/requirements.txt` |
+| Генератор и [unit-проверки](docs/glossary.md#term-unit) на хосте | Python 3.11+, зависимости из `ingestion/generator/requirements.txt` |
 | Тестовый контейнер | Python 3.12, PyYAML 6.0.3 |
 
-Driver — управляющий процесс Spark-приложения, executors — рабочие процессы.
-На стенде driver работает в `airflow-scheduler`, executors — в `spark-worker`.
-Текущие JDBC/DataFrame-загрузки не запускают Python-процессы на executors.
-Для Python UDF и RDD потребуется одинаковая minor-версия Python у driver и executors.
+[Driver](docs/glossary.md#term-driver) — управляющий процесс Spark-приложения, [executors](docs/glossary.md#term-executor) — рабочие процессы.
+На стенде [driver](docs/glossary.md#term-driver) работает в `airflow-scheduler`, [executors](docs/glossary.md#term-executor) — в `spark-worker`.
+Текущие JDBC/DataFrame-загрузки не запускают Python-процессы на [executors](docs/glossary.md#term-executor).
+Для Python [UDF](docs/glossary.md#term-udf) и [RDD](docs/glossary.md#term-rdd) потребуется одинаковая minor-версия Python у [driver](docs/glossary.md#term-driver) и [executors](docs/glossary.md#term-executor).
 
 Файлы сборки: [Airflow](conf/airflow/Dockerfile),
 [его зависимости](conf/airflow/requirements.txt), [Spark](conf/spark/Dockerfile),
@@ -242,7 +244,7 @@ Spark использует Nessie API `/api/v2`, Trino — Iceberg REST `/iceber
 - Catalog/Database: `raw`.
 - Username и Password: значения из `.env`, по умолчанию `admin123` / `admin123`.
 - SSL: включён.
-- Driver properties: `SSL=true`, `SSLVerification=NONE`.
+- [Driver](docs/glossary.md#term-driver) properties: `SSL=true`, `SSLVerification=NONE`.
 - JDBC URL: `jdbc:trino://localhost:8443/raw?SSL=true&SSLVerification=NONE`.
 
 Отключение проверки сертификата допустимо здесь только для локального стенда
@@ -286,8 +288,8 @@ sydafa — отдельный [проект](https://github.com/georgekochergin/
 
 ### Активация и подключение
 
-Источник запускается по запросу, а после истечения TTL останавливается.
-**TTL** — время, на которое источник оставляют работающим.
+Источник запускается по запросу, а после истечения [TTL](docs/glossary.md#term-ttl) останавливается.
+**[TTL](docs/glossary.md#term-ttl)** — время, на которое источник оставляют работающим.
 
 1. Откройте http://localhost:8090/docs.
 2. Выполните `POST /sources/bank/activate?ttl_minutes=20`
@@ -320,7 +322,7 @@ SELECT * FROM "trading_core"."transactions";
 | GET | `/sources` | Список источников |
 | GET | `/sources/{source}` | Описание и параметры подключения, без активации |
 | GET | `/sources/{source}/schema` | Текущая схема таблиц |
-| GET | `/sources/{source}/status` | Состояние контейнера и остаток TTL |
+| GET | `/sources/{source}/status` | Состояние контейнера и остаток [TTL](docs/glossary.md#term-ttl) |
 | POST | `/sources/{source}/activate` | Запустить СУБД на заданное время |
 | POST | `/sources/{source}/deactivate` | Остановить СУБД |
 | POST | `/sources/{source}/migrate` | Выполнить набор изменений в одной транзакции |
@@ -339,7 +341,7 @@ SELECT * FROM "trading_core"."transactions";
 - изменяет отдельные записи справочников.
 
 После этого можно запускать загрузку в озеро. Эти операции меняют источники,
-но сами не переносят данные в raw.
+но сами не переносят данные в [raw](docs/glossary.md#term-raw).
 
 ### Добавление источника
 
@@ -394,8 +396,8 @@ SELECT * FROM "trading_core"."transactions";
 
 | Проверка | Команда | Что проверяет |
 |---|---|---|
-| Unit | `python3 -m unittest discover -s test/unit` | Чистые функции и контракты без основного стенда |
-| Полный e2e | `./test/test.sh` | Отдельный тестовый стек и загрузки через реальные сервисы |
+| [Unit](docs/glossary.md#term-unit) | `python3 -m unittest discover -s test/unit` | Чистые функции и контракты без основного стенда |
+| Полный [e2e](docs/glossary.md#term-e2e) | `./test/test.sh` | Отдельный тестовый стек и загрузки через реальные сервисы |
 
 Полный прогон использует проект `dlh-test`, собственные тома,
 `test/.workspace/` и префикс источников `sydafa-test-`. Порты на хост не публикуются.
@@ -436,7 +438,7 @@ SELECT * FROM "trading_core"."transactions";
 Реализованы:
 
 - загрузки из MSSQL 2022 и Oracle Free 23;
-- полные срезы, инкременты и отдельные таблицы текущего состояния;
+- [полные срезы](docs/glossary.md#term-full), [инкременты](docs/glossary.md#term-increment) и отдельные таблицы текущего состояния;
 - хранение истории загрузок в Iceberg;
 - обработка добавления, удаления и переименования колонок источника;
 - эмуляция источников и изолированный тестовый контур.
@@ -447,8 +449,8 @@ SELECT * FROM "trading_core"."transactions";
 
 Планируются:
 
-- ODS: устранение повторов и построение состояния записей;
-- DDS на Data Vault и витрины данных;
+- [ODS](docs/glossary.md#term-ods): устранение повторов и построение состояния записей;
+- [DDS](docs/glossary.md#term-dds) на Data Vault и витрины данных;
 - Kafka, Greenplum и ClickHouse как новые источники;
 - dbt для преобразований;
 - авторизация и разделение доступа к слоям озера.

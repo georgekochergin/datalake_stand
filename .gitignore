@@ -32,10 +32,10 @@ test/.workspace/**
 
 # Граф кодовой базы graphify: в git — только сам граф.
 # graph.json самодостаточен для запросов (имена сообществ записаны в узлах);
-# остальное — кэш пересборок и производные артефакты (см. docs/graphify.md)
+# остальное — кэш пересборок и производные артефакты (см. docs/agents/graphify.md)
 graphify-out/*
 !graphify-out/graph.json
 
 # Сессионные планы приложения ZCode — машинно-локальные; спек-скиллы
-# в .zcode/skills/ коммитятся (см. docs/speckit.md)
+# в .zcode/skills/ коммитятся (см. docs/agents/speckit.md)
 .zcode/plans/
