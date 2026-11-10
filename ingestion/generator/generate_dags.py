@@ -72,6 +72,11 @@ def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str
     """Render logging, loading, and separate Asset publication for one entity."""
     target = resolve_fully_qualified(source.source_id, entity.fqn)
     group_id = f"load_{target.split('.')[-1]}"
+    load_operator = (
+        "IngestIncrementalOperator"
+        if isinstance(entity, IncrementalEntityConfig)
+        else "IngestFullOperator"
+    )
     lines = [
         f'        with TaskGroup(group_id="{group_id}") as load_group:',
         '            log_start = TableLogOperator(',
@@ -81,7 +86,7 @@ def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str
         f'                datalake_table="{target}",',
         '                status="START",',
         '            )',
-        '            load = IngestAppendOperator(',
+        f'            load = {load_operator}(',
         '                task_id="load",',
         f'                pool={json.dumps(entity.pool)},',
         f'                pool_slots={entity.pool_slots},',
@@ -230,6 +235,12 @@ def generate_dag_source(
     description = f"Raw-layer ingestion for source {pipeline.source_id} (generated)"
     if num_partitions is None:
         num_partitions = load_settings(DEFAULT_SETTINGS).num_partitions
+    load_imports = sorted(
+        {
+            "IngestIncrementalOperator" if isinstance(entity, IncrementalEntityConfig) else "IngestFullOperator"
+            for entity in pipeline.entities
+        }
+    )
     lines = [
         f'"""Generated DAG for pipeline "{pipeline.source_id}" — regenerate via '
         'python3 -m ingestion.generator.generate_dags, do not edit."""',
@@ -243,7 +254,7 @@ def generate_dag_source(
         "",
         "from ingestion.operators import (",
         "    GenerateProcessIdOperator,",
-        "    IngestAppendOperator,",
+        *[f"    {name}," for name in load_imports],
         "    publish_asset_event,",
         "    TableLogOperator,",
         "    dagrun_failure_callback,",

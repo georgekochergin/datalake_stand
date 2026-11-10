@@ -157,7 +157,7 @@ Spark [driver](glossary.md#term-driver) — управляющий процес�
 Текущий запуск:
 
 - Spark Standalone 3.5.5 и Airflow LocalExecutor.
-- `IngestAppendOperator` наследует `SparkSubmitOperator`, режим — `client`.
+- Операторы загрузки `IngestFullOperator`/`IngestIncrementalOperator` наследуют `SparkSubmitOperator`, режим — `client`.
 - `spark-submit` и [driver](glossary.md#term-driver) работают в `airflow-scheduler`.
 - [Executors](glossary.md#term-executor) работают на `spark-worker`.
 
@@ -182,10 +182,10 @@ Airflow [pools](glossary.md#term-pool) ограничивают допуск и 
 
 #### Предпочтительный путь решения
 
-Перевести предметный `IngestAppendOperator` на `DockerOperator`: одна задача загрузки — отдельный контейнер со `spark-submit` и [driver](glossary.md#term-driver). Сохранить Spark Standalone и `deploy_mode=client`.
+Перевести режимные операторы загрузки (`IngestFullOperator`, `IngestIncrementalOperator`) на `DockerOperator`: одна задача загрузки — отдельный контейнер со `spark-submit` и [driver](glossary.md#term-driver). Сохранить Spark Standalone и `deploy_mode=client`.
 
 ```text
-Airflow: IngestAppendOperator(DockerOperator)
+Airflow: IngestFullOperator / IngestIncrementalOperator (DockerOperator)
     → контейнер загрузки: spark-submit + driver
         → Spark Standalone: executors на worker
 ```
@@ -358,7 +358,7 @@ Airflow различает жизненные циклы отказа задач
 - `on_failure_callback`: вызывается при финальном отказе (исчерпаны все [retry](glossary.md#term-retry)).
 - `on_retry_callback`: вызывается перед каждым повтором задачи.
 
-Текущий `IngestAppendOperator` (унаследован от `SparkSubmitOperator`) использует `on_failure_callback` для логирования конечного отказа в meta-БД. Однако на [retry](glossary.md#term-retry) процесс Spark ([driver](glossary.md#term-driver) и распределённые [executors](glossary.md#term-executor)) может оставаться запущенным и не контролируемым, если потребляет ресурсы или блокирует порты.
+Текущие операторы загрузки `IngestFullOperator`/`IngestIncrementalOperator` (унаследованы от `SparkSubmitOperator`) используют `on_failure_callback` для логирования конечного отказа в meta-БД. Однако на [retry](glossary.md#term-retry) процесс Spark ([driver](glossary.md#term-driver) и распределённые [executors](glossary.md#term-executor)) может оставаться запущенным и не контролируемым, если потребляет ресурсы или блокирует порты.
 
 #### Проблема
 
@@ -369,11 +369,11 @@ Airflow различает жизненные циклы отказа задач
 3. Порты и соединения предыдущего драйвера могут оставаться заняты, препятствуя новой попытке.
 4. Нет видимого мониторинга и cleanup подвисших процессов между попытками.
 
-Кейс воспроизведения: запустить `IngestAppendOperator` с `retries > 0`, нарочно вызвать сбой (например, подключение к источнику разорвано). Проверить процессы Spark на scheduler — ожидается наличие старого [driver](glossary.md#term-driver) после [retry](glossary.md#term-retry). После нескольких [retry](glossary.md#term-retry) ресурсы исчерпаны.
+Кейс воспроизведения: запустить оператор загрузки с `retries > 0`, нарочно вызвать сбой (например, подключение к источнику разорвано). Проверить процессы Spark на scheduler — ожидается наличие старого [driver](glossary.md#term-driver) после [retry](glossary.md#term-retry). После нескольких [retry](glossary.md#term-retry) ресурсы исчерпаны.
 
 #### Предпочтительный путь решения
 
-Добавить `on_retry_callback` к `IngestAppendOperator` для явной очистки подвисших процессов перед повтором:
+Добавить `on_retry_callback` к операторам загрузки для явной очистки подвисших процессов перед повтором:
 
 1. **Логирование [retry](glossary.md#term-retry)-события**: записать в meta-БД событие [retry](glossary.md#term-retry) для отслеживания истории попыток.
 2. **Cleanup старых процессов**: определить и завершить процессы Spark предыдущей попытки ([driver](glossary.md#term-driver) и [executors](glossary.md#term-executor)) на scheduler, используя процессный ID из XCom.
@@ -538,7 +538,7 @@ Storage и execution динамически делят память. Execution �
 
 Эти настройки меняются только по результатам диагностики [spill](glossary.md#term-spill) или отказов памяти.
 
-Ресурсы на стенде сейчас не заданы нигде: `conf/spark/spark-defaults.conf` содержит только настройки каталога Iceberg/Nessie/S3 и действует на все приложения кластера; `spark-worker` стартует без `--cores`/`--memory` и объявляет все ресурсы хоста; `IngestAppendOperator` передаёт в `SparkSubmitOperator` только application и deploy_mode, без `conf`. Существующий маршрут параметров джобы: `ingestion/conf/settings.yaml` (`spark.jdbc.num_partitions` — глобальный дефолт) и секция `spark:` [сущности](glossary.md#term-entity) манифеста (`jdbc_partitioning`) → генератор DAG-ов → оператор → аргументы джобы. Переименование выполнено, включая CLI `--no-jdbc-partitioning`, аргумент оператора и поле `EntityConfig`; повторное переименование не требуется.
+Ресурсы на стенде сейчас не заданы нигде: `conf/spark/spark-defaults.conf` содержит только настройки каталога Iceberg/Nessie/S3 и действует на все приложения кластера; `spark-worker` стартует без `--cores`/`--memory` и объявляет все ресурсы хоста; Операторы загрузки передают в `SparkSubmitOperator` только application и deploy_mode, без `conf`. Существующий маршрут параметров джобы: `ingestion/conf/settings.yaml` (`spark.jdbc.num_partitions` — глобальный дефолт) и секция `spark:` [сущности](glossary.md#term-entity) манифеста (`jdbc_partitioning`) → генератор DAG-ов → оператор → аргументы джобы. Переименование выполнено, включая CLI `--no-jdbc-partitioning`, аргумент оператора и поле `EntityConfig`; повторное переименование не требуется.
 
 Пример влияния настроек на [сущности](glossary.md#term-entity) DAG-а `ingest__rdbms__bank` (целевая конфигурация):
 
@@ -586,7 +586,7 @@ entities:
 
 1. Сохранить действующий контракт `spark.jdbc_partitioning` и `--no-jdbc-partitioning`: он управляет только JDBC-нарезкой, независимо от новых ресурсных ключей.
 2. Добавить в секцию `spark:` [сущности](glossary.md#term-entity) ключи ресурсов: `cores_max`, `executor_cores`, `executor_memory`, `shuffle_partitions`, `driver_memory` (без префикса `spark.` — префикс добавляется при формировании `--conf`); валидация с белым списком допустимых ключей в `ingestion/generator/manifest.py`. [Сущность](glossary.md#term-entity) без ключей ресурсов запускается без `--conf` — с дефолтами Spark.
-3. Генератор рендерит параметры в `IngestAppendOperator`; оператор передаёт их в `SparkSubmitOperator` через `conf` → `spark-submit --conf spark.<ключ>=<значение>`: конфигурация применяется к конкретному приложению и не затрагивает общий `spark-defaults.conf`.
+3. Генератор рендерит параметры в операторы загрузки; оператор передаёт их в `SparkSubmitOperator` через `conf` → `spark-submit --conf spark.<ключ>=<значение>`: конфигурация применяется к конкретному приложению и не затрагивает общий `spark-defaults.conf`.
 4. Валидация значений: `cores_max`, `executor_cores` и `shuffle_partitions` — положительные целые; `executor_memory` и `driver_memory` — строки вида `<число><k|m|g>`.
 
 Границы решения:
@@ -681,9 +681,9 @@ Airflow [pools](glossary.md#term-pool) ограничивают допуск з�
 
 #### Контекст
 
-`IngestAppendOperator.execute()` в `ingestion/operators.py` получает реквизиты источника из Airflow Connection и передаёт пароль через `--jdbc-password` в `application_args` для `SparkSubmitOperator`. Загрузчики `ingestion/spark/raw/rdbms/full/load_entity.py` и `ingestion/spark/raw/rdbms/incremental/load_entity.py` принимают этот аргумент и используют его при JDBC-подключениях. Реквизиты pg-meta передаются процессу загрузчика переменными окружения, а не аргументами CLI; после задачи [«Рефакторинг и переорганизация кода: структура модулей»](#рефакторинг-и-переорганизация-кода-структура-модулей) — одной переменной `INGESTION_META_DSN` со строкой подключения.
+`IngestFullOperator.execute()`/`IngestIncrementalOperator.execute()` в пакете `ingestion/operators/` получают реквизиты источника из Airflow Connection и передаёт пароль через `--jdbc-password` в `application_args` для `SparkSubmitOperator`. Загрузчики `ingestion/spark/raw/rdbms/full/load_entity.py` и `ingestion/spark/raw/rdbms/incremental/load_entity.py` принимают этот аргумент и используют его при JDBC-подключениях. Реквизиты pg-meta передаются процессу загрузчика переменными окружения, а не аргументами CLI; после задачи [«Рефакторинг и переорганизация кода: структура модулей»](#рефакторинг-и-переорганизация-кода-структура-модулей) — одной переменной `INGESTION_META_DSN` со строкой подключения.
 
-В закреплённом Spark provider 6.3.2 штатное логирование команды и сообщение об ошибке её выполнения используют маскирование аргументов с `password`/`secret`. Это не удаляет настоящий пароль из аргументов запущенного процесса. Источники: `conf/airflow/requirements.txt`, `IngestAppendOperator.execute()`, `parse_args()` загрузчика и `SparkSubmitHook._mask_cmd()` провайдера.
+В закреплённом Spark provider 6.3.2 штатное логирование команды и сообщение об ошибке её выполнения используют маскирование аргументов с `password`/`secret`. Это не удаляет настоящий пароль из аргументов запущенного процесса. Источники: `conf/airflow/requirements.txt`, `execute()` операторов загрузки, `parse_args()` загрузчика и `SparkSubmitHook._mask_cmd()` провайдера.
 
 #### Проблема
 
@@ -697,7 +697,7 @@ Airflow [pools](glossary.md#term-pool) ограничивают допуск з�
 
 Передавать пароль источника через окружение процесса загрузчика вместо CLI-аргумента:
 
-- Согласованно изменить `IngestAppendOperator` и загрузчик: убрать `--jdbc-password` из команды и обязательных CLI-параметров, передавать секрет отдельной переменной окружения, читать её при запуске приложения. Отсутствие обязательного секрета должно приводить к понятной ошибке без вывода его значения.
+- Согласованно изменить операторы загрузки и загрузчик: убрать `--jdbc-password` из команды и обязательных CLI-параметров, передавать секрет отдельной переменной окружения, читать её при запуске приложения. Отсутствие обязательного секрета должно приводить к понятной ошибке без вывода его значения.
 - Сохранить получение реквизитов из Airflow Connections во время исполнения задачи; не записывать пароль в манифесты, сгенерированные DAG-и, XCom или Spark conf. Передачу в JDBC выполнять из памяти приложения, без повторного формирования CLI с секретом.
 - Не считать environment защищённым хранилищем: администратор контейнера или субъект с соответствующими правами может читать окружение. Решение устраняет присутствие секрета в аргументах процесса, но не заменяет управление доступом к среде выполнения.
 - Выполнить эту задачу независимо от перехода на DockerOperator (задача [«Изолировать Spark drivers через DockerOperator»](#изолировать-spark-drivers-через-dockeroperator)); не расширять её до замены системы хранения секретов. При последующей смене режима запуска сохранить отсутствие пароля в командной строке.

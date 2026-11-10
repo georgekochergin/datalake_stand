@@ -2,6 +2,7 @@
 
 import sys
 import json
+import os
 import types
 import unittest
 from pathlib import Path
@@ -339,6 +340,21 @@ class TestManagedLoad(unittest.TestCase):
         psycopg2.connect = MagicMock(return_value=MagicMock())
         self.psycopg2 = psycopg2
 
+    def test_missing_dsn_fails_with_explicit_error(self):
+        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "INGESTION_META_DSN is not set"):
+                load_entity.managed_load(self.spark, self.args())
+
+    def test_registry_connection_uses_provided_dsn(self):
+        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.dict(
+            os.environ, {"INGESTION_META_DSN": "host=meta-dsn"}
+        ), patch.object(
+            load_entity, "_plan_batch", return_value=self.batch(status="SUCCEEDED")
+        ) as plan:
+            load_entity.managed_load(self.spark, self.args())
+            plan.call_args.args[2]()
+        self.psycopg2.connect.assert_called_once_with("host=meta-dsn")
+
     def batch(self, **changes):
         values = {"process_id": 7, "status": "RUNNING", "incremental_type": "bigint",
                   "lower_bound": "5", "lower_bound_op": ">",
@@ -355,7 +371,9 @@ class TestManagedLoad(unittest.TestCase):
     def load(self, batch, args=None, appended=(5, "10"), append_error=None):
         """Run managed_load with every collaborator patched; return the patchers' mocks."""
         args = args or self.args()
-        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.object(
+        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.dict(
+            os.environ, {"INGESTION_META_DSN": "host=meta-dsn"}
+        ), patch.object(
             load_entity, "_plan_batch", return_value=batch
         ), patch.object(load_entity.reader, "read_extract_frame", return_value=self.source) as read_frame, patch.object(
             load_entity.raw_append,

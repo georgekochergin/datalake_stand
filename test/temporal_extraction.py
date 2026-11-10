@@ -585,9 +585,12 @@ def main():
     from ingestion.operators import resolve_source_connection
     from pyspark.sql import SparkSession
 
+    from psycopg2.extensions import make_dsn
+
     meta = BaseHook.get_connection("ingestion_meta")
-    os.environ.update(PGHOST=meta.host, PGPORT=str(meta.port or 5432),
-                      PGDATABASE=meta.schema, PGUSER=meta.login, PGPASSWORD=meta.password)
+    os.environ["INGESTION_META_DSN"] = make_dsn(
+        host=meta.host, port=meta.port or 5432, dbname=meta.schema,
+        user=meta.login, password=meta.password)
     hook = PostgresHook(postgres_conn_id="ingestion_meta")
     with create_session() as session:
         source_jdbc = {

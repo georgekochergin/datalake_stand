@@ -126,8 +126,9 @@ ClickHouse, Greenplum и Teradata сейчас не зарегистрирова
 
 - [`manifest.py`](../ingestion/generator/manifest.py), функция `load_sources()`,
   принимает только `type: rdbms`. Для `kafka` есть явная ошибка «not implemented yet».
-- [`operators.py`](../ingestion/operators.py), `IngestAppendOperator`
-  и `IngestActSnapOperator`, при выполнении также проверяют `source_type == "rdbms"`.
+- пакет [`operators`](../ingestion/operators/) с операторами `IngestFullOperator`,
+  `IngestIncrementalOperator` и `IngestActSnapOperator`; при выполнении они проверяют
+  `source_type == "rdbms"`.
 - [`generate_dags.py`](../ingestion/generator/generate_dags.py)
   создаёт задачи с JDBC-ориентированными операторами и активацией sydafa.
 - Приложения в `ingestion/spark/raw/rdbms/` читают JDBC.

@@ -26,30 +26,44 @@ class FakeOperator:
         self.submissions.append((list(self.application_args), context))
 
 
+def fake_make_dsn(**kwargs):
+    """Render a deterministic DSN string from the connection fields."""
+    return "host={host} port={port} dbname={dbname} user={user} password={password}".format(**kwargs)
+
+
 def load_operators():
-    """Import under a private package and restore every mocked module afterwards."""
+    """Import the operators package under a private name and restore mocked modules."""
     import ingestion.sources
+    import ingestion.spark.raw.iceberg
 
     modules = {}
     for name in (
         "airflow", "airflow.providers", "airflow.providers.apache", "airflow.providers.apache.spark",
         "airflow.providers.apache.spark.operators", "airflow.providers.apache.spark.operators.spark_submit",
-        "airflow.sdk", "airflow.sdk.exceptions", "_operator_test_ingestion",
+        "airflow.sdk", "airflow.sdk.exceptions", "psycopg2", "psycopg2.extensions",
+        "_operator_test_ingestion",
     ):
         modules[name] = types.ModuleType(name)
     modules["airflow.sdk"].BaseHook = MagicMock()
     modules["airflow.sdk"].BaseOperator = FakeOperator
     modules["airflow.sdk.exceptions"].AirflowSkipException = FakeSkip
     modules["airflow.providers.apache.spark.operators.spark_submit"].SparkSubmitOperator = FakeOperator
+    modules["psycopg2.extensions"].make_dsn = fake_make_dsn
     modules["ingestion"] = types.ModuleType("ingestion")
     modules["ingestion"].meta = MagicMock()
     modules["ingestion"].sources = ingestion.sources
+    modules["ingestion"].spark = ingestion.spark
     modules["ingestion.meta"] = modules["ingestion"].meta
-    path = Path(__file__).resolve().parents[2] / "ingestion" / "operators.py"
-    spec = importlib.util.spec_from_file_location("_operator_test_ingestion.operators", path)
+    package = Path(__file__).resolve().parents[2] / "ingestion" / "operators"
+    spec = importlib.util.spec_from_file_location(
+        "_operator_test_ingestion.operators", package / "__init__.py",
+        submodule_search_locations=[str(package)],
+    )
     module = importlib.util.module_from_spec(spec)
-    with patch.dict(sys.modules, modules):
+    with patch.dict(sys.modules, {**modules, spec.name: module}):
         spec.loader.exec_module(module)
+    module.BaseHook = modules["airflow.sdk"].BaseHook
+    module.meta = modules["ingestion"].meta
     return module
 
 
@@ -67,41 +81,63 @@ class TestIngestOperator(unittest.TestCase):
         self.module.BaseHook.get_connection.side_effect = lambda conn_id: self.meta if conn_id == "ingestion_meta" else source
         self.context = {"ti": MagicMock(), "dag_run": types.SimpleNamespace(dag_id="dag", run_id="run", conf={})}
         self.context["ti"].xcom_pull.return_value = 42
+        self.config = {"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 0, "unit": None}}
 
-    def operator(self, **kwargs):
-        return self.module.IngestAppendOperator(
+    def full_operator(self, **kwargs):
+        return self.module.IngestFullOperator(
             task_id="load", source_id="bank", airflow_conn_id="source", fqn="s.t",
             target_table="raw.bank.s__t", **kwargs,
         )
 
-    def test_defaults_and_explicit_options(self):
-        operator = self.operator()
+    def incremental_operator(self, **kwargs):
+        return self.module.IngestIncrementalOperator(
+            task_id="load", source_id="bank", airflow_conn_id="source", fqn="s.t",
+            target_table="raw.bank.s__t",
+            incremental_config=kwargs.pop("incremental_config", self.config),
+            **kwargs,
+        )
+
+    def test_full_defaults(self):
+        operator = self.full_operator()
         operator.execute(self.context)
         args = operator.application_args
-        self.assertEqual(args[args.index("--num-jdbc-partitions") + 1], "4")
-        self.assertNotIn("--no-jdbc-partitioning", args)
-        self.assertEqual(operator.source_type, "rdbms")
         self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/full/load_entity.py")
         self.assertEqual(operator.deploy_mode, "client")
+        self.assertEqual(operator.source_type, "rdbms")
+        self.assertEqual(args[args.index("--num-jdbc-partitions") + 1], "4")
+        self.assertNotIn("--no-jdbc-partitioning", args)
         self.assertIn("jdbc:sqlserver://host:1433;databaseName=db;encrypt=false", args)
-        config = {"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 5, "unit": None}}
-        operator = self.operator(jdbc_partitioning=False, num_partitions=7, incremental_config=config)
+
+    def test_full_operator_has_no_pg_meta_transport(self):
+        operator = self.full_operator(env_vars={"EXISTING": "kept"})
+        operator.execute(self.context)
+        args = operator.application_args
+        for flag in ("--incremental-config", "--incremental-column", "--lookback-size", "--lookback-unit", "--lookback-given"):
+            self.assertNotIn(flag, args)
+        self.assertEqual(operator.env_vars, {"EXISTING": "kept"})
+        self.module.meta.get_watermark.assert_not_called()
+
+    def test_full_operator_rejects_incremental_parameters(self):
+        import inspect
+
+        parameters = inspect.signature(self.module.IngestFullOperator.__init__).parameters
+        self.assertNotIn("incremental_config", parameters)
+        self.assertNotIn("pg_conn_id", parameters)
+
+    def test_incremental_defaults_and_config_json(self):
+        operator = self.incremental_operator()
         operator.execute(self.context)
         self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/incremental/load_entity.py")
-        self.assertIn("--no-jdbc-partitioning", operator.application_args)
-        self.assertEqual(json.loads(operator.application_args[operator.application_args.index("--incremental-config") + 1]), config)
-        self.assertNotIn("--watermark-value", operator.application_args)
+        args = operator.application_args
+        self.assertEqual(json.loads(args[args.index("--incremental-config") + 1]), self.config)
+        self.assertNotIn("--watermark-value", args)
         self.module.meta.get_watermark.assert_not_called()
-        self.assertNotIn("--num-jdbc-partitions", operator.application_args)
 
     def test_partitioning_arguments_for_full_and_incremental_loads(self):
-        for incremental_column in (None, "_batch_id"):
+        for make in (self.full_operator, self.incremental_operator):
             for enabled in (False, True):
-                with self.subTest(incremental_column=incremental_column, enabled=enabled):
-                    operator = self.operator(
-                        incremental_config=({"contract": {"source_column": incremental_column, "position_type": "bigint"}, "lookback": {"size": 0, "unit": None}} if incremental_column else None),
-                        jdbc_partitioning=enabled, num_partitions=7,
-                    )
+                with self.subTest(operator=make.__name__, enabled=enabled):
+                    operator = make(jdbc_partitioning=enabled, num_partitions=7)
                     operator.execute(self.context)
                     args = operator.application_args
                     if enabled:
@@ -113,39 +149,41 @@ class TestIngestOperator(unittest.TestCase):
 
     def test_oracle_connection(self):
         self.module.BaseHook.get_connection.return_value.conn_type = "oracle"
-        operator = self.operator()
+        operator = self.full_operator()
         operator.execute(self.context)
         self.assertIn("jdbc:oracle:thin:@//host:1521/db", operator.application_args)
 
     def test_run_identity_and_metadata_credentials_are_forwarded(self):
-        operator = self.operator(env_vars={"EXISTING": "kept"}, incremental_config={"contract": {"source_column": "updated_at", "position_type": "timestamp_local(7)"}, "lookback": {"size": 3, "unit": "h"}})
+        operator = self.incremental_operator(
+            env_vars={"EXISTING": "kept"},
+            incremental_config={"contract": {"source_column": "updated_at", "position_type": "timestamp_local(7)"}, "lookback": {"size": 3, "unit": "h"}},
+        )
         operator.execute(self.context)
         args = operator.application_args
         for flag, value in (("--source-id", "bank"), ("--dag-id", "dag"), ("--run-id", "run")):
             self.assertEqual(args[args.index(flag) + 1], value)
         self.assertIn("--incremental-config", args)
-        self.assertEqual(operator.env_vars, {"EXISTING": "kept", "PGHOST": "pg", "PGPORT": "5432", "PGDATABASE": "metadata", "PGUSER": "writer", "PGPASSWORD": "pg-secret"})
+        self.assertEqual(operator.env_vars, {
+            "EXISTING": "kept",
+            "INGESTION_META_DSN": "host=pg port=5432 dbname=metadata user=writer password=pg-secret",
+        })
         self.assertNotIn("pg-secret", args)
-
-    def test_full_slice_operator_omits_incremental_flags(self):
-        operator = self.operator()
-        operator.execute(self.context)
-        args = operator.application_args
-        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/full/load_entity.py")
-        for flag in ("--incremental-config", "--incremental-column", "--lookback-size", "--lookback-unit", "--lookback-given"):
-            self.assertNotIn(flag, args)
 
     def test_unspecified_lookback_omits_given_flag(self):
         for size in (0, 5):
             with self.subTest(size=size):
-                operator = self.operator(incremental_config={"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": size, "unit": None}})
+                operator = self.incremental_operator(
+                    incremental_config={"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": size, "unit": None}}
+                )
                 operator.execute(self.context)
                 self.assertNotIn("--lookback-given", operator.application_args)
                 self.assertNotIn("--lookback-size", operator.application_args)
                 self.assertNotIn("--lookback-unit", operator.application_args)
 
     def test_hourly_temporal_default_is_not_explicit_lookback(self):
-        operator = self.operator(incremental_config={"contract": {"source_column": "updated_at", "position_type": "timestamp_local(7)"}, "lookback": {"size": 3, "unit": "h"}})
+        operator = self.incremental_operator(
+            incremental_config={"contract": {"source_column": "updated_at", "position_type": "timestamp_local(7)"}, "lookback": {"size": 3, "unit": "h"}}
+        )
         operator.execute(self.context)
         args = operator.application_args
         self.assertEqual(json.loads(args[args.index("--incremental-config") + 1])["lookback"], {"size": 3, "unit": "h"})
@@ -153,7 +191,9 @@ class TestIngestOperator(unittest.TestCase):
         self.assertNotIn("--lookback-unit", args)
 
     def test_explicit_zero_lookback_omits_unit(self):
-        operator = self.operator(incremental_config={"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 0, "unit": None}})
+        operator = self.incremental_operator(
+            incremental_config={"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 0, "unit": None}}
+        )
         operator.execute(self.context)
         args = operator.application_args
         self.assertEqual(json.loads(args[args.index("--incremental-config") + 1])["lookback"], {"size": 0, "unit": None})
@@ -161,7 +201,7 @@ class TestIngestOperator(unittest.TestCase):
         self.assertNotIn("--lookback-unit", args)
 
     def test_no_force_full_flags_remain(self):
-        operator = self.operator(incremental_config={"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 0, "unit": None}})
+        operator = self.incremental_operator()
         self.context["dag_run"].conf = {"force_full_snapshot_fqns": ["s.t"], "reason": "repair"}
         operator.execute(self.context)
         self.assertNotIn("--force-full", operator.application_args)
@@ -172,24 +212,26 @@ class TestIngestOperator(unittest.TestCase):
             {"jdbc_partitioning": "false"}, {"jdbc_partitioning": 0}, {"jdbc_partitioning": None},
             {"num_partitions": True}, {"num_partitions": 0}, {"num_partitions": -1},
             {"num_partitions": 4.0}, {"num_partitions": "4"}, {"source_type": None},
-            {"incremental_config": {}}, {"incremental_config": True},
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
-                self.operator(**kwargs)
+                self.full_operator(**kwargs)
+        for kwargs in ({"incremental_config": {}}, {"incremental_config": True}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                self.incremental_operator(**kwargs)
 
     def test_runtime_rejects_source_and_connection_mismatch(self):
-        operator = self.operator(source_type="file")
+        operator = self.full_operator(source_type="file")
         with self.assertRaisesRegex(ValueError, "source_type"):
             operator.execute(self.context)
         self.assertFalse(operator.submissions)
         self.module.BaseHook.get_connection.return_value.conn_type = "postgres"
         with self.assertRaisesRegex(ValueError, "supported JDBC dialect"):
-            self.operator().execute(self.context)
+            self.full_operator().execute(self.context)
 
     def test_missing_or_invalid_pid_fails_before_submit(self):
         for value in (None, "None", True, 1.5, 0, -1):
             self.context["ti"].xcom_pull.return_value = value
-            operator = self.operator()
+            operator = self.full_operator()
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, "process_id"):
                 operator.execute(self.context)
             self.assertFalse(operator.submissions)
@@ -338,7 +380,7 @@ class TestMetaConnect(unittest.TestCase):
             modules[name] = types.ModuleType(name)
         modules["airflow.providers.postgres.hooks.postgres"].PostgresHook = hook
         with patch.dict(sys.modules, modules):
-            module._meta_connect("custom_meta")
+            module.process._meta_connect("custom_meta")
         hook.assert_called_once_with(postgres_conn_id="custom_meta")
         hook.return_value.get_conn.assert_called_once_with()
 
@@ -392,6 +434,7 @@ class TestIngestActSnapOperator(unittest.TestCase):
         operator = self.operator()
         operator.execute(self.context)
         self.assertNotIn("PGHOST", operator.env_vars or {})
+        self.assertNotIn("INGESTION_META_DSN", operator.env_vars or {})
         self.assertNotIn("--lookback-size", operator.application_args)
         self.assertNotIn("--incremental-column", operator.application_args)
 
@@ -426,14 +469,14 @@ class TestPublishAsset(unittest.TestCase):
         self.context["ti"].xcom_pull.return_value = 42
 
     def test_regular_load_has_no_condition(self):
-        with patch.object(self.module, "snapshot_has_current_process") as condition:
+        with patch.object(self.module.assets, "snapshot_has_current_process") as condition:
             self.module.publish_asset_event(**self.context)
         condition.assert_not_called()
         self.context["ti"].xcom_pull.assert_not_called()
 
     def test_snapshot_policy(self):
         for result in (True, False):
-            with patch.object(self.module, "snapshot_has_current_process", return_value=result) as condition:
+            with patch.object(self.module.assets, "snapshot_has_current_process", return_value=result) as condition:
                 if result:
                     self.module.publish_asset_event("raw.bank.s__t__act_snap", **self.context)
                 else:

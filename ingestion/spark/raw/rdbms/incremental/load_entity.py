@@ -12,6 +12,7 @@ shared ingestion package.
 import argparse
 import json
 import logging
+import os
 
 from ingestion.spark.raw.iceberg import validate_target_table
 from ingestion.spark.raw.rdbms import reader
@@ -188,7 +189,15 @@ def managed_load(spark, args):
 
     from ingestion.meta import registry
 
-    connect = lambda: psycopg2.connect("")
+    def connect():
+        """Open the registry connection from the operator-provided DSN."""
+        dsn = os.environ.get("INGESTION_META_DSN")
+        if not dsn:
+            raise RuntimeError(
+                "INGESTION_META_DSN is not set: the incremental loader needs pg-meta credentials"
+            )
+        return psycopg2.connect(dsn)
+
     batch = _plan_batch(spark, args, connect)
     if batch["status"] == "SUCCEEDED":
         return
