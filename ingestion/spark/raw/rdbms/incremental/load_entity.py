@@ -14,9 +14,9 @@ import json
 import logging
 import os
 
+from ingestion.spark.raw import append
 from ingestion.spark.raw.iceberg import validate_target_table
 from ingestion.spark.raw.rdbms import reader
-from ingestion.spark.raw.rdbms import raw_append
 from ingestion.spark.raw.rdbms.incremental import window
 from ingestion.spark.raw.rdbms.reader import render_source_table
 from ingestion.sources.rdbms import jdbc
@@ -212,7 +212,8 @@ def managed_load(spark, args):
     try:
         source = window.read_window_frame(spark, args, batch, kind)
         try:
-            rows, observed = raw_append.append_raw(spark, args, source, kind)
+            rows, observed, clean = window.window_summary(source, kind)
+            append.append_raw(spark, args.target_table, clean, rows, args.process_id)
             watermark = batch["watermark_before"]
             watermark = positions.maximum(watermark, observed, kind)
             registry.finalize_batch(row_count=rows, observed_max=observed,

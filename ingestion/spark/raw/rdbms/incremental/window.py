@@ -31,3 +31,15 @@ def read_window_frame(spark, args, batch, kind):
     filters = window_filters(dialect, batch, kind, args.incremental_column)
     extra_select = position_select(dialect, kind, args.incremental_column)
     return reader.read_extract_frame(spark, args, filters=filters, extra_select=extra_select)
+
+
+def window_summary(frame, kind):
+    """One-pass count and typed position maximum; returns rows, observed, and the cleaned frame."""
+    import pyspark.sql.functions as F
+
+    summary = frame.agg(
+        F.count("*").alias("n"), F.max("__extract_position").alias("position")
+    ).first()
+    rows = int(summary["n"])
+    observed = positions.canonical(summary["position"], kind)
+    return rows, observed, frame.drop("__extract_position")

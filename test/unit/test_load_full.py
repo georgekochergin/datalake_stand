@@ -106,7 +106,7 @@ class TestManagedLoad(unittest.TestCase):
 
     def test_reads_whole_frame_and_appends(self):
         with patch.object(load_entity.reader, "read_extract_frame", return_value=self.source) as read_frame, patch.object(
-            load_entity.raw_append, "append_raw", return_value=(7, None)
+            load_entity.append, "append_raw"
         ) as append:
             load_entity.managed_load(self.spark, load_entity.parse_args(build_argv()))
         read_frame.assert_called_once()
@@ -114,12 +114,13 @@ class TestManagedLoad(unittest.TestCase):
         self.assertEqual(read_frame.call_args.kwargs, {})
         append.assert_called_once()
         self.assertIs(append.call_args.args[2], self.source)
-        self.assertIsNone(append.call_args.args[3])
+        self.assertIs(append.call_args.args[3], self.source.count.return_value)
+        self.assertEqual(append.call_args.args[4], 42)
         self.source.unpersist.assert_called_once()
 
     def test_append_failure_still_releases_frame(self):
         with patch.object(load_entity.reader, "read_extract_frame", return_value=self.source), patch.object(
-            load_entity.raw_append, "append_raw", side_effect=RuntimeError("boom")
+            load_entity.append, "append_raw", side_effect=RuntimeError("boom")
         ):
             with self.assertRaisesRegex(RuntimeError, "boom"):
                 load_entity.managed_load(self.spark, load_entity.parse_args(build_argv()))

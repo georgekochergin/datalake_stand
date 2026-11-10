@@ -296,8 +296,9 @@ DAG ingest__rdbms__bank__main
   client-mode) — исполнитель загрузки. [Полный срез](glossary.md#term-full) запускает
   `ingestion/spark/raw/rdbms/full/load_entity.py` (append без реестра),
   инкрементальная загрузка — `ingestion/spark/raw/rdbms/incremental/load_entity.py`
-  ([окна](glossary.md#term-window) с реестром pg-meta); оба читают источник и пишут [raw](glossary.md#term-raw) через общие модули
-  `reader.py` и `raw_append.py`. Во время
+  ([окна](glossary.md#term-window) с реестром pg-meta); оба читают источник через общий
+  `reader.py` с явными предикатами и пишут [raw](glossary.md#term-raw) writer-ом слоя
+  `append.py`; агрегация окна и колонка `__extract_position` — в `incremental/window.py`. Во время
   [исполнения](glossary.md#term-execution) оператор проверяет `source_type="rdbms"`, выбирает JDBC-диалект по
   `conn_type`, получает Connection источника и `process_id` из XCom.
   Параметры чтения и реквизиты источника, **включая пароль**, передаются
@@ -1156,7 +1157,9 @@ JDBC-метаданные типа: границы и `empty_at_plan` уже з�
 Загрузкой инкрементального [окна](glossary.md#term-window) управляет `managed_load()` в
 `ingestion/spark/raw/rdbms/incremental/load_entity.py`. Она вызывает
 реестр партий `ingestion/meta/registry.py` на общем helper транзакций пакета
-`ingestion/meta` и общие модули `reader.py`/`raw_append.py` для JDBC-чтения и записи [raw](glossary.md#term-raw). [Полный срез](glossary.md#term-full)
+`ingestion/meta`, читает окно через `incremental/window.py` (предикаты, позиция,
+count/max-агрегация) и общий `reader.py`, а пишет [raw](glossary.md#term-raw) через writer слоя
+`append.py`. [Полный срез](glossary.md#term-full)
 исполняет `full/load_entity.py` без обращений к реестру, снимочный поток —
 `incremental/load_act_snap.py` (раздел 7.7).
 **[Партия](glossary.md#term-batch)** — одна загрузка одной [сущности](glossary.md#term-entity) в одном [исполнении](glossary.md#term-execution) DAG-а; ключ —

@@ -376,9 +376,13 @@ class TestManagedLoad(unittest.TestCase):
         ), patch.object(
             load_entity, "_plan_batch", return_value=batch
         ), patch.object(load_entity.reader, "read_extract_frame", return_value=self.source) as read_frame, patch.object(
-            load_entity.raw_append,
+            load_entity.window,
+            "window_summary",
+            return_value=(appended[0], appended[1], self.source),
+        ), patch.object(
+            load_entity.append,
             "append_raw",
-            **({"side_effect": append_error} if append_error else {"return_value": appended}),
+            **({"side_effect": append_error} if append_error else {}),
         ) as append, patch.object(self.registry, "start_batch") as started, patch.object(
             self.registry, "finalize_batch"
         ) as finalize, patch.object(self.registry, "fail_batch") as failed:
@@ -412,8 +416,9 @@ class TestManagedLoad(unittest.TestCase):
             return_value=self.batch(lower_bound="10", lookback_size=3, reason="regular",
                                     watermark_before="10")
         ), patch.object(load_entity.reader, "read_extract_frame", return_value=self.source) as read_frame, patch.object(
-            load_entity.raw_append, "append_raw", return_value=(2, "10")
-        ), patch.object(self.registry, "start_batch"), patch.object(self.registry, "finalize_batch"):
+            load_entity.window, "window_summary", return_value=(2, "10", self.source)
+        ), patch.object(load_entity.append, "append_raw"), patch.object(
+            self.registry, "start_batch"), patch.object(self.registry, "finalize_batch"):
             load_entity.managed_load(self.spark, self.args())
         read_frame.assert_called_once()
 
@@ -433,7 +438,9 @@ class TestManagedLoad(unittest.TestCase):
         with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.object(
             load_entity, "_plan_batch", return_value=self.batch()
         ), patch.object(load_entity.reader, "read_extract_frame", return_value=self.source), patch.object(
-            load_entity.raw_append, "append_raw", side_effect=RuntimeError("secret boom")
+            load_entity.window, "window_summary", return_value=(5, "10", self.source)
+        ), patch.object(
+            load_entity.append, "append_raw", side_effect=RuntimeError("secret boom")
         ), patch.object(self.registry, "start_batch"), patch.object(self.registry, "fail_batch") as failed:
             with self.assertRaisesRegex(RuntimeError, "secret boom"):
                 load_entity.managed_load(self.spark, self.args())
@@ -448,7 +455,9 @@ class TestManagedLoad(unittest.TestCase):
         with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.object(
             load_entity, "_plan_batch", return_value=self.batch()
         ), patch.object(load_entity.reader, "read_extract_frame", return_value=self.source), patch.object(
-            load_entity.raw_append, "append_raw", side_effect=RuntimeError("secret boom")
+            load_entity.window, "window_summary", return_value=(5, "10", self.source)
+        ), patch.object(
+            load_entity.append, "append_raw", side_effect=RuntimeError("secret boom")
         ), patch.object(self.registry, "start_batch"), patch.object(
             self.registry, "fail_batch", side_effect=RuntimeError("meta down")
         ):

@@ -111,5 +111,36 @@ class TestReadWindowFrame(unittest.TestCase):
         )
 
 
+class TestWindowSummary(unittest.TestCase):
+    """One-pass count/max statistics over the window frame."""
+
+    def summary(self, values):
+        """Run window_summary with pyspark functions doubles; return (rows, observed, clean)."""
+        frame = MagicMock()
+        frame.agg.return_value.first.return_value = values
+        clean = MagicMock()
+        frame.drop.return_value = clean
+        functions = types.ModuleType("pyspark.sql.functions")
+        for name in ("count", "max"):
+            setattr(functions, name, MagicMock())
+        root = types.ModuleType("pyspark")
+        sql = types.ModuleType("pyspark.sql")
+        sql.functions = functions
+        root.sql = sql
+        with patch.dict(sys.modules, {"pyspark": root, "pyspark.sql": sql, "pyspark.sql.functions": functions}):
+            result = window.window_summary(frame, "bigint")
+        return result, frame, clean
+
+    def test_count_max_and_clean_frame(self):
+        (rows, observed, result_clean), frame, clean = self.summary({"n": 5, "position": "10"})
+        self.assertEqual((rows, observed), (5, "10"))
+        self.assertIs(result_clean, clean)
+        frame.drop.assert_called_once_with("__extract_position")
+
+    def test_empty_window(self):
+        (rows, observed, _), _, _ = self.summary({"n": 0, "position": None})
+        self.assertEqual((rows, observed), (0, None))
+
+
 if __name__ == "__main__":
     unittest.main()

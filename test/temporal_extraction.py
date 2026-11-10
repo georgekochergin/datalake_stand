@@ -534,7 +534,7 @@ def check_partitioning(spark, source_jdbc):
 def check_partitioned_load_path(spark, source_jdbc):
     """Run the real read-and-append path with a forced date or timestamp step."""
     reader = load_module("reader", "/opt/spark-jobs/raw/rdbms/reader.py")
-    raw_append = load_module("raw_append", "/opt/spark-jobs/raw/rdbms/raw_append.py")
+    append = load_module("append", "/opt/spark-jobs/raw/append.py")
     from ingestion.sources.rdbms import jdbc, jdbc_partitioning
     from ingestion.sources.rdbms import registry as dialects
 
@@ -561,14 +561,14 @@ def check_partitioned_load_path(spark, source_jdbc):
                 f"{source}: without keys, with a NOT NULL {column}, the heuristic"
                 f" picks the {expected_steps[source]} step")
         with patch.object(reader.jdbc, "key_metadata", return_value=forced):
-            frame = reader.read_extract_frame(spark, args, None, None)
+            frame = reader.read_extract_frame(spark, args)
             try:
-                rows, observed = raw_append.append_raw(spark, args, frame, None)
+                rows = frame.count()
+                append.append_raw(spark, args.target_table, frame, rows, args.process_id)
             finally:
                 frame.unpersist()
         total = jdbc_count(spark, args, reader.render_source_table(dialect, table))
         require(rows == total, f"{source}: partitioned full-slice append writes every source row")
-        require(observed is None, f"{source}: full-slice append reports no extraction position")
         schema_names = {field.name for field in spark.table(target).schema.fields}
         require(jdbc_partitioning.DAY_ALIAS not in schema_names,
                 f"{source}: the day alias never reaches the raw schema")
