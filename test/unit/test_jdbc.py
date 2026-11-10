@@ -8,7 +8,8 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from ingestion.sources.rdbms import jdbc, registry
-from ingestion.sources.rdbms.contracts import MetadataLocation, RdbmsDialect
+from ingestion.sources.rdbms.contracts import MetadataLocation
+from ingestion.sources.rdbms.dialects.base import RdbmsDialect
 
 ORACLE = registry.by_conn_type("oracle")
 

@@ -32,7 +32,7 @@
 ## 2. Подключение новой JDBC-СУБД
 
 Диалект описывает различия SQL и JDBC конкретной СУБД.
-Исходный контракт — [`RdbmsDialect`](../ingestion/sources/rdbms/contracts.py).
+Исходный контракт — [`RdbmsDialect`](../ingestion/sources/rdbms/dialects/base.py).
 Рабочие примеры — [`MssqlDialect`](../ingestion/sources/rdbms/dialects/mssql.py)
 и [`OracleDialect`](../ingestion/sources/rdbms/dialects/oracle.py).
 

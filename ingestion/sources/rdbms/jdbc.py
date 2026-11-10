@@ -10,7 +10,8 @@ import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from .contracts import normalize_type_name, parse_source_table
+from .contracts import parse_source_table
+from .dialects.base import normalize_type_name
 
 _LOGGER = logging.getLogger(__name__)
 

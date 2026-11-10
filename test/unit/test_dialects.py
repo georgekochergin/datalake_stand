@@ -10,9 +10,9 @@ from ingestion.sources.rdbms import positions, registry
 from ingestion.sources.rdbms.contracts import (
     ConnectionSpec,
     MetadataLocation,
-    RdbmsDialect,
     parse_source_table,
 )
+from ingestion.sources.rdbms.dialects.base import RdbmsDialect
 
 MSSQL = registry.by_conn_type("mssql")
 ORACLE = registry.by_conn_type("oracle")
@@ -298,6 +298,21 @@ class TestBaseDialectContract(unittest.TestCase):
 
     def test_position_expression_passthrough(self):
         self.assertEqual(RdbmsDialect().position_expression("[id]", "bigint"), "[id]")
+
+
+class TestContractsReExport(unittest.TestCase):
+    """contracts keeps the historical RdbmsDialect import path working."""
+
+    def test_rdbms_dialect_re_exported(self):
+        from ingestion.sources.rdbms import contracts
+
+        self.assertIs(contracts.RdbmsDialect, RdbmsDialect)
+
+    def test_unknown_attribute_rejected(self):
+        from ingestion.sources.rdbms import contracts
+
+        with self.assertRaises(AttributeError):
+            contracts.missing_symbol
 
 
 class TestParseSourceTable(unittest.TestCase):

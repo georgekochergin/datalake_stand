@@ -1,6 +1,6 @@
 """Static registry of RDBMS dialects by Airflow connection type and JDBC URL."""
 
-from .contracts import RdbmsDialect
+from .dialects.base import RdbmsDialect
 from .dialects.mssql import MssqlDialect
 from .dialects.oracle import OracleDialect
 

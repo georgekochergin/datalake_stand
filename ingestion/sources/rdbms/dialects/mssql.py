@@ -1,8 +1,8 @@
 """MSSQL dialect adapter: bracket quoting and datetime2/datetimeoffset positions."""
 
 from .. import positions
-from ..contracts import (
-    ConnectionSpec,
+from ..contracts import ConnectionSpec
+from .base import (
     RdbmsDialect,
     decimal_kind,
     fractional_kind,
