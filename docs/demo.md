@@ -15,6 +15,12 @@ Trino/pg-meta → партиции в silo → устойчивость к эв�
 - [Шаг 3. Генерация и запуск загрузок](#шаг-3-генерация-dag-ов-загрузки-имитация-cicd-и-запуск)
 - [Шаг 4. Результаты в Trino и pg-meta](#шаг-4-результат-в-trino-dbeaver-и-артефакты-в-pg-meta)
 - [Шаг 5. Повторная загрузка](#шаг-5-повторный-раунд-полный-срез-против-инкремента)
+  - [Подготовка показа pg-meta](#51-подготовка-показа-pg-meta)
+  - [Новый запуск без изменения источника](#52-новый-запуск-без-изменения-источника)
+  - [Clear только успешной load-задачи](#53-clear-только-успешной-load-задачи)
+  - [Полный Clear существующего запуска](#54-полный-clear-существующего-запуска)
+  - [Новая загрузка после обновления источника](#55-новая-загрузка-после-обновления-источника)
+  - [Что объяснить про повтор после ошибки](#56-что-объяснить-про-повтор-после-ошибки)
 - [Шаг 6. Файлы в silo](#шаг-6-партиционирование-в-консоли-silo)
 - [Шаг 7. Изменение схемы источника](#шаг-7-стресс-тест-эволюция-схемы-источника)
 - [Шаг 8. Проверка изменённой схемы в raw](#шаг-8-итоги-эволюции-схемы-в-raw-и-артефакты)
@@ -372,9 +378,171 @@ WHERE entity_fqn = 'retail_bank.transactions' ORDER BY process_id;
 **Что рассказать:** у второй [партии](glossary.md#term-batch) `reason=regular`: окно
 `lower_bound < _batch_id <= upper_bound` заморожено до чтения, `row_count` —
 дельта, `watermark_after` продвинулся только после успешной записи.
-Дополнительно можно показать no-op: запустить ingest-`main` банка ещё раз без
-обновления источника — у `transactions` не появится новой [порции](glossary.md#term-portion) (пустое окно
-закрывается без чтения, `attempt_count=0`).
+Следующие подразделы показывают разные варианты повторного запуска.
+Для них достаточно банка: `ingest__rdbms__bank__main`.
+Дополнительное время демонстрации — ориентировочно 10–15 минут, в зависимости от ресурсов стенда.
+
+### 5.1. Подготовка показа pg-meta
+
+Дождитесь завершения всех загрузок. Не меняйте источник между действиями,
+пока сценарий явно этого не потребует. Не запускайте одновременно другие
+загрузки `retail_bank.transactions`.
+
+Откройте рядом Airflow, pg-meta и Trino в DBeaver.
+В pg-meta выполните три запроса и сохраните результаты для сравнения:
+
+```sql
+SELECT process_id, run_id, reason, status, attempt_count, row_count,
+       watermark_before, lower_bound, lower_bound_op, upper_bound,
+       observed_max, watermark_after, expected_revision, created_at, finished_at
+FROM ingestion.incremental_batches
+WHERE source_id = 'bank' AND entity_fqn = 'retail_bank.transactions'
+ORDER BY process_id DESC LIMIT 10;
+
+SELECT incremental_column, incremental_type, watermark, revision,
+       last_process_id, updated_at
+FROM ingestion.incremental_state
+WHERE source_id = 'bank' AND entity_fqn = 'retail_bank.transactions';
+
+SELECT process_id, run_id, status, ts
+FROM ingestion.airflow_dagruns_log
+WHERE dag_id = 'ingest__rdbms__bank__main'
+ORDER BY id DESC LIMIT 20;
+```
+
+Для проверки строк в Trino:
+
+```sql
+SELECT __process_id, count(*) AS rows, count(DISTINCT __load_dttm) AS write_attempts
+FROM raw.bank.retail_bank__transactions
+GROUP BY __process_id ORDER BY __process_id DESC;
+```
+
+**Что показывают поля:**
+
+- `run_id` — какой [DagRun](glossary.md#term-dagrun) смотрим в Airflow.
+- `process_id` — номер [исполнения](glossary.md#term-execution), а не идентификатор процесса ОС.
+- Одна строка `incremental_batches` — одна [партия загрузки](glossary.md#term-batch).
+- `attempt_count` — сколько раз началось чтение [партии](glossary.md#term-batch).
+  Это не номер попытки задачи в Airflow и не число вызовов `spark-submit`.
+- `row_count` — число строк успешной [попытки](glossary.md#term-attempt), не вся история записей в озере.
+- `revision` — версия состояния: растёт при успешной фиксации новой [партии](glossary.md#term-batch), даже без новых строк.
+
+Короткая памятка ожидаемых результатов:
+
+| Действие | `run_id` | `process_id` | Реестр и данные |
+|---|---|---|---|
+| Trigger без новых данных | Новый | Новый | Новая успешная [партия](glossary.md#term-batch), `row_count=0`, без новых строк |
+| Clear только успешной `load` | Прежний | Прежний | Та же успешная [партия](glossary.md#term-batch), без изменений состояния и данных |
+| Clear генератора и всех следующих задач | Прежний | Новый | Новая [партия](glossary.md#term-batch), старые записи сохраняются |
+| Trigger после обновления источника | Новый | Новый | Новая [партия](glossary.md#term-batch), новые строки и продвижение [watermark](glossary.md#term-watermark) |
+
+### 5.2. Новый запуск без изменения источника
+
+1. **Не запускайте** `update_source_bank`.
+2. В Airflow нажмите Trigger для `ingest__rdbms__bank__main`.
+   Это новый [DagRun](glossary.md#term-dagrun), не перезапуск старого.
+3. Дождитесь успеха. Повторите запросы подраздела 5.1.
+4. Запишите новые `run_id` и `process_id`: они понадобятся для сравнения.
+
+**Ожидаемый результат для `transactions`:**
+
+- Добавлена [партия](glossary.md#term-batch) с `reason=regular`, `status=SUCCEEDED`.
+- `lower_bound = upper_bound`, `lower_bound_op='>'`.
+  На демо-наборе [lookback](glossary.md#term-lookback) по `_batch_id` равен нулю.
+- `attempt_count=0`, `row_count=0`, `observed_max=NULL`.
+- [Watermark](glossary.md#term-watermark) не изменился. `revision` выросла на 1,
+  `last_process_id` указывает на новый номер.
+- В Trino нет строк с новым `__process_id` для `transactions`.
+
+**Что рассказать:** система зафиксировала успешную проверку отсутствия новых данных.
+Spark-приложение запускается, но чтение строк пустого [окна](glossary.md#term-window)
+и запись Iceberg пропускаются. Нулевой `attempt_count` не означает, что задача не выполнялась.
+В том же DAG таблица `deals` загружается [полным срезом](glossary.md#term-full)
+и дописывается заново — её не используем как пример отсутствия повторной записи.
+
+### 5.3. Clear только успешной load-задачи
+
+1. Откройте успешный запуск **второго раунда с данными** из начала шага 5.
+   Выберите его по `run_id`, а не просто последний запуск.
+2. Выберите задачу `ingest_group.load_retail_bank__transactions.load`.
+3. Выполните Clear только этой задачи. Не включайте upstream, downstream,
+   другие запуски или задачу `generate_process_id`.
+4. Дождитесь повторного успеха задачи и откройте её новый лог.
+5. Повторите запросы подраздела 5.1. Сравните запись выбранной [партии](glossary.md#term-batch).
+
+**Ожидаемый результат:**
+
+- `run_id` и `process_id` прежние. Новой [партии](glossary.md#term-batch) нет.
+- Загрузчик находит `SUCCEEDED` и выводит сохранённый результат в лог.
+  Строки источника не перечитываются, Iceberg не дополняется.
+- `attempt_count`, `row_count`, `finished_at` выбранной [партии](glossary.md#term-batch) не изменяются.
+- Состояние `incremental_state`, включая `revision`, не меняется.
+  Если после выбранного запуска уже была другая загрузка, `last_process_id`
+  остаётся номером той более поздней загрузки.
+- Число строк и отметок записи в Trino не изменилось.
+
+Журнал событий DAG-а может получить новое событие завершения при повторном переходе в успех.
+Это не новая [партия](glossary.md#term-batch): журналы событий и реестр загрузок показывают разные факты.
+
+### 5.4. Полный Clear существующего запуска
+
+1. Откройте последний успешный запуск без новых данных из подраздела 5.2.
+2. Очистите **все его задачи**, включая `generate_process_id`, `activate_source`
+   и обе группы загрузки. В подтверждении проверьте набор задач и единственный выбранный запуск.
+3. Дождитесь успеха и повторите запросы подраздела 5.1.
+
+**Ожидаемый результат:**
+
+- `run_id` остался прежним, но `generate_process_id` выделил новый `process_id`.
+- Добавлена новая [партия](glossary.md#term-batch). Старая запись с тем же `run_id` сохранена.
+- Источник не менялся: `row_count=0`, `attempt_count=0`, [watermark](glossary.md#term-watermark) прежний.
+- `revision` выросла на 1, `last_process_id` обновился.
+- В журнале DAG-а видны события с разными `process_id` для одного `run_id`.
+- У `transactions` новых строк нет. У `deals` добавлен ещё один [полный срез](glossary.md#term-full).
+
+**Что рассказать:** [Clear](glossary.md#term-clear) не удаляет историю pg-meta и данные озера.
+Повтор генератора создаёт новое [исполнение](glossary.md#term-execution)
+внутри прежнего [DagRun](glossary.md#term-dagrun).
+
+### 5.5. Новая загрузка после обновления источника
+
+1. Запустите `update_source_bank` и дождитесь успеха.
+2. Через Trigger создайте новый запуск `ingest__rdbms__bank__main`.
+3. После успеха повторите запросы подраздела 5.1.
+
+**Ожидаемый результат для `transactions` без сбоев:**
+
+- Новые `run_id`, `process_id` и [партия](glossary.md#term-batch) с `reason=regular`.
+- Нижняя граница равна предыдущему [watermark](glossary.md#term-watermark),
+  верхняя — максимуму `_batch_id` при планировании.
+- `attempt_count=1`, `row_count>0`, `status=SUCCEEDED`.
+- `watermark_after` продвинулся до фактически прочитанного максимума `observed_max`.
+- `revision` выросла на 1, `last_process_id` указывает на новую загрузку.
+- В Trino появилась новая [порция](glossary.md#term-portion) с этим `__process_id`.
+
+Это обычный новый запуск: ручной Trigger здесь заменяет ожидание расписания.
+Настройки манифеста менять не требуется. Все числовые номера берите из своих результатов,
+а не из заранее заданного примера.
+
+### 5.6. Что объяснить про повтор после ошибки
+
+Предыдущие действия безопасно показывают повтор уже **успешной** загрузки.
+Поведение незавершённой [партии](glossary.md#term-batch) отличается:
+
+- [Retry](glossary.md#term-retry) или [Clear](glossary.md#term-clear) `load` без повтора генератора
+  использует тот же `process_id` и сохранённые границы [окна](glossary.md#term-window).
+- При начале чтения `attempt_count` увеличивается. Источник между [попытками](glossary.md#term-attempt) может измениться,
+  даже если границы прежние.
+- Если строки уже записались в Iceberg, а фиксация успеха в pg-meta не состоялась,
+  повтор может записать их ещё раз с тем же `__process_id` и новым `__load_dttm`.
+  Это гарантия [at-least-once](glossary.md#term-atleast), не отсутствие дублей.
+- До повтора нужно убедиться, что Spark-приложение прежней [попытки](glossary.md#term-attempt) остановлено.
+  Изменение статуса задачи в UI само по себе этого не подтверждает.
+
+Не имитируйте сбой удалением данных, ручной сменой статусов реестра или остановкой
+общих сервисов во время обычного демо. Сценарий выше не проверяет восстановление
+после ошибки: этот случай здесь объясняется, а не воспроизводится.
 
 ## Шаг 6. Партиционирование в консоли silo
 
