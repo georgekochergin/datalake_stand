@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from ingestion.generator.manifest import (
+    IncrementalEntityConfig,
     PipelineManifest,
     SourceConfig,
     load_pipeline,
@@ -92,7 +93,7 @@ def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str
         f'                fqn={json.dumps(entity.fqn)},',
         f'                target_table="{target}",',
     ]
-    if entity.incremental_config is not None:
+    if isinstance(entity, IncrementalEntityConfig):
         lines.append(f"                incremental_config={entity.incremental_config!r},")
     lines.extend(
         [
@@ -305,7 +306,7 @@ def generate_all(
             if target in targets:
                 raise ValueError(f"target collision {target}: {targets[target]} and {path}")
             targets[target] = path
-            if entity.incremental_column:
+            if isinstance(entity, IncrementalEntityConfig):
                 snapshot_target = resolve_snapshot_fully_qualified(source.source_id, entity.fqn)
                 if snapshot_target in targets:
                     raise ValueError(
@@ -314,7 +315,7 @@ def generate_all(
                 targets[snapshot_target] = path
         generated[name] = generate_dag_source(source, pipeline, path.stem, settings.num_partitions)
         for entity in pipeline.entities:
-            if not entity.incremental_column:
+            if not isinstance(entity, IncrementalEntityConfig):
                 continue
             snapshot_name = f"{snapshot_dag_id(source, path.stem, entity.fqn)}.py"
             if snapshot_name in owners:

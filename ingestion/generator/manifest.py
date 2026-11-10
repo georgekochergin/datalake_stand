@@ -55,16 +55,31 @@ class ActSnapConfig(DagConfig):
 
 @dataclass(frozen=True)
 class EntityConfig:
-    """Configuration of a single loaded entity inside a pipeline."""
+    """Common configuration of a single loaded entity inside a pipeline."""
 
     fqn: str
     target_table: str
-    incremental_column: str | None
     jdbc_partitioning: bool = True
     pool: str = "default_pool"
     pool_slots: int = 1
+
+
+@dataclass(frozen=True)
+class FullEntityConfig(EntityConfig):
+    """Entity loaded as a full source slice without the incremental registry."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class IncrementalEntityConfig(EntityConfig):
+    """Entity loaded as a fixed incremental window through the pg-meta registry."""
+
+    incremental_config: dict
     act_snap: ActSnapConfig = field(default_factory=ActSnapConfig)
-    incremental_config: dict | None = None
+
+    @property
+    def incremental_column(self) -> str:
+        """The position column, taken from the single incremental contract."""
+        return self.incremental_config["contract"]["source_column"]
 
 
 @dataclass(frozen=True)
@@ -231,7 +246,7 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
         position: 1-based position in the entities list for error messages.
 
     Returns:
-        EntityConfig with fully validated fields.
+        The concrete EntityConfig subclass with fully validated fields.
 
     Raises:
         ValueError: If the entity is invalid.
@@ -251,7 +266,6 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
     if not isinstance(fqn, str) or not fqn:
         raise ValueError(f"entity #{position}: fqn must be a non-empty string")
 
-    incremental_column = None
     lookback_size = 0
     lookback_unit = None
     act_snap = ActSnapConfig()
@@ -288,15 +302,17 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
 
     spark_config, airflow_config = _parse_load_options(entity, f"entity {fqn!r}")
 
-    return EntityConfig(
+    common = dict(
         fqn=fqn,
         target_table=naming.resolve_target_table_name(fqn),
-        incremental_column=incremental_column,
         jdbc_partitioning=spark_config.jdbc_partitioning,
         pool=airflow_config.pool,
         pool_slots=airflow_config.pool_slots,
-        act_snap=act_snap,
-        incremental_config=incremental_config,
+    )
+    if incremental_config is None:
+        return FullEntityConfig(**common)
+    return IncrementalEntityConfig(
+        **common, incremental_config=incremental_config, act_snap=act_snap
     )
 
 

@@ -17,19 +17,20 @@ from ingestion.generator.generate_dags import (
     snapshot_asset_uri,
     snapshot_dag_id,
 )
-from ingestion.generator.manifest import ActSnapConfig, AirflowConfig, SparkConfig, EntityConfig, PipelineManifest, SourceConfig
+from ingestion.generator.manifest import ActSnapConfig, AirflowConfig, FullEntityConfig, IncrementalEntityConfig, SparkConfig, PipelineManifest, SourceConfig
 from ingestion.generator.naming import snapshot_alias
 
 BANK = SourceConfig(source_id="bank", type="rdbms", airflow_conn_id="bank_source")
+BATCH_CONFIG = {"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 0, "unit": None}}
 PIPELINE = PipelineManifest(
     source_id="bank",
     schedule=None,
     catchup=False,
     tags=("ingestion", "bank"),
     entities=(
-        EntityConfig("retail_bank.clients", "retail_bank__clients", None),
-        EntityConfig("retail_bank.transactions", "retail_bank__transactions", "_batch_id",
-                     incremental_config={"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 12, "unit": None}}),
+        FullEntityConfig("retail_bank.clients", "retail_bank__clients"),
+        IncrementalEntityConfig("retail_bank.transactions", "retail_bank__transactions",
+                            incremental_config={"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 12, "unit": None}}),
     ),
 )
 
@@ -104,7 +105,7 @@ class TestGenerateDagSource(unittest.TestCase):
             schedule="30 2 * * *",
             catchup=False,
             tags=(),
-            entities=(EntityConfig("retail_bank.clients", "retail_bank__clients", None),),
+            entities=(FullEntityConfig("retail_bank.clients", "retail_bank__clients"),),
         )
         self.assertIn("schedule='30 2 * * *'", generate_dag_source(BANK, pipeline))
 
@@ -114,8 +115,8 @@ class TestGenerateDagSource(unittest.TestCase):
             schedule=None,
             catchup=False,
             tags=(),
-            entities=(EntityConfig("retail_bank.transactions", "retail_bank__transactions",
-                                   "_batch_id", incremental_config={"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 0, "unit": None}}),),
+            entities=(IncrementalEntityConfig("retail_bank.transactions", "retail_bank__transactions",
+                                   incremental_config=BATCH_CONFIG),),
         )
         source = generate_dag_source(BANK, pipeline)
         self.assertIn("'lookback': {'size': 0, 'unit': None}", source)
@@ -150,9 +151,9 @@ SNAPSHOT_PIPELINE = PipelineManifest(
     catchup=False,
     tags=("ingestion", "bank"),
     entities=(
-        EntityConfig(
-            "retail_bank.transactions", "retail_bank__transactions", "_batch_id",
-            pool="ingest_loads", pool_slots=2,
+        IncrementalEntityConfig(
+            "retail_bank.transactions", "retail_bank__transactions",
+            incremental_config=BATCH_CONFIG, pool="ingest_loads", pool_slots=2,
         ),
     ),
 )
@@ -184,8 +185,9 @@ class TestGenerateSnapshotDagSource(unittest.TestCase):
         )
 
     def test_schedule_literal_rendered(self):
-        entity = EntityConfig(
-            "retail_bank.transactions", "retail_bank__transactions", "_batch_id",
+        entity = IncrementalEntityConfig(
+            "retail_bank.transactions", "retail_bank__transactions",
+            incremental_config=BATCH_CONFIG,
             act_snap=ActSnapConfig(schedule="30 2 * * *", tags=("nightly",)),
         )
         rendered = generate_snapshot_dag_source(BANK, SNAPSHOT_PIPELINE, entity, "main")
@@ -208,8 +210,9 @@ class TestGenerateSnapshotDagSource(unittest.TestCase):
         self.assertIn("pool_slots=1", self.source)
 
     def test_pool_override(self):
-        entity = EntityConfig(
-            "retail_bank.transactions", "retail_bank__transactions", "_batch_id",
+        entity = IncrementalEntityConfig(
+            "retail_bank.transactions", "retail_bank__transactions",
+            incremental_config=BATCH_CONFIG,
             pool="ingest_loads", pool_slots=2,
             jdbc_partitioning=True,
             act_snap=ActSnapConfig(airflow=AirflowConfig("snapshot_loads", 1),

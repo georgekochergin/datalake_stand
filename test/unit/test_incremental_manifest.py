@@ -24,8 +24,7 @@ class TestIncrementalManifest(unittest.TestCase):
 
     def test_snapshot_defaults(self):
         entity = self.load_entity({})
-        self.assertIsNone(entity.incremental_column)
-        self.assertIsNone(entity.incremental_config)
+        self.assertIsInstance(entity, manifest.FullEntityConfig)
 
     def test_contract_type_required_and_strict(self):
         for contract in ({"source_column": "id"}, {"source_column": "id", "position_type": "int"},

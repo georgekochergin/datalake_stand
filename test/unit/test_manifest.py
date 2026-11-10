@@ -111,7 +111,7 @@ class TestLoadPipeline(unittest.TestCase):
         self.assertEqual(pipeline.tags, ("ingestion", "bank"))
         self.assertEqual(len(pipeline.entities), 2)
         self.assertEqual(pipeline.entities[0].target_table, "retail_bank__clients")
-        self.assertIsNone(pipeline.entities[0].incremental_column)
+        self.assertIsInstance(pipeline.entities[0], manifest.FullEntityConfig)
         self.assertEqual(pipeline.entities[1].incremental_column, "transaction_id")
         self.assertEqual(
             pipeline.entities[1].incremental_config["lookback"], {"size": 0, "unit": None},
@@ -397,7 +397,7 @@ class TestValidatePipeline(unittest.TestCase):
             schedule="0 2 * * *",
             catchup=False,
             tags=("ingestion",),
-            entities=(manifest.EntityConfig("retail_bank.clients", "retail_bank__clients", None),),
+            entities=(manifest.FullEntityConfig("retail_bank.clients", "retail_bank__clients"),),
         )
         manifest.validate_pipeline(sources, pipeline)
 
@@ -408,7 +408,7 @@ class TestValidatePipeline(unittest.TestCase):
             schedule=None,
             catchup=False,
             tags=(),
-            entities=(manifest.EntityConfig("trading_core.clients", "trading_core__clients", None),),
+            entities=(manifest.FullEntityConfig("trading_core.clients", "trading_core__clients"),),
         )
         with self.assertRaises(ValueError):
             manifest.validate_pipeline(sources, pipeline)
