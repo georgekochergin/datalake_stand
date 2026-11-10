@@ -417,7 +417,7 @@ SQL также встроен в Python, но используется по-ра
 
 - Пакет `ingestion/meta/`: статические запросы PostgreSQL, включая многострочные INSERT/UPDATE реестра [инкремента](glossary.md#term-increment); значения передаются отдельно через DB-API-параметры `%s`. Транзакции, порядок блокировок и [CAS revision](glossary.md#term-cas) управляются Python-кодом.
 - `ingestion/spark/raw/rdbms/reader.py`: `build_extract_query` собирает вложенный SELECT с проекциями и необязательным WHERE; `read_bounds` строит MIN/MAX по запросу чтения.
-- `ingestion/iceberg.py::build_create_table_sql` и `ingestion/spark/raw/rdbms/incremental/load_act_snap.py::build_rtas_sql`: составные Spark SQL DDL для создания [raw](glossary.md#term-raw)-таблицы и атомарной замены актуального снимка.
+- `ingestion/spark/raw/iceberg.py::build_create_table_sql` и `ingestion/spark/raw/rdbms/incremental/load_act_snap.py::build_rtas_sql`: составные Spark SQL DDL для создания [raw](glossary.md#term-raw)-таблицы и атомарной замены актуального снимка.
 - `ingestion/sources/rdbms/dialects/mssql.py` и `oracle.py`: короткие диалектные выражения, quoting идентификаторов и точное представление временных позиций. Это не самостоятельные запросы.
 
 #### Проблема

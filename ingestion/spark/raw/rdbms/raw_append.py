@@ -1,6 +1,6 @@
 """Shared raw-table append for the window and full-slice loader applications."""
 
-from ingestion.iceberg import (
+from ingestion.spark.raw.iceberg import (
     CATALOG,
     METADATA_DTTM,
     METADATA_PID,

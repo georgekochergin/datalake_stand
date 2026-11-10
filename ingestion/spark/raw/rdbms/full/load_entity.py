@@ -9,7 +9,7 @@ execution is the only load path; no pg-meta state is planned or finalized.
 import argparse
 import logging
 
-from ingestion.iceberg import validate_target_table
+from ingestion.spark.raw.iceberg import validate_target_table
 from ingestion.spark.raw.rdbms import reader
 from ingestion.spark.raw.rdbms import raw_append
 

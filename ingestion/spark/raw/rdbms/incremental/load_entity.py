@@ -13,7 +13,7 @@ import argparse
 import json
 import logging
 
-from ingestion.iceberg import validate_target_table
+from ingestion.spark.raw.iceberg import validate_target_table
 from ingestion.spark.raw.rdbms import reader
 from ingestion.spark.raw.rdbms import raw_append
 from ingestion.spark.raw.rdbms.reader import render_source_table

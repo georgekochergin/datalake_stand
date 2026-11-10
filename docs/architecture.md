@@ -401,7 +401,7 @@ TBLPROPERTIES ('write.spark.accept-any-schema'='true')
 
 Namespace проверяется при каждой исполняемой загрузке, таблица создаётся
 только при отсутствии. Location задаётся явно по шаблону
-`s3://datalake/raw/<source_id>/<имя_таблицы>` (`ingestion/iceberg.py`).
+`s3://datalake/raw/<source_id>/<имя_таблицы>` (`ingestion/spark/raw/iceberg.py`).
 
 LOCATION задаётся явно, без UUID в имени каталога. Одного выбора
 `NessieCatalog` для такого пути недостаточно. Создание через REST в используемой

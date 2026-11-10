@@ -180,7 +180,7 @@ ClickHouse, Greenplum и Teradata сейчас не зарегистрирова
 
 Добавление следующего слоя не должно менять смысл уже загруженного
 [raw](glossary.md#term-raw) или добавлять бизнес-преобразования в его reader и writer.
-Существующий [`ingestion/iceberg.py`](../ingestion/iceberg.py) описывает DDL
+Существующий [`ingestion/spark/raw/iceberg.py`](../ingestion/spark/raw/iceberg.py) описывает DDL
 таблиц [raw](glossary.md#term-raw), а не универсальную конфигурацию всех слоёв.
 
 ## 5. Порядок разработки

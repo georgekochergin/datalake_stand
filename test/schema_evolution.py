@@ -3,7 +3,7 @@
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
-from ingestion import iceberg
+from ingestion.spark.raw import iceberg
 
 
 def main():

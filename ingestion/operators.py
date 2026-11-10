@@ -8,7 +8,7 @@ from airflow.sdk import BaseHook, BaseOperator
 from airflow.sdk.exceptions import AirflowSkipException
 
 from ingestion import meta
-from ingestion.iceberg import validate_target_table
+from ingestion.spark.raw.iceberg import validate_target_table
 from ingestion.sources.rdbms import registry as rdbms_registry
 from ingestion.sources.rdbms.contracts import ConnectionSpec
 from ingestion.sources.rdbms.incremental_config import validate as validate_incremental_config

@@ -13,7 +13,7 @@ import argparse
 import logging
 from datetime import datetime, timezone
 
-from ingestion.iceberg import (
+from ingestion.spark.raw.iceberg import (
     CATALOG,
     METADATA_DTTM,
     METADATA_PID,

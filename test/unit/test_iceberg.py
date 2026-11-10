@@ -1,4 +1,4 @@
-"""Unit tests for the target-side Iceberg DDL helpers (ingestion.iceberg)."""
+"""Unit tests for the target-side Iceberg DDL helpers (ingestion.spark.raw.iceberg)."""
 
 import sys
 import types
@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from ingestion import iceberg
+from ingestion.spark.raw import iceberg
 
 
 def fake_pyspark_types():
