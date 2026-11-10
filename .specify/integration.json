@@ -7,11 +7,11 @@
   ],
   "integration_settings": {
     "opencode": {
-      "script": "sh",
+      "script": "bash",
       "invoke_separator": "."
     },
     "zcode": {
-      "script": "sh",
+      "script": "bash",
       "invoke_separator": "-"
     }
   },
