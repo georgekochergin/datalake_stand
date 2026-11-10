@@ -518,7 +518,8 @@ def validate_manifests_and_dags() -> None:
         pipeline = yaml.safe_load(pipeline_path.read_text(encoding="utf-8"))
         entities = pipeline.get("entities", [])
         transactions = [entity for entity in entities if entity.get("fqn", "").endswith(".transactions")]
-        check(source + " transactions uses structured incremental config", len(transactions) == 1 and transactions[0].get("incremental", {}).get("source_column") == "_batch_id", True)
+        expected_type = "bigint" if source == "bank" else "decimal(19,0)"
+        check(source + " transactions uses structured incremental config", len(transactions) == 1 and transactions[0].get("incremental", {}).get("contract") == {"source_column": "_batch_id", "position_type": expected_type}, True)
         check(source + " main has no legacy incremental keys", all("incremental_column" not in entity and "incremental_lookback" not in entity for entity in entities), True)
 
     generated = generate_all(

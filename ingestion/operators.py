@@ -1,6 +1,7 @@
 """Airflow operators for the raw-layer ingestion framework."""
 
 from functools import partial
+import json
 
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 from airflow.sdk import BaseHook, BaseOperator
@@ -10,6 +11,7 @@ from ingestion import meta
 from ingestion.iceberg import validate_target_table
 from ingestion.sources.rdbms import registry as rdbms_registry
 from ingestion.sources.rdbms.contracts import ConnectionSpec
+from ingestion.sources.rdbms.incremental_config import validate as validate_incremental_config
 
 
 def _meta_connect(pg_conn_id: str = "ingestion_meta"):
@@ -239,10 +241,10 @@ class IngestActSnapOperator(SparkSubmitOperator):
             self.target_table,
             "--process-id",
             str(process_id),
-            "--num-partitions",
-            str(self.num_partitions),
         ]
-        if not self.jdbc_partitioning:
+        if self.jdbc_partitioning:
+            application_args += ["--num-jdbc-partitions", str(self.num_partitions)]
+        else:
             application_args.append("--no-jdbc-partitioning")
         self.application_args = application_args
         super().execute(context)
@@ -257,29 +259,24 @@ class IngestAppendOperator(SparkSubmitOperator):
         airflow_conn_id: str,
         fqn: str,
         target_table: str,
-        incremental_column: str | None = None,
+        incremental_config: dict | None = None,
         pg_conn_id: str = "ingestion_meta",
         source_type: str = "rdbms",
         jdbc_partitioning: bool = True,
         num_partitions: int = 4,
-        lookback_size: int = 0,
-        lookback_unit: str | None = None,
-        lookback_specified: bool = False,
         **kwargs,
     ):
         if not isinstance(source_type, str):
             raise ValueError("source_type must be a string")
-        if type(lookback_size) is not int or lookback_size < 0:
-            raise ValueError("lookback_size must be a nonnegative integer")
-        if type(lookback_specified) is not bool:
-            raise ValueError("lookback_specified must be a boolean")
+        if incremental_config is not None:
+            validate_incremental_config(incremental_config)
         if type(jdbc_partitioning) is not bool:
             raise ValueError("jdbc_partitioning must be a boolean")
         if type(num_partitions) is not int or num_partitions <= 0:
             raise ValueError("num_partitions must be a positive integer")
         application = (
             "/opt/spark-jobs/raw/rdbms/incremental/load_entity.py"
-            if incremental_column
+            if incremental_config is not None
             else "/opt/spark-jobs/raw/rdbms/full/load_entity.py"
         )
         super().__init__(
@@ -292,14 +289,11 @@ class IngestAppendOperator(SparkSubmitOperator):
         self.airflow_conn_id = airflow_conn_id
         self.fqn = fqn
         self.target_table = target_table
-        self.incremental_column = incremental_column
+        self.incremental_config = incremental_config
         self.pg_conn_id = pg_conn_id
         self.source_type = source_type
         self.jdbc_partitioning = jdbc_partitioning
         self.num_partitions = num_partitions
-        self.lookback_size = lookback_size
-        self.lookback_unit = lookback_unit
-        self.lookback_specified = lookback_specified
         if self.on_failure_callback is None:
             self.on_failure_callback = partial(
                 log_task_failed,
@@ -330,10 +324,10 @@ class IngestAppendOperator(SparkSubmitOperator):
             self.target_table,
             "--process-id",
             str(process_id),
-            "--num-partitions",
-            str(self.num_partitions),
         ]
-        if not self.jdbc_partitioning:
+        if self.jdbc_partitioning:
+            application_args += ["--num-jdbc-partitions", str(self.num_partitions)]
+        else:
             application_args.append("--no-jdbc-partitioning")
         dag_run = context["dag_run"]
         meta = BaseHook.get_connection(self.pg_conn_id)
@@ -341,12 +335,7 @@ class IngestAppendOperator(SparkSubmitOperator):
                              PGDATABASE=meta.schema, PGUSER=meta.login, PGPASSWORD=meta.password)
         application_args += ["--source-id", self.source_id, "--dag-id", dag_run.dag_id,
                              "--run-id", dag_run.run_id]
-        if self.incremental_column:
-            application_args += ["--incremental-column", self.incremental_column,
-                                 "--lookback-size", str(self.lookback_size)]
-            if self.lookback_unit:
-                application_args += ["--lookback-unit", self.lookback_unit]
-            if self.lookback_specified:
-                application_args.append("--lookback-given")
+        if self.incremental_config is not None:
+            application_args += ["--incremental-config", json.dumps(self.incremental_config)]
         self.application_args = application_args
         super().execute(context)

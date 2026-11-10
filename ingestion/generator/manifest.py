@@ -63,10 +63,8 @@ class EntityConfig:
     jdbc_partitioning: bool = True
     pool: str = "default_pool"
     pool_slots: int = 1
-    lookback_size: int = 0
-    lookback_unit: str | None = None
-    lookback_specified: bool = False
     act_snap: ActSnapConfig = field(default_factory=ActSnapConfig)
+    incremental_config: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -256,11 +254,15 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
     incremental_column = None
     lookback_size = 0
     lookback_unit = None
-    lookback_specified = False
     act_snap = ActSnapConfig()
+    incremental_config = None
     if "incremental" in entity:
-        incremental = _strict_object(entity["incremental"], {"source_column", "lookback", "act_snap"}, "incremental")
-        incremental_column = incremental.get("source_column")
+        from ingestion.sources.rdbms.incremental_config import validate
+        from ingestion.sources.rdbms import positions
+
+        incremental = _strict_object(entity["incremental"], {"contract", "lookback", "act_snap"}, "incremental")
+        contract = _strict_object(incremental.get("contract"), {"source_column", "position_type"}, "incremental.contract")
+        incremental_column = contract.get("source_column")
         if not isinstance(incremental_column, str) or not _COLUMN_PATTERN.fullmatch(incremental_column):
             raise ValueError("incremental.source_column must be a lowercase identifier")
         if "lookback" in incremental:
@@ -273,9 +275,14 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
                 raise ValueError("lookback.unit must be h or d")
             if not lookback_size:
                 lookback_unit = None
-            lookback_specified = True
         else:
-            lookback_size, lookback_unit = temporal_default
+            lookback_size, lookback_unit = positions.resolve_lookback(
+                contract.get("position_type"), *temporal_default, False
+            )
+        incremental_config = validate({
+            "contract": contract,
+            "lookback": {"size": lookback_size, "unit": lookback_unit},
+        })
         if "act_snap" in incremental:
             act_snap = _parse_act_snap(incremental["act_snap"])
 
@@ -288,10 +295,8 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
         jdbc_partitioning=spark_config.jdbc_partitioning,
         pool=airflow_config.pool,
         pool_slots=airflow_config.pool_slots,
-        lookback_size=lookback_size,
-        lookback_unit=lookback_unit,
-        lookback_specified=lookback_specified,
         act_snap=act_snap,
+        incremental_config=incremental_config,
     )
 
 

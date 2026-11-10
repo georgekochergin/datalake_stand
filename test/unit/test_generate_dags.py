@@ -28,8 +28,8 @@ PIPELINE = PipelineManifest(
     tags=("ingestion", "bank"),
     entities=(
         EntityConfig("retail_bank.clients", "retail_bank__clients", None),
-        EntityConfig("retail_bank.transactions", "retail_bank__transactions", "_batch_id", lookback_size=12,
-                     lookback_unit="h", lookback_specified=True),
+        EntityConfig("retail_bank.transactions", "retail_bank__transactions", "_batch_id",
+                     incremental_config={"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 12, "unit": None}}),
     ),
 )
 
@@ -55,6 +55,7 @@ class TestGenerateDagSource(unittest.TestCase):
         self.assertIn('GenerateProcessIdOperator(task_id="generate_process_id")', self.source)
         self.assertNotIn("entities=", self.source)
         self.assertIn("generate_process_id >> activate_source >> ingest_group", self.source)
+        self.assertIn("    generate_process_id >> ingest_group\n", self.source)
 
     def test_no_dag_params(self):
         """The trigger dialog must open with an active button, without required fields."""
@@ -88,11 +89,9 @@ class TestGenerateDagSource(unittest.TestCase):
         self.assertEqual(self.source.count('pool_slots=1'), 2)
 
     def test_incremental_column_only_where_configured(self):
-        self.assertEqual(self.source.count('incremental_column="_batch_id"'), 1)
+        self.assertEqual(self.source.count("'source_column': '_batch_id'"), 1)
         self.assertIn('entity_fqn="retail_bank.clients"', self.source)
-        self.assertEqual(self.source.count("lookback_size=12"), 1)
-        self.assertEqual(self.source.count("lookback_unit='h'"), 1)
-        self.assertEqual(self.source.count("lookback_specified=True"), 1)
+        self.assertEqual(self.source.count("'lookback': {'size': 12, 'unit': None}"), 1)
         self.assertNotIn("lookback_specified=False", self.source)
 
     def test_no_hash_comments(self):
@@ -116,12 +115,11 @@ class TestGenerateDagSource(unittest.TestCase):
             catchup=False,
             tags=(),
             entities=(EntityConfig("retail_bank.transactions", "retail_bank__transactions",
-                                   "_batch_id", lookback_size=3, lookback_unit="d"),),
+                                   "_batch_id", incremental_config={"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 0, "unit": None}}),),
         )
         source = generate_dag_source(BANK, pipeline)
-        self.assertIn("lookback_size=3", source)
-        self.assertIn("lookback_unit='d'", source)
-        self.assertIn("lookback_specified=False", source)
+        self.assertIn("'lookback': {'size': 0, 'unit': None}", source)
+        self.assertNotIn("lookback_specified=", source)
 
     def test_deterministic(self):
         self.assertEqual(self.source, generate_dag_source(BANK, PIPELINE))
@@ -165,6 +163,10 @@ class TestGenerateSnapshotDagSource(unittest.TestCase):
 
     def setUp(self):
         self.source = generate_snapshot_dag_source(BANK, SNAPSHOT_PIPELINE, SNAPSHOT_PIPELINE.entities[0], "main")
+
+    def test_snapshot_group_waits_directly_for_process_generator(self):
+        self.assertIn("generate_process_id >> activate_source >> snap_group", self.source)
+        self.assertIn("    generate_process_id >> snap_group\n", self.source)
 
     def test_dag_header(self):
         expected = f"ingest__rdbms__bank__main__act_snap_{snapshot_alias('retail_bank.transactions')}"
@@ -280,15 +282,15 @@ class TestGenerateAll(unittest.TestCase):
 
     def test_broker_is_incremental(self):
         broker = self.generated["ingest__rdbms__broker__main.py"]
-        self.assertIn('incremental_column="_batch_id"', broker)
+        self.assertIn("'source_column': '_batch_id'", broker)
         self.assertIn('entity_fqn="trading_core.transactions"', broker)
         self.assertIn('Asset("raw://broker/trading_core.deals")', broker)
-        self.assertIn("lookback_size=3", broker)
-        self.assertIn("lookback_unit='d'", broker)
+        self.assertIn("'lookback': {'size': 0, 'unit': None}", broker)
+        self.assertIn("'position_type': 'decimal(19,0)'", broker)
 
     def test_bank_mixed_modes(self):
         bank = self.generated["ingest__rdbms__bank__main.py"]
-        self.assertEqual(bank.count('incremental_column="_batch_id"'), 1)
+        self.assertEqual(bank.count("'source_column': '_batch_id'"), 1)
 
     def test_demonstration_weights_and_partitioning(self):
         for name, content in self.generated.items():
@@ -382,7 +384,7 @@ class TestGenerateAllValidation(unittest.TestCase):
             "source_id": "bank",
             "entities": [
                 {"fqn": "s.t__act_snap"},
-                {"fqn": "s.t", "incremental": {"source_column": "_batch_id"}},
+                {"fqn": "s.t", "incremental": {"contract": {"source_column": "_batch_id", "position_type": "bigint"}}},
             ],
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -401,7 +403,7 @@ class TestGenerateAllValidation(unittest.TestCase):
         document = {
             "source_id": "bank",
             "entities": [
-                {"fqn": "s.t", "incremental": {"source_column": "_batch_id"}},
+                {"fqn": "s.t", "incremental": {"contract": {"source_column": "_batch_id", "position_type": "bigint"}}},
                 {"fqn": "s.t__act_snap"},
             ],
         }

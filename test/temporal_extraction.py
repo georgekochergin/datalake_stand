@@ -89,13 +89,24 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
         source_id=f"e2e_{source}", incremental_column=column,
         no_jdbc_partitioning=True, num_partitions=1,
         dag_id="e2e_temporal_extraction", run_id=None,
-        process_id=None, lookback_size=0, lookback_unit=None, lookback_given=False,
+        process_id=None, lookback_size=0, lookback_unit=None,
+        position_type=expected_kind,
     )
     require(metadata_row(hook, "incremental_state", args.source_id, table) is None,
             target + " starts with fresh isolated metadata")
     require(not spark.catalog.tableExists(args.target_table), target + " starts with fresh raw table")
     kind, upper, empty, has_null = load_entity.source_position(spark, args)
     require(kind == expected_kind, f"{target} exact JDBC kind is {expected_kind}, got {kind}")
+    declared = args.position_type
+    args.position_type = "bigint"
+    try:
+        load_entity.source_kind(spark, args)
+    except ValueError as error:
+        require("Incremental type mismatch" in str(error), target + " rejects wrong declared type")
+    else:
+        raise AssertionError(target + " accepted a wrong declared type")
+    finally:
+        args.position_type = declared
     require(not empty and not has_null and upper is not None, target + " has non-null temporal data")
     if expected_upper is not None:
         require(upper == expected_upper, target + " source MAX preserves full fractional precision")
@@ -111,7 +122,6 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
                                                    db_connect=hook.get_conn)
         args.lookback_size = 1 if phase == "lookback" else 0
         args.lookback_unit = "d" if args.lookback_size else None
-        args.lookback_given = True
         if phase == "lookback":
             lower, lower_op = positions.window_bounds(watermark, kind, 1, "d")
         else:
@@ -209,7 +219,8 @@ def check_post_append_retry(spark, hook, jdbc, token):
         num_partitions=1, dag_id="e2e_post_append_retry",
         run_id=token, process_id=meta.allocate_process_id(
             dag_id="e2e_post_append_retry", run_id=token, db_connect=hook.get_conn),
-        lookback_size=0, lookback_unit=None, lookback_given=False,
+        lookback_size=0, lookback_unit=None,
+        position_type="bigint",
     )
     with patch.object(meta, "finalize_batch", side_effect=RuntimeError("injected metadata failure")):
         try:
@@ -251,7 +262,7 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
         source_id=f"e2e_snapshot_{source}", incremental_column="position",
         no_jdbc_partitioning=True, num_partitions=1, dag_id="e2e_snapshot_recovery",
         run_id=token, process_id=None, lookback_size=2, lookback_unit=None,
-        lookback_given=True,
+        position_type="decimal(18,0)" if source == "broker" else "bigint",
     )
 
     def allocate():

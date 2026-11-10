@@ -1,6 +1,7 @@
 """Unit tests for the incremental window loader (spark/raw/rdbms/incremental/load_entity.py)."""
 
 import sys
+import json
 import types
 import unittest
 from pathlib import Path
@@ -26,8 +27,9 @@ BASE_ARGS = [
     "raw.bank.retail_bank__transactions",
     "--process-id",
     "42",
-    "--incremental-column",
-    "_batch_id",
+    "--incremental-config",
+    json.dumps({"contract": {"source_column": "_batch_id", "position_type": "bigint"},
+                "lookback": {"size": 0, "unit": None}}),
 ]
 
 
@@ -48,23 +50,23 @@ class TestParseArgs(unittest.TestCase):
         self.assertEqual(args.num_partitions, 4)
 
     def test_incremental_column_required(self):
-        argv = [value for value in BASE_ARGS if value not in ("--incremental-column", "_batch_id")]
+        argv = BASE_ARGS[:-2]
         with self.assertRaises(SystemExit):
             load_entity.parse_args(argv)
 
     def test_managed_incremental_args(self):
         args = load_entity.parse_args(build_argv(
             "--source-id", "bank", "--dag-id", "dag", "--run-id", "run",
-            "--lookback-size", "3", "--lookback-unit", "h", "--lookback-given",
+            "--incremental-config", json.dumps({"contract": {"source_column": "updated_at", "position_type": "timestamp_local(7)"}, "lookback": {"size": 3, "unit": "h"}}),
         ))
         self.assertEqual((args.source_id, args.dag_id, args.run_id), ("bank", "dag", "run"))
         self.assertEqual((args.lookback_size, args.lookback_unit), (3, "h"))
-        self.assertTrue(args.lookback_given)
+        self.assertEqual(args.position_type, "timestamp_local(7)")
         self.assertFalse(hasattr(args, "force_full"))
 
     def test_lookback_given_defaults_off(self):
         args = load_entity.parse_args(build_argv("--source-id", "bank"))
-        self.assertFalse(args.lookback_given)
+        self.assertFalse(hasattr(args, "lookback_given"))
         self.assertEqual(args.lookback_size, 0)
         self.assertIsNone(args.lookback_unit)
 
@@ -86,19 +88,19 @@ class TestParseArgs(unittest.TestCase):
 
     def test_zero_num_partitions(self):
         with self.assertRaises(ValueError):
-            load_entity.parse_args(build_argv("--num-partitions", "0"))
+            load_entity.parse_args(build_argv("--num-jdbc-partitions", "0"))
 
     def test_jdbc_partitioning_switch(self):
         self.assertFalse(load_entity.parse_args(build_argv()).no_jdbc_partitioning)
         args = load_entity.parse_args(
-            build_argv("--no-jdbc-partitioning", "--num-partitions", "7")
+            build_argv("--no-jdbc-partitioning", "--num-jdbc-partitions", "7")
         )
         self.assertTrue(args.no_jdbc_partitioning)
         self.assertEqual(args.num_partitions, 7)
 
     def test_invalid_incremental_column(self):
         with self.assertRaises(ValueError):
-            load_entity.parse_args(build_argv("--incremental-column", "Client-Id"))
+            load_entity.parse_args(build_argv("--incremental-config", json.dumps({"contract": {"source_column": "Client-Id", "position_type": "bigint"}, "lookback": {"size": 0, "unit": None}})))
 
 
 class TestMain(unittest.TestCase):
@@ -160,7 +162,7 @@ class TestSourcePosition(unittest.TestCase):
             load_entity.jdbc, "column_metadata", return_value=metadata
         ) as columns, patch.object(load_entity.jdbc, "first_row", return_value=row) as first:
             result = load_entity.source_position(spark, self.args())
-        managed.assert_called_once()
+        self.assertEqual(managed.call_count, 2)
         self.assertIn("FROM [retail_bank].[transactions]", columns.call_args.args[1])
         return result, first.call_args.args[1]
 
@@ -169,6 +171,27 @@ class TestSourcePosition(unittest.TestCase):
         self.assertEqual(result, ("bigint", "10", False, False))
         self.assertEqual(sql, "SELECT MAX([_batch_id]), COUNT(*), COUNT([_batch_id]) FROM [retail_bank].[transactions]")
 
+    def test_type_mismatch_prevents_aggregates(self):
+        with patch.object(load_entity.jdbc, "connection"), patch.object(
+            load_entity.jdbc, "column_metadata", return_value=[("_batch_id", "int", 10, 0)]
+        ), patch.object(load_entity.jdbc, "first_row") as aggregate:
+            with self.assertRaisesRegex(ValueError, "expected=bigint actual=integer"):
+                load_entity.source_position(MagicMock(), self.args())
+        aggregate.assert_not_called()
+
+    def test_retry_checks_metadata_without_replanning(self):
+        from ingestion import meta
+
+        args = self.args()
+        batch = {"target_table": args.target_table, "incremental_column": "_batch_id",
+                 "incremental_type": "bigint", "status": "FAILED"}
+        with patch.object(meta, "get_batch", return_value=batch), patch.object(
+            load_entity, "source_kind", return_value="bigint"
+        ) as metadata, patch.object(load_entity, "source_position") as aggregate:
+            self.assertIs(load_entity._plan_batch(MagicMock(), args, MagicMock()), batch)
+        metadata.assert_called_once()
+        aggregate.assert_not_called()
+
     def test_empty_and_null_diagnostics(self):
         self.assertEqual(self.inspect([("_batch_id", "bigint", 19, 0)], ["0", "0", "0"])[0][2:], (True, False))
         self.assertEqual(self.inspect([("_batch_id", "bigint", 19, 0)], ["5", "5", "4"])[0][2:], (False, True))
@@ -176,6 +199,7 @@ class TestSourcePosition(unittest.TestCase):
     def test_oracle_temporal_kind(self):
         spark = MagicMock()
         args = load_entity.parse_args(build_argv("--jdbc-url", ORACLE_URL))
+        args.position_type = "timestamp_instant(6)"
         with patch.object(load_entity.jdbc, "connection"), patch.object(
             load_entity.jdbc, "column_metadata", return_value=[("_batch_id", "TIMESTAMP(6) WITH TIME ZONE", 0, 6)]
         ), patch.object(load_entity.jdbc, "first_row", return_value=["2026-01-01T00:00:00.000000Z", "3", "3"]) as first:
@@ -200,7 +224,9 @@ class TestPlanBatch(unittest.TestCase):
     def plan(self, batch, planned=None, position=None, args=None):
         with patch.object(self.meta, "get_batch", return_value=batch) as got, patch.object(
             self.meta, "plan_batch", return_value=planned
-        ) as plan, patch.object(load_entity, "source_position", return_value=position) as probe:
+        ) as plan, patch.object(load_entity, "source_position", return_value=position) as probe, patch.object(
+            load_entity, "source_kind", return_value="bigint"
+        ):
             result = load_entity._plan_batch(self.spark, args or self.args(), lambda: None)
         return result, got, plan, probe
 
@@ -218,13 +244,12 @@ class TestPlanBatch(unittest.TestCase):
         probe.assert_called_once()
 
     def test_default_lookback_resolved_by_runtime_kind(self):
-        args = self.args("--lookback-size", "3", "--lookback-unit", "h")
+        args = self.args()
         _, _, plan, _ = self.plan(None, planned={"status": "PLANNED"},
                                   position=("bigint", "10", False, False), args=args)
         self.assertEqual((plan.call_args.kwargs["lookback_size"],
                           plan.call_args.kwargs["lookback_unit"]), (0, None))
-        timestamp_args = self.args("--incremental-column", "updated_at",
-                                   "--lookback-size", "3", "--lookback-unit", "h")
+        timestamp_args = self.args("--incremental-config", json.dumps({"contract": {"source_column": "updated_at", "position_type": "timestamp_instant(6)"}, "lookback": {"size": 3, "unit": "h"}}))
         _, _, plan, _ = self.plan(None, planned={"status": "PLANNED"},
                                   position=("timestamp_instant(6)", "2026-01-01T00:00:00.000000Z", False, False),
                                   args=timestamp_args)
@@ -233,7 +258,7 @@ class TestPlanBatch(unittest.TestCase):
 
     def test_succeeded_batch_short_circuits_without_source(self):
         batch = {"target_table": "raw.bank.retail_bank__transactions",
-                 "incremental_column": "_batch_id", "status": "SUCCEEDED",
+                 "incremental_column": "_batch_id", "incremental_type": "bigint", "status": "SUCCEEDED",
                  "row_count": 5, "finished_at": "2026-11-06"}
         args = self.args()
         with self.assertLogs(load_entity.LOGGER, level="INFO") as logs:
@@ -255,7 +280,8 @@ class TestPlanBatch(unittest.TestCase):
                 batch = {"target_table": "raw.bank.retail_bank__transactions",
                          "incremental_column": "_batch_id", "status": status,
                          "row_count": 5, "finished_at": "2026-11-07"}
-                args = self.args("--incremental-column", "other_position")
+                args = self.args()
+                args.incremental_column = "other_position"
                 with self.assertRaisesRegex(ValueError, "incremental column does not match"):
                     self.plan(batch, args=args)
 
@@ -296,9 +322,8 @@ class TestPlanBatch(unittest.TestCase):
             plan.call_args.kwargs["calculate_lower"]("12")
 
     def test_invalid_lookback_rejected_before_planning(self):
-        args = self.args("--lookback-size", "1", "--lookback-unit", "h", "--lookback-given")
         with self.assertRaisesRegex(ValueError, "forbids a unit"):
-            self.plan(None, position=("bigint", "10", False, False), args=args)
+            self.args("--incremental-config", json.dumps({"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 1, "unit": "h"}}))
 
 
 class TestManagedLoad(unittest.TestCase):

@@ -10,8 +10,8 @@ shared ingestion package.
 """
 
 import argparse
+import json
 import logging
-import re
 
 from ingestion.iceberg import validate_target_table
 from ingestion.spark.raw.rdbms import reader
@@ -21,7 +21,6 @@ from ingestion.sources.rdbms import jdbc
 from ingestion.sources.rdbms import positions
 from ingestion.sources.rdbms import registry as dialects
 
-COLUMN_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 LOGGER = logging.getLogger(__name__)
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -35,24 +34,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--source-table", required=True)
     parser.add_argument("--target-table", required=True)
     parser.add_argument("--process-id", required=True, type=int)
-    parser.add_argument("--incremental-column", required=True)
-    parser.add_argument("--num-partitions", type=int, default=4)
+    parser.add_argument("--incremental-config", required=True)
+    parser.add_argument("--num-jdbc-partitions", dest="num_partitions", type=int, default=4)
     parser.add_argument("--no-jdbc-partitioning", action="store_true")
     parser.add_argument("--source-id")
     parser.add_argument("--dag-id")
     parser.add_argument("--run-id")
-    parser.add_argument("--lookback-size", type=int, default=0)
-    parser.add_argument("--lookback-unit", choices=("h", "d"))
-    parser.add_argument("--lookback-given", action="store_true")
     args = parser.parse_args(argv)
     if args.process_id <= 0:
         raise ValueError(f"--process-id must be a positive integer (got {args.process_id})")
     if args.num_partitions <= 0:
-        raise ValueError(f"--num-partitions must be a positive integer (got {args.num_partitions})")
-    if not COLUMN_NAME_PATTERN.match(args.incremental_column):
-        raise ValueError(
-            f"--incremental-column must be a column identifier (got {args.incremental_column!r})"
-        )
+        raise ValueError(f"--num-jdbc-partitions must be a positive integer (got {args.num_partitions})")
+    from ingestion.sources.rdbms.incremental_config import validate
+
+    config = validate(json.loads(args.incremental_config))
+    args.incremental_config = config
+    args.incremental_column = config["contract"]["source_column"]
+    args.position_type = config["contract"]["position_type"]
+    args.lookback_size = config["lookback"]["size"]
+    args.lookback_unit = config["lookback"]["unit"]
     return args
 
 
@@ -86,16 +86,31 @@ def empty_incremental_window(batch) -> bool:
     )
 
 
+def source_kind(spark, args):
+    """Validate only JDBC metadata, without source aggregates or row reads."""
+    dialect = dialects.by_jdbc_url(args.jdbc_url)
+    column = dialect.quote_identifier(args.incremental_column)
+    table = render_source_table(dialect, args.source_table, allow_expression=True)
+    with jdbc.connection(spark._jvm, args.jdbc_url, args.jdbc_user, args.jdbc_password) as connection:
+        _, type_name, precision, scale = jdbc.column_metadata(
+            connection, f"SELECT {column} FROM {table} WHERE 1=0"
+        )[0]
+    kind = dialect.position_kind(type_name, precision, scale)
+    if kind != args.position_type:
+        raise ValueError(
+            f"Incremental type mismatch for {args.source_id}.{args.source_table}.{args.incremental_column}: "
+            f"expected={args.position_type} actual={kind} JDBC={type_name} precision={precision} scale={scale}"
+        )
+    return kind
+
+
 def source_position(spark, args):
     """Inspect original JDBC type and obtain exact MAX plus NULL/empty diagnostics."""
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     column = dialect.quote_identifier(args.incremental_column)
     table = render_source_table(dialect, args.source_table, allow_expression=True)
+    kind = source_kind(spark, args)
     with jdbc.connection(spark._jvm, args.jdbc_url, args.jdbc_user, args.jdbc_password) as connection:
-        label, type_name, precision, scale = jdbc.column_metadata(
-            connection, f"SELECT {column} FROM {table} WHERE 1=0"
-        )[0]
-        kind = dialect.position_kind(type_name, precision, scale)
         expression = dialect.position_expression(f"MAX({column})", kind)
         row = jdbc.first_row(
             connection, f"SELECT {expression}, COUNT(*), COUNT({column}) FROM {table}"
@@ -109,10 +124,10 @@ def _plan_batch(spark, args, connect):
     """Resolve this execution's persisted batch or plan a fresh one with frozen bounds.
 
     The batch identity is (process_id, source_id, entity_fqn). A retry
-    replays the same frozen window without any source access: bounds, the
+    replays the same frozen window with metadata-only type verification: bounds, the
     position kind and empty_at_plan are already fixed in the batch, and a
     SUCCEEDED batch returns as a no-op with its recorded result logged.
-    Source inspection runs only when a new batch is being planned.
+    Source aggregates run only when a new batch is being planned.
     """
     from ingestion import meta
 
@@ -128,18 +143,22 @@ def _plan_batch(spark, args, connect):
                 "Persisted batch incremental column does not match the manifest; "
                 "stop executors and migrate the contract"
             )
+        if batch["incremental_type"] != args.position_type:
+            raise ValueError("Persisted batch position type does not match incremental.contract")
         if batch["status"] == "SUCCEEDED":
             LOGGER.info(
                 "batch already succeeded; repeat read skipped: process_id=%s "
                 "entity_fqn=%s row_count=%s finished_at=%s",
                 args.process_id, args.source_table, batch["row_count"], batch["finished_at"],
             )
+        else:
+            source_kind(spark, args)
         return batch
     kind, upper, empty, has_null = source_position(spark, args)
     if has_null:
         raise ValueError("NULL incremental value in source")
-    size, unit = positions.resolve_lookback(kind, args.lookback_size, args.lookback_unit,
-                                            args.lookback_given)
+    size, unit = args.lookback_size, args.lookback_unit
+    LOGGER.info("incremental config: kind=%s lookback_size=%s lookback_unit=%s", kind, size, unit)
     positions.window_bounds(upper, kind, size, unit)
 
     def calculate_lower(value):
