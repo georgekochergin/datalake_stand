@@ -77,6 +77,35 @@ def _submit_args(operator, context) -> tuple:
     return process_id, args
 
 
+def _apply_entity_fields(
+    operator,
+    source_id: str,
+    airflow_conn_id: str,
+    fqn: str,
+    target_table: str,
+    source_type: str,
+    jdbc_partitioning: bool,
+    num_partitions: int,
+    pg_conn_id: str = "ingestion_meta",
+) -> None:
+    """Assign the submit fields shared by every ingest operator and install its failure callback."""
+    operator.source_id = source_id
+    operator.airflow_conn_id = airflow_conn_id
+    operator.fqn = fqn
+    operator.target_table = target_table
+    operator.source_type = source_type
+    operator.jdbc_partitioning = jdbc_partitioning
+    operator.num_partitions = num_partitions
+    if operator.on_failure_callback is None:
+        operator.on_failure_callback = partial(
+            log_task_failed,
+            source_id=source_id,
+            entity_fqn=fqn,
+            datalake_table=target_table,
+            pg_conn_id=pg_conn_id,
+        )
+
+
 class IngestActSnapOperator(SparkSubmitOperator):
     """Submit the actual-snapshot job for one entity with resolved runtime parameters.
 
@@ -103,20 +132,10 @@ class IngestActSnapOperator(SparkSubmitOperator):
             deploy_mode="client",
             **kwargs,
         )
-        self.source_id = source_id
-        self.airflow_conn_id = airflow_conn_id
-        self.fqn = fqn
-        self.target_table = target_table
-        self.source_type = source_type
-        self.jdbc_partitioning = jdbc_partitioning
-        self.num_partitions = num_partitions
-        if self.on_failure_callback is None:
-            self.on_failure_callback = partial(
-                log_task_failed,
-                source_id=source_id,
-                entity_fqn=fqn,
-                datalake_table=target_table,
-            )
+        _apply_entity_fields(
+            self, source_id, airflow_conn_id, fqn, target_table,
+            source_type, jdbc_partitioning, num_partitions,
+        )
 
     def execute(self, context):
         _, self.application_args = _submit_args(self, context)
@@ -150,20 +169,10 @@ class IngestFullOperator(SparkSubmitOperator):
             deploy_mode="client",
             **kwargs,
         )
-        self.source_id = source_id
-        self.airflow_conn_id = airflow_conn_id
-        self.fqn = fqn
-        self.target_table = target_table
-        self.source_type = source_type
-        self.jdbc_partitioning = jdbc_partitioning
-        self.num_partitions = num_partitions
-        if self.on_failure_callback is None:
-            self.on_failure_callback = partial(
-                log_task_failed,
-                source_id=source_id,
-                entity_fqn=fqn,
-                datalake_table=target_table,
-            )
+        _apply_entity_fields(
+            self, source_id, airflow_conn_id, fqn, target_table,
+            source_type, jdbc_partitioning, num_partitions,
+        )
 
     def execute(self, context):
         _, args = _submit_args(self, context)
@@ -203,23 +212,12 @@ class IngestIncrementalOperator(SparkSubmitOperator):
             deploy_mode="client",
             **kwargs,
         )
-        self.source_id = source_id
-        self.airflow_conn_id = airflow_conn_id
-        self.fqn = fqn
-        self.target_table = target_table
+        _apply_entity_fields(
+            self, source_id, airflow_conn_id, fqn, target_table,
+            source_type, jdbc_partitioning, num_partitions, pg_conn_id=pg_conn_id,
+        )
         self.incremental_config = incremental_config
         self.pg_conn_id = pg_conn_id
-        self.source_type = source_type
-        self.jdbc_partitioning = jdbc_partitioning
-        self.num_partitions = num_partitions
-        if self.on_failure_callback is None:
-            self.on_failure_callback = partial(
-                log_task_failed,
-                source_id=source_id,
-                entity_fqn=fqn,
-                datalake_table=target_table,
-                pg_conn_id=pg_conn_id,
-            )
 
     def execute(self, context):
         _, args = _submit_args(self, context)
