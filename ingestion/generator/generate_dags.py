@@ -68,15 +68,18 @@ def snapshot_asset_uri(source_id: str, fqn: str) -> str:
     return f"{asset_uri(source_id, fqn)}/act_snap"
 
 
+def load_operator_name(entity) -> str:
+    """Class name of the load operator matching one entity's mode."""
+    if isinstance(entity, IncrementalEntityConfig):
+        return "IngestIncrementalOperator"
+    return "IngestFullOperator"
+
+
 def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str]:
     """Render logging, loading, and separate Asset publication for one entity."""
     target = resolve_fully_qualified(source.source_id, entity.fqn)
     group_id = f"load_{target.split('.')[-1]}"
-    load_operator = (
-        "IngestIncrementalOperator"
-        if isinstance(entity, IncrementalEntityConfig)
-        else "IngestFullOperator"
-    )
+    load_operator = load_operator_name(entity)
     lines = [
         f'        with TaskGroup(group_id="{group_id}") as load_group:',
         '            log_start = TableLogOperator(',
@@ -235,12 +238,7 @@ def generate_dag_source(
     description = f"Raw-layer ingestion for source {pipeline.source_id} (generated)"
     if num_partitions is None:
         num_partitions = load_settings(DEFAULT_SETTINGS).num_partitions
-    load_imports = sorted(
-        {
-            "IngestIncrementalOperator" if isinstance(entity, IncrementalEntityConfig) else "IngestFullOperator"
-            for entity in pipeline.entities
-        }
-    )
+    load_imports = sorted({load_operator_name(entity) for entity in pipeline.entities})
     lines = [
         f'"""Generated DAG for pipeline "{pipeline.source_id}" — regenerate via '
         'python3 -m ingestion.generator.generate_dags, do not edit."""',

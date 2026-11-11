@@ -20,6 +20,7 @@ from ingestion.generator.generate_dags import (
 from ingestion.generator.manifest import ActSnapConfig, AirflowConfig, FullEntityConfig, IncrementalEntityConfig, SparkConfig, PipelineManifest, SourceConfig
 from ingestion.generator.naming import snapshot_alias
 
+LOAD_OPERATORS = frozenset({"IngestFullOperator", "IngestIncrementalOperator", "IngestActSnapOperator"})
 BANK = SourceConfig(source_id="bank", type="rdbms", airflow_conn_id="bank_source")
 BATCH_CONFIG = {"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 0, "unit": None}}
 PIPELINE = PipelineManifest(
@@ -121,6 +122,24 @@ class TestGenerateDagSource(unittest.TestCase):
         source = generate_dag_source(BANK, pipeline)
         self.assertIn("'lookback': {'size': 0, 'unit': None}", source)
         self.assertNotIn("lookback_specified=", source)
+
+    def test_imported_load_operators_match_used_ones(self):
+        """The import block lists exactly the load operators the DAG instantiates."""
+        import ast
+
+        tree = ast.parse(self.source)
+        used = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in LOAD_OPERATORS
+        }
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "ingestion.operators"
+            for alias in node.names
+        }
+        self.assertEqual(used, imported & LOAD_OPERATORS)
 
     def test_deterministic(self):
         self.assertEqual(self.source, generate_dag_source(BANK, PIPELINE))
