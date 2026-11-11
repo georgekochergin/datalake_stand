@@ -7,7 +7,6 @@
   - [Определить и проверить минимальные поддерживаемые версии компонентов](#определить-и-проверить-минимальные-поддерживаемые-версии-компонентов)
   - [Разделить реестр источников на YAML-файлы и настроить JDBC-параллелизм по источникам](#разделить-реестр-источников-на-yaml-файлы-и-настроить-jdbc-параллелизм-по-источникам)
   - [Изолировать Spark drivers через DockerOperator](#изолировать-spark-drivers-через-dockeroperator)
-  - [Рефакторинг и переорганизация кода: структура модулей](#рефакторинг-и-переорганизация-кода-структура-модулей)
   - [Обработка подвисших процессов Spark при retry задач](#обработка-подвисших-процессов-spark-при-retry-задач)
   - [Шаблонизация кода в generator/generate_dags.py](#шаблонизация-кода-в-generatorgenerate_dagspy)
   - [Управление ресурсами Spark на уровне отдельной джобы](#управление-ресурсами-spark-на-уровне-отдельной-джобы)
@@ -266,84 +265,6 @@ Airflow: IngestFullOperator / IngestIncrementalOperator (DockerOperator)
 - [Unit](glossary.md#term-unit), генерация/`--check` и полный `./test/test.sh` проходят; [e2e](glossary.md#term-e2e) — `FAIL=0`, exit 0. Недоступные fault/cancellation проверки указывать явно.
 
 Задача не является предварительным условием работы над [инкрементом](glossary.md#term-increment).
-
-### Рефакторинг и переорганизация кода: структура модулей
-
-#### Задача Jira
-
-DATARCH-2246
-
-#### Контекст
-
-Модули `ingestion/` смешивают общую инфраструктуру и логику отдельных режимов загрузки. Статический анализ показал следующие границы:
-
-- `ingestion/operators.py::IngestAppendOperator` выбирает Spark application по наличию `incremental_config`. Его `execute` для обоих режимов получает pg-meta Connection, передаёт `PG*` и идентификаторы DAG run; только [incremental](glossary.md#term-increment) использует реестр [batch](glossary.md#term-batch). `IngestActSnapOperator` уже отделён, но повторяет получение JDBC Connection, process_id и сборку общих аргументов.
-- Spark entry points уже разделены: `ingestion/spark/raw/rdbms/incremental/load_entity.py` планирует фиксированное окно и управляет [batch](glossary.md#term-batch)/[watermark](glossary.md#term-watermark); `full/load_entity.py` читает весь источник и добавляет [полный срез](glossary.md#term-full) без реестра [инкремента](glossary.md#term-increment). Полная загрузка здесь — append, не overwrite; повтор может добавить срез повторно ([at-least-once](glossary.md#term-atleast)).
-- `ingestion/spark/raw/rdbms/reader.py::read_extract_frame` и `build_extract_query` определяют [incremental](glossary.md#term-increment) через `getattr(args, "incremental_column", None)`: добавляют границы окна и `__extract_position`. Общими остаются JDBC-доступ, compatibility projection, выбор партиционирования, MIN/MAX и кэширование.
-- `ingestion/spark/raw/rdbms/raw_append.py::append_raw` аналогично совмещает общий append с вычислением максимальной позиции и удалением `__extract_position` только для [incremental](glossary.md#term-increment).
-- `ingestion/generator/manifest.py::EntityConfig` содержит optional [incremental](glossary.md#term-increment)-поля и `act_snap` даже для [full](glossary.md#term-full); `_parse_entity` заполняет их условно. Генератор DAG использует и `incremental_config`, и `incremental_column` как признаки режима.
-- `ingestion/meta.py` содержит как общее логирование DAG/task, так и реестр [инкремента](glossary.md#term-increment). `ingestion/sources/rdbms/contracts.py` объединяет контракты подключения, парсер таблицы и базовый `RdbmsDialect`.
-
-Виды расширения и их опорные точки в коде — по [руководству по расширению](extending.md):
-
-- новая таблица подключённого источника — только YAML-манифест, код не меняется;
-- новая JDBC-СУБД — новый модуль `ingestion/sources/rdbms/dialects/<имя>.py` и запись в реестре `_DIALECTS` (`ingestion/sources/rdbms/registry.py`);
-- новый тип источника — четыре точки: `load_sources()` принимает только `type: rdbms` (`ingestion/generator/manifest.py`), оба оператора загрузки проверяют `source_type == "rdbms"` в `execute` (`ingestion/operators.py`), генератор встраивает активацию sydafa и пути приложений `/opt/spark-jobs/raw/rdbms/…` (`ingestion/generator/generate_dags.py`), приложения — `ingestion/spark/raw/rdbms/`;
-- новый слой данных — приложения адресуются по схеме `ingestion/spark/<слой>/<тип>/<режим>/`, но DDL [raw](glossary.md#term-raw)-таблиц лежит в корне пакета (`ingestion/iceberg.py`) и описывает только [raw](glossary.md#term-raw), а не все слои.
-
-#### Проблема
-
-Отсутствие явной структуры затрудняет:
-
-- Ориентировку в коде при введении новых разработчиков.
-- Выделение ответственности каждого компонента.
-- Поиск и переиспользование функций в других модулях.
-- Локализацию изменений при внесении улучшений.
-- Оценку зоны будущего расширения: из размещения модулей не видно, какие из них переживут появление нового типа источника или слоя данных, а какие принадлежат только текущему контуру `rdbms`+[raw](glossary.md#term-raw).
-
-Пример: изменение [incremental](glossary.md#term-increment)-статистики затрагивает общий `append_raw`, хотя [full](glossary.md#term-full) не использует позицию; [full](glossary.md#term-full)-оператор получает реквизиты реестра [инкремента](glossary.md#term-increment), хотя его Spark-приложение не обращается к этому реестру. Отсутствие [incremental](glossary.md#term-increment)-поля неявно заменяет явный контракт полного чтения.
-
-Решение по результатам анализа: разделение флоу оправдано, но дублировать JDBC, диалекты и Iceberg-запись не нужно. [Runtime-проверки](glossary.md#term-runtime) в рамках оформления задачи не выполнялись.
-
-#### Предпочтительный путь решения
-
-Разделить оркестрацию и режимные контракты, сохранив общие технические операции без флагов [full](glossary.md#term-full)/[incremental](glossary.md#term-increment) внутри них. Размещение модулей подчинено видам расширения из [руководства по расширению](extending.md): тип источника, режим, слой данных. Адрес модуля отражает его принадлежность, общие модули не знают конкретных типов источников, режимов и слоёв — новое расширение добавляет модули в своей точке, а не правит общий код.
-
-1. **Операторы**: заменить `IngestAppendOperator` на `IngestIncrementalOperator` и `IngestFullOperator`, каждый с фиксированным Spark entry point. Первый требует [incremental](glossary.md#term-increment)-конфигурацию и передаёт реквизиты реестра; второй не принимает [incremental](glossary.md#term-increment)-конфигурацию и не получает реквизиты pg-meta для Spark [driver](glossary.md#term-driver). Реквизиты pg-meta передаются одним явным контрактом: оператор собирает из Airflow Connection `ingestion_meta` строку подключения через `psycopg2.extensions.make_dsn` и кладёт её в переменную окружения `INGESTION_META_DSN`; [driver](glossary.md#term-driver) подключается `psycopg2.connect(dsn)`, отсутствие переменной — явная ошибка без печати секрета. Пять переменных `PG*` с пустым DSN (`psycopg2.connect("")`) устраняются. Сохранить pg-meta для общего логирования [full](glossary.md#term-full): process_id, START/END/FAILED и DAG callbacks нужны обоим режимам. Общую подготовку JDBC-подключения, process_id, аргументов, [pool](glossary.md#term-pool)/[slots](glossary.md#term-slot) и failure callback вынести в небольшой общий слой, используемый также `IngestActSnapOperator`; не создавать иерархию стратегий и плагинов. Операторы размещаются пакетом `ingestion/operators/` с реэкспортом из `__init__.py`: сгенерированные DAG-и импортируют операторы и callbacks только из `ingestion.operators`. Внутри пакета модули разделяются по знанию контура: общее — process_id, DAG-callbacks, логирование pg-meta — без типа источника, режима и слоя; публикация Asset — уровень [raw](glossary.md#term-raw) без типа источника; режимные операторы с JDBC-подготовкой и проверкой `source_type == "rdbms"` — [raw](glossary.md#term-raw)+`rdbms`.
-2. **Конфигурация и генератор**: выделить `FullEntityConfig` и `IncrementalEntityConfig` с общими полями [сущности](glossary.md#term-entity) и загрузки. Только [incremental](glossary.md#term-increment) содержит контракт позиции, [lookback](glossary.md#term-lookback) и `act_snap`; `incremental_column` получать из одного контракта, а не хранить независимым признаком режима. Сохранить внешний YAML: наличие секции `incremental` определяет тип один раз при разборе. Генератор выбирает конкретный оператор по типу конфигурации; единственная развилка на границе допустима. Сохранить DAG/task IDs, зависимости, расписания, Assets и отдельную генерацию [snapshot](glossary.md#term-snapshot) DAG только для [incremental](glossary.md#term-increment). Пути приложений и активация sydafa выбираются на той же границе генератора. `load_sources()` по-прежнему принимает только `type: rdbms`: контракт нового типа источника в этой задаче не проектируется ([руководство по расширению](extending.md#3-новый-тип-источника)).
-3. **Чтение Spark**: оставить существующие отдельные entry points и вынести подготовку окна, предикатов и `__extract_position` в [incremental](glossary.md#term-increment)-область. [Full](glossary.md#term-full) и [snapshot](glossary.md#term-snapshot) используют явное чтение полного источника. Общий reader получает готовые проекции/предикаты и выполняет JDBC-чтение и партиционирование, не исследуя `args.incremental_column` и не принимая фиктивные `batch=None, kind=None` как переключатель режима. Не дублировать compatibility projection, bounds и partitioning.
-4. **Статистика и запись**: в [incremental](glossary.md#term-increment)-флоу вычислять count/max, канонизировать позицию и удалять техническую колонку; в [full](glossary.md#term-full)-флоу вычислять только count. Общий writer получает очищенный DataFrame и число строк, отвечает за валидацию схемы, создание таблицы и append с техническими метаданными. Сохранить один проход агрегации count/max для [incremental](glossary.md#term-increment), текущую материализацию/освобождение кэша и поведение пустых загрузок. Не вводить повторные count или отдельное чтение источника ради разделения кода. [Snapshot](glossary.md#term-snapshot) [RTAS](glossary.md#term-rtas) не объединять с append-writer.
-5. **Метаданные и модули**: отделить реестр [incremental](glossary.md#term-increment) [batch](glossary.md#term-batch)/state от общего логирования в pg-meta, оставив единый helper транзакций и порядок блокировок. Общее логирование и реестр становятся отдельными модулями пакета `ingestion/meta/`: операторы импортируют логирование, приложение [инкремента](glossary.md#term-increment) — реестр. Разместить общие helpers/callbacks и режимные операторы в отдельных модулях; сохранить `ingestion.operators` как публичную точку импорта новых операторов и общих callbacks. Не оставлять универсальный `IngestAppendOperator`-диспетчер: мигрировать потребителей репозитория и документировать замену для внешних DAG, не предполагая, что их нет.
-6. **Диалекты**: вынести `RdbmsDialect` с его методами из `contracts.py` в `ingestion/sources/rdbms/dialects/base.py` — базовый контракт рядом с реализациями; контракты подключения, парсинг и type helpers оставить на соответствующем уровне без циклических импортов. JDBC metadata, quoting и правила типов общие для режимов — не создавать копии диалектов для [full](glossary.md#term-full)/[incremental](glossary.md#term-increment). Сохранить существующие публичные импорты диалектов через re-export там, где это требуется.
-7. **Размещение по слою**: перенести `ingestion/iceberg.py` в `ingestion/spark/raw/iceberg.py`: модуль описывает DDL, адресацию и метаданные только [raw](glossary.md#term-raw)-таблиц, а не всех слоёв ([руководство по расширению](extending.md#4-новый-слой-данных)). Проверку адреса цели используют операторы публикации, DDL и сопоставление схемы — общий writer; импорт модуля остаётся безопасным вне Spark, PySpark подключается внутри `schema_columns`. Общий writer — очищенный DataFrame и число строк, append с техническими метаданными и созданием таблицы — не зависит от типа источника и режима: разместить его на уровне слоя `ingestion/spark/raw/`; JDBC-reader остаётся в `ingestion/spark/raw/rdbms/`. Корень `ingestion/` после переноса содержит только межслойную инфраструктуру: общие helpers оркестрации и логирование pg-meta. Будущий слой данных получает свой каталог приложений и свой модуль DDL, не расширяя общий.
-
-##### Границы рефакторинга
-
-- Сохранить форматы YAML и данные pg-meta.
-- Сохранить [at-least-once](glossary.md#term-atleast) append, [watermark](glossary.md#term-watermark), [lookback](glossary.md#term-lookback), повтор фиксированного окна
-  и восстановление снимков.
-- Не добавлять режимы или гарантию [exactly-once](glossary.md#term-exactly) — однократной записи без дублей.
-- Один [пайплайн](glossary.md#term-pipeline) по-прежнему может содержать полные и инкрементальные загрузки.
-  Отдельные DAG-и по режимам не нужны.
-- Переход на DockerOperator выполняется отдельно.
-  Новые операторы должны сохранить своё назначение после такого перехода.
-- SQL и DAG-шаблоны выносятся в задаче
-  [«Шаблонизация кода в generator/generate_dags.py»](#шаблонизация-кода-в-generatorgenerate_dagspy).
-- Не создавать пустые каталоги и модули-заглушки под будущие типы источников и слои: проектирование контракта нового типа источника — отдельное решение ([руководство по расширению](extending.md#3-новый-тип-источника)).
-
-#### Проверки и критерии готовности
-
-- Все потребители `IngestAppendOperator` в репозитории переведены на конкретные операторы; замена публичного API и правила миграции документированы. Остальные публичные импорты сохранены.
-- Перенос `ingestion/iceberg.py` и разделение `ingestion/meta`/`ingestion/operators` на пакеты отражены во всех потребителях: операторах, Spark-приложениях, генераторе и тестах; сгенерированные DAG-и импортируют операторы и callbacks только из `ingestion.operators`.
-- Точки расширения остаются одноточечными: реестр диалектов, граница выбора оператора и приложения в генераторе, каталог `ingestion/spark/<слой>/<тип>/<режим>/`.
-- Все модули импортируют друг друга корректно; нет циклических зависимостей.
-- [Unit-проверки](glossary.md#term-unit) отражают новые контракты: [full](glossary.md#term-full) не принимает [incremental](glossary.md#term-increment)-поля и не получает реестр и реквизиты pg-meta (`INGESTION_META_DSN`) в [driver](glossary.md#term-driver); [incremental](glossary.md#term-increment) требует конфигурацию и получает необходимые параметры. Общее логирование [full](glossary.md#term-full) сохранено.
-- Смешанный [pipeline](glossary.md#term-pipeline) генерирует оба конкретных оператора с прежними IDs и зависимостями; [snapshot](glossary.md#term-snapshot) DAG создаётся только для [incremental](glossary.md#term-increment). Внешние YAML не требуют миграции.
-- Общий reader/writer не определяет режим через optional [incremental](glossary.md#term-increment)-поля. [Full](glossary.md#term-full) читает и добавляет [полный срез](glossary.md#term-full), [incremental](glossary.md#term-increment) — фиксированное окно; сохранены точность позиции, NULL-проверки, [CAS revision](glossary.md#term-cas), пустые окна, [retry](glossary.md#term-retry) и [snapshot](glossary.md#term-snapshot) recovery без лишних чтений/агрегаций.
-- Генерация DAG-ов (`python3 -m ingestion.generator.generate_dags --check`) успешна.
-- Полный набор [e2e-тестов](glossary.md#term-e2e) (`./test/test.sh`) проходит.
-- Граф зависимостей graphify перестроен для отражения новой структуры.
-- `docs/architecture.md`, `docs/extending.md` и инструкция миграции обновлены вместе с реализацией: пути модулей, имена операторов и точки расширения соответствуют итоговой структуре. Реализация выполняется отдельно по спек-циклу; здесь изменяется только бэклог.
 
 ### Обработка подвисших процессов Spark при retry задач
 
@@ -681,7 +602,7 @@ Airflow [pools](glossary.md#term-pool) ограничивают допуск з�
 
 #### Контекст
 
-`IngestFullOperator.execute()`/`IngestIncrementalOperator.execute()` в пакете `ingestion/operators/` получают реквизиты источника из Airflow Connection и передаёт пароль через `--jdbc-password` в `application_args` для `SparkSubmitOperator`. Загрузчики `ingestion/spark/raw/rdbms/full/load_entity.py` и `ingestion/spark/raw/rdbms/incremental/load_entity.py` принимают этот аргумент и используют его при JDBC-подключениях. Реквизиты pg-meta передаются процессу загрузчика переменными окружения, а не аргументами CLI; после задачи [«Рефакторинг и переорганизация кода: структура модулей»](#рефакторинг-и-переорганизация-кода-структура-модулей) — одной переменной `INGESTION_META_DSN` со строкой подключения.
+`IngestFullOperator.execute()`/`IngestIncrementalOperator.execute()` в пакете `ingestion/operators/` получают реквизиты источника из Airflow Connection и передаёт пароль через `--jdbc-password` в `application_args` для `SparkSubmitOperator`. Загрузчики `ingestion/spark/raw/rdbms/full/load_entity.py` и `ingestion/spark/raw/rdbms/incremental/load_entity.py` принимают этот аргумент и используют его при JDBC-подключениях. Реквизиты pg-meta передаются процессу загрузчика одной переменной окружения `INGESTION_META_DSN` со строкой подключения, а не аргументами CLI.
 
 В закреплённом Spark provider 6.3.2 штатное логирование команды и сообщение об ошибке её выполнения используют маскирование аргументов с `password`/`secret`. Это не удаляет настоящий пароль из аргументов запущенного процесса. Источники: `conf/airflow/requirements.txt`, `execute()` операторов загрузки, `parse_args()` загрузчика и `SparkSubmitHook._mask_cmd()` провайдера.
 
