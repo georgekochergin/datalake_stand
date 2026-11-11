@@ -248,7 +248,7 @@ DAG ingest__rdbms__bank__main
     └── TaskGroup "ingest_group"                       (сущности параллельно)
         ├── TaskGroup "load_retail_bank__transactions" (одна сущность)
         │   ├── log_start   событие START в pg-meta
-        │   ├── load        IngestAppendOperator → spark/raw/rdbms/<поток>/load_entity.py
+        │   ├── load        IngestFullOperator / IngestIncrementalOperator → spark/raw/rdbms/<поток>/load_entity.py
         │   ├── log_end     событие END в pg-meta
         │   └── publish_asset  публикация Asset после успешного log_end
         └── TaskGroup "load_retail_bank__deals" ...
@@ -291,17 +291,21 @@ DAG ingest__rdbms__bank__main
   подписываться DAG-и следующих слоёв. Выполняется только после успешного
   `log_end`: загрузка завершилась и её успех записан в pg-meta. Ошибка или
   пропуск `log_end` не допускает публикацию.
-- **`load`** (`IngestAppendOperator`, наследник `SparkSubmitOperator`,
-  client-mode) — исполнитель загрузки. Приложение выбирается по типу
-  [сущности](glossary.md#term-entity): инкрементальная — `ingestion/spark/raw/rdbms/incremental/load_entity.py`
-  ([окна](glossary.md#term-window) с реестром pg-meta), [полный срез](glossary.md#term-full) — `ingestion/spark/raw/rdbms/full/load_entity.py`
-  (append без реестра); оба читают источник и пишут [raw](glossary.md#term-raw) через общие модули
-  `reader.py` и `raw_append.py`. Во время
-  [исполнения](glossary.md#term-execution) проверяет `source_type="rdbms"`, выбирает JDBC-диалект по
+- **`load`** (`IngestFullOperator` или `IngestIncrementalOperator` по типу
+  [сущности](glossary.md#term-entity), наследники `SparkSubmitOperator`,
+  client-mode) — исполнитель загрузки. [Полный срез](glossary.md#term-full) запускает
+  `ingestion/spark/raw/rdbms/full/load_entity.py` (append без реестра),
+  инкрементальная загрузка — `ingestion/spark/raw/rdbms/incremental/load_entity.py`
+  ([окна](glossary.md#term-window) с реестром pg-meta); оба читают источник через общий
+  `reader.py` с явными предикатами и пишут [raw](glossary.md#term-raw) writer-ом слоя
+  `append.py`; агрегация окна и колонка `__extract_position` — в `incremental/window.py`. Во время
+  [исполнения](glossary.md#term-execution) оператор проверяет `source_type="rdbms"`, выбирает JDBC-диалект по
   `conn_type`, получает Connection источника и `process_id` из XCom.
   Параметры чтения и реквизиты источника, **включая пароль**, передаются
-  аргументами `spark-submit`; реквизиты pg-meta — переменными `PGHOST`,
-  `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`. [Пул](glossary.md#term-pool) применяется Airflow и
+  аргументами `spark-submit`. Реквизиты pg-meta для реестра инкремента передаются
+  одной переменной `INGESTION_META_DSN` со строкой подключения (DSN) из
+  Connection `ingestion_meta`; полный срез и снимок их не получают — их
+  приложения к реестру не обращаются. [Пул](glossary.md#term-pool) применяется Airflow и
   Spark-job не передаётся. Текущий способ передачи пароля источника не даёт
   гарантии отсутствия секрета в командной строке процесса.
 
@@ -401,7 +405,7 @@ TBLPROPERTIES ('write.spark.accept-any-schema'='true')
 
 Namespace проверяется при каждой исполняемой загрузке, таблица создаётся
 только при отсутствии. Location задаётся явно по шаблону
-`s3://datalake/raw/<source_id>/<имя_таблицы>` (`ingestion/iceberg.py`).
+`s3://datalake/raw/<source_id>/<имя_таблицы>` (`ingestion/spark/raw/iceberg.py`).
 
 LOCATION задаётся явно, без UUID в имени каталога. Одного выбора
 `NessieCatalog` для такого пути недостаточно. Создание через REST в используемой
@@ -1152,8 +1156,10 @@ JDBC-метаданные типа: границы и `empty_at_plan` уже з�
 
 Загрузкой инкрементального [окна](glossary.md#term-window) управляет `managed_load()` в
 `ingestion/spark/raw/rdbms/incremental/load_entity.py`. Она вызывает
-`ingestion/meta.py` для коротких транзакций pg-meta и общие модули
-`reader.py`/`raw_append.py` для JDBC-чтения и записи [raw](glossary.md#term-raw). [Полный срез](glossary.md#term-full)
+реестр партий `ingestion/meta/registry.py` на общем helper транзакций пакета
+`ingestion/meta`, читает окно через `incremental/window.py` (предикаты, позиция,
+count/max-агрегация) и общий `reader.py`, а пишет [raw](glossary.md#term-raw) через writer слоя
+`append.py`. [Полный срез](glossary.md#term-full)
 исполняет `full/load_entity.py` без обращений к реестру, снимочный поток —
 `incremental/load_act_snap.py` (раздел 7.7).
 **[Партия](glossary.md#term-batch)** — одна загрузка одной [сущности](glossary.md#term-entity) в одном [исполнении](glossary.md#term-execution) DAG-а; ключ —

@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from ingestion.generator.manifest import (
+    IncrementalEntityConfig,
     PipelineManifest,
     SourceConfig,
     load_pipeline,
@@ -67,10 +68,18 @@ def snapshot_asset_uri(source_id: str, fqn: str) -> str:
     return f"{asset_uri(source_id, fqn)}/act_snap"
 
 
+def load_operator_name(entity) -> str:
+    """Class name of the load operator matching one entity's mode."""
+    if isinstance(entity, IncrementalEntityConfig):
+        return "IngestIncrementalOperator"
+    return "IngestFullOperator"
+
+
 def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str]:
     """Render logging, loading, and separate Asset publication for one entity."""
     target = resolve_fully_qualified(source.source_id, entity.fqn)
     group_id = f"load_{target.split('.')[-1]}"
+    load_operator = load_operator_name(entity)
     lines = [
         f'        with TaskGroup(group_id="{group_id}") as load_group:',
         '            log_start = TableLogOperator(',
@@ -80,7 +89,7 @@ def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str
         f'                datalake_table="{target}",',
         '                status="START",',
         '            )',
-        '            load = IngestAppendOperator(',
+        f'            load = {load_operator}(',
         '                task_id="load",',
         f'                pool={json.dumps(entity.pool)},',
         f'                pool_slots={entity.pool_slots},',
@@ -92,7 +101,7 @@ def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str
         f'                fqn={json.dumps(entity.fqn)},',
         f'                target_table="{target}",',
     ]
-    if entity.incremental_config is not None:
+    if isinstance(entity, IncrementalEntityConfig):
         lines.append(f"                incremental_config={entity.incremental_config!r},")
     lines.extend(
         [
@@ -229,6 +238,7 @@ def generate_dag_source(
     description = f"Raw-layer ingestion for source {pipeline.source_id} (generated)"
     if num_partitions is None:
         num_partitions = load_settings(DEFAULT_SETTINGS).num_partitions
+    load_imports = sorted({load_operator_name(entity) for entity in pipeline.entities})
     lines = [
         f'"""Generated DAG for pipeline "{pipeline.source_id}" — regenerate via '
         'python3 -m ingestion.generator.generate_dags, do not edit."""',
@@ -242,7 +252,7 @@ def generate_dag_source(
         "",
         "from ingestion.operators import (",
         "    GenerateProcessIdOperator,",
-        "    IngestAppendOperator,",
+        *[f"    {name}," for name in load_imports],
         "    publish_asset_event,",
         "    TableLogOperator,",
         "    dagrun_failure_callback,",
@@ -305,7 +315,7 @@ def generate_all(
             if target in targets:
                 raise ValueError(f"target collision {target}: {targets[target]} and {path}")
             targets[target] = path
-            if entity.incremental_column:
+            if isinstance(entity, IncrementalEntityConfig):
                 snapshot_target = resolve_snapshot_fully_qualified(source.source_id, entity.fqn)
                 if snapshot_target in targets:
                     raise ValueError(
@@ -314,7 +324,7 @@ def generate_all(
                 targets[snapshot_target] = path
         generated[name] = generate_dag_source(source, pipeline, path.stem, settings.num_partitions)
         for entity in pipeline.entities:
-            if not entity.incremental_column:
+            if not isinstance(entity, IncrementalEntityConfig):
                 continue
             snapshot_name = f"{snapshot_dag_id(source, path.stem, entity.fqn)}.py"
             if snapshot_name in owners:

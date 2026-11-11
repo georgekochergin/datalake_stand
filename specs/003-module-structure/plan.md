@@ -1,0 +1,14 @@
+# План
+
+Конституция прочитана. Анализ выполнен через graphify и чтением затронутых модулей; решение согласовано в задаче бэклога DATARCH-2246 и утверждено пользователем. Маршрут: восемь шагов-коммитов, каждый оставляет репозиторий зелёным (unit-тесты, генерация `--check`); полный изолированный e2e — финальным шагом; после каждого коммита — ревью пользователя.
+
+1. Диалект: `RdbmsDialect` и type-helpers → `ingestion/sources/rdbms/dialects/base.py`; контракты подключения остаются в `contracts.py`, публичный импорт сохранён re-export; обновить тесты и extending.md §2.
+2. Пакет `ingestion/meta/`: общее логирование и helper транзакций — `__init__.py`, реестр партий — `registry.py`; порядок блокировок state→batch и CAS без изменений; приложение инкремента, тесты и e2e-скрипты импортируют реестр явно; architecture.md §7.
+3. Перенос `ingestion/iceberg.py` → `ingestion/spark/raw/iceberg.py`: DDL raw в области слоя; обновить импорты операторов, приложений и тестов; architecture.md §4.
+4. Конфигурация: `EntityConfig` — база с общими полями; `FullEntityConfig` и `IncrementalEntityConfig`; `incremental_column` выводится из контракта; gate snapshot-DAG и выбор оператора — единственная развилка `isinstance`; тесты манифеста и генератора.
+5. Пакет `ingestion/operators/` (`__init__.py` — публичная точка, `process.py`, `assets.py`, `raw_rdbms.py`): `IngestFullOperator` без инкремент-параметров и реквизитов pg-meta; `IngestIncrementalOperator` с DSN `INGESTION_META_DSN` (`make_dsn` из Connection `ingestion_meta`); `IngestAppendOperator` удаляется; генератор эмиссит конкретные классы, импорт-блок DAG — только используемое; importlib-харнесс test_operators расширяется на пакет; architecture.md §3, extending.md §3.
+6. Чтение: reader — явные `filters`/`extra_select`, без `batch/kind=None` и `args.incremental_column`; подготовка окна, проекция `__extract_position` и обвязка `read_bounds` → `ingestion/spark/raw/rdbms/incremental/window.py`.
+7. Запись: `ingestion/spark/raw/append.py` — writer уровня слоя (очищенный DataFrame и число строк, коллизии технических колонок, CREATE, метаданные); агрегация count/max и канонизация позиции — в `window.py` одним проходом; `raw_append.py` удаляется; RTAS снимка не объединяется с writer; architecture.md §6–7.
+8. Финал: полный изолированный `./test/test.sh` — `FAIL=0`, exit 0; граф — локальные обновления по ходу PR, `graphify-out/graph.json` коммитится один раз финальным коммитом (принцип V конституции); PR по скиллу pull-request.
+
+Риски: переработка importlib-загрузки `test_operators.py` с одиночного модуля на пакет; drift `--check` на живом стенде до перегенерации — штатно; смена транспорта реквизитов pg-meta (`PG*` → `INGESTION_META_DSN`) без изменения поведения фиксируется unit- и e2e-проверками; экранирование спецсимволов пароля обеспечивает `make_dsn`; шаг 5 требует шага 4 — генератор выбирает оператор по типу конфигурации.

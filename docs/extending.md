@@ -32,7 +32,7 @@
 ## 2. Подключение новой JDBC-СУБД
 
 Диалект описывает различия SQL и JDBC конкретной СУБД.
-Исходный контракт — [`RdbmsDialect`](../ingestion/sources/rdbms/contracts.py).
+Исходный контракт — [`RdbmsDialect`](../ingestion/sources/rdbms/dialects/base.py).
 Рабочие примеры — [`MssqlDialect`](../ingestion/sources/rdbms/dialects/mssql.py)
 и [`OracleDialect`](../ingestion/sources/rdbms/dialects/oracle.py).
 
@@ -126,8 +126,9 @@ ClickHouse, Greenplum и Teradata сейчас не зарегистрирова
 
 - [`manifest.py`](../ingestion/generator/manifest.py), функция `load_sources()`,
   принимает только `type: rdbms`. Для `kafka` есть явная ошибка «not implemented yet».
-- [`operators.py`](../ingestion/operators.py), `IngestAppendOperator`
-  и `IngestActSnapOperator`, при выполнении также проверяют `source_type == "rdbms"`.
+- пакет [`operators`](../ingestion/operators/) с операторами `IngestFullOperator`,
+  `IngestIncrementalOperator` и `IngestActSnapOperator`; при выполнении они проверяют
+  `source_type == "rdbms"`.
 - [`generate_dags.py`](../ingestion/generator/generate_dags.py)
   создаёт задачи с JDBC-ориентированными операторами и активацией sydafa.
 - Приложения в `ingestion/spark/raw/rdbms/` читают JDBC.
@@ -180,7 +181,7 @@ ClickHouse, Greenplum и Teradata сейчас не зарегистрирова
 
 Добавление следующего слоя не должно менять смысл уже загруженного
 [raw](glossary.md#term-raw) или добавлять бизнес-преобразования в его reader и writer.
-Существующий [`ingestion/iceberg.py`](../ingestion/iceberg.py) описывает DDL
+Существующий [`ingestion/spark/raw/iceberg.py`](../ingestion/spark/raw/iceberg.py) описывает DDL
 таблиц [raw](glossary.md#term-raw), а не универсальную конфигурацию всех слоёв.
 
 ## 5. Порядок разработки

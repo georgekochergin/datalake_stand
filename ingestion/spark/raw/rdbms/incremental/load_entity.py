@@ -12,10 +12,12 @@ shared ingestion package.
 import argparse
 import json
 import logging
+import os
 
-from ingestion.iceberg import validate_target_table
+from ingestion.spark.raw import append
+from ingestion.spark.raw.iceberg import validate_target_table
 from ingestion.spark.raw.rdbms import reader
-from ingestion.spark.raw.rdbms import raw_append
+from ingestion.spark.raw.rdbms.incremental import window
 from ingestion.spark.raw.rdbms.reader import render_source_table
 from ingestion.sources.rdbms import jdbc
 from ingestion.sources.rdbms import positions
@@ -129,11 +131,11 @@ def _plan_batch(spark, args, connect):
     SUCCEEDED batch returns as a no-op with its recorded result logged.
     Source aggregates run only when a new batch is being planned.
     """
-    from ingestion import meta
+    from ingestion.meta import registry
 
     key = (args.process_id, args.source_id, args.source_table)
     LOGGER.info("load attempt process_id=%s source_id=%s entity_fqn=%s", *key)
-    batch = meta.get_batch(process_id=args.process_id, source_id=args.source_id,
+    batch = registry.get_batch(process_id=args.process_id, source_id=args.source_id,
                            entity_fqn=args.source_table, db_connect=connect)
     if batch is not None:
         if batch["target_table"] != args.target_table:
@@ -168,7 +170,7 @@ def _plan_batch(spark, args, connect):
                 raise ValueError("SOURCE_POSITION_REGRESSION: explicit reset/bootstrap required")
         return positions.window_bounds(value, kind, size, unit)
 
-    return meta.plan_batch(
+    return registry.plan_batch(
         process_id=args.process_id, dag_id=args.dag_id, run_id=args.run_id,
         source_id=args.source_id, entity_fqn=args.source_table, target_table=args.target_table,
         incremental_column=args.incremental_column, incremental_type=kind,
@@ -186,9 +188,17 @@ def managed_load(spark, args):
     """Execute a persisted batch with at-least-once append and atomic pg-meta finalization."""
     import psycopg2
 
-    from ingestion import meta
+    from ingestion.meta import registry
 
-    connect = lambda: psycopg2.connect("")
+    def connect():
+        """Open the registry connection from the operator-provided DSN."""
+        dsn = os.environ.get("INGESTION_META_DSN")
+        if not dsn:
+            raise RuntimeError(
+                "INGESTION_META_DSN is not set: the incremental loader needs pg-meta credentials"
+            )
+        return psycopg2.connect(dsn)
+
     batch = _plan_batch(spark, args, connect)
     if batch["status"] == "SUCCEEDED":
         return
@@ -196,22 +206,23 @@ def managed_load(spark, args):
                entity_fqn=args.source_table, db_connect=connect)
     kind = batch["incremental_type"]
     if empty_incremental_window(batch):
-        meta.finalize_batch(row_count=0, observed_max=None, **key)
+        registry.finalize_batch(row_count=0, observed_max=None, **key)
         return
-    meta.start_batch(**key)
+    registry.start_batch(**key)
     try:
-        source = reader.read_extract_frame(spark, args, batch, kind)
+        source = window.read_window_frame(spark, args, batch, kind)
         try:
-            rows, observed = raw_append.append_raw(spark, args, source, kind)
+            rows, observed, clean = window.window_summary(source, kind)
+            append.append_raw(spark, args.target_table, clean, rows, args.process_id)
             watermark = batch["watermark_before"]
             watermark = positions.maximum(watermark, observed, kind)
-            meta.finalize_batch(row_count=rows, observed_max=observed,
+            registry.finalize_batch(row_count=rows, observed_max=observed,
                                 watermark_after=watermark, **key)
         finally:
             source.unpersist()
     except Exception:
         try:
-            meta.fail_batch(**key)
+            registry.fail_batch(**key)
         except Exception:
             LOGGER.warning("Unable to persist batch failure")
         raise

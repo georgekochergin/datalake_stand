@@ -9,9 +9,9 @@ execution is the only load path; no pg-meta state is planned or finalized.
 import argparse
 import logging
 
-from ingestion.iceberg import validate_target_table
+from ingestion.spark.raw import append
+from ingestion.spark.raw.iceberg import validate_target_table
 from ingestion.spark.raw.rdbms import reader
-from ingestion.spark.raw.rdbms import raw_append
 
 LOGGER = logging.getLogger(__name__)
 
@@ -41,9 +41,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def managed_load(spark, args):
     """Read the whole source frame and append it to the raw table."""
-    frame = reader.read_extract_frame(spark, args, None, None)
+    frame = reader.read_extract_frame(spark, args)
     try:
-        raw_append.append_raw(spark, args, frame, None)
+        append.append_raw(spark, args.target_table, frame, frame.count(), args.process_id)
     finally:
         frame.unpersist()
 

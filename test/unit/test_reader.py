@@ -27,7 +27,6 @@ def make_args(**overrides):
         "source_table": "retail_bank.clients",
         "num_partitions": 4,
         "no_jdbc_partitioning": False,
-        "incremental_column": None,
     }
     values.update(overrides)
     return types.SimpleNamespace(**values)
@@ -156,41 +155,6 @@ class TestReadBounds(unittest.TestCase):
         )
 
 
-class TestWindowFilters(unittest.TestCase):
-    """Pure assembly of the frozen-window predicates."""
-
-    def setUp(self):
-        self.dialect = registry.by_conn_type("mssql")
-
-    def filters(self, batch, kind="bigint"):
-        return reader.window_filters(
-            self.dialect, batch, kind, getattr(batch, "incremental_column", "_batch_id")
-        )
-
-    def test_strict_window(self):
-        batch = {"lower_bound": "5", "lower_bound_op": ">", "upper_bound": "10", "empty_at_plan": False}
-        self.assertEqual(self.filters(batch), ["[_batch_id] > 5", "[_batch_id] <= 10"])
-
-    def test_inclusive_lower_and_missing_bounds(self):
-        batch = {"lower_bound": None, "lower_bound_op": ">=", "upper_bound": "10", "empty_at_plan": False}
-        self.assertEqual(self.filters(batch), ["[_batch_id] <= 10"])
-        batch["upper_bound"] = None
-        self.assertEqual(self.filters(batch), [])
-
-    def test_empty_at_plan_proves_no_rows(self):
-        batch = {"lower_bound": "10", "lower_bound_op": ">", "upper_bound": "10", "empty_at_plan": True}
-        self.assertEqual(self.filters(batch), ["[_batch_id] > 10", "[_batch_id] <= 10", "1=0"])
-
-    def test_temporal_literal_rendered_by_kind(self):
-        batch = {"lower_bound": "2026-10-23T00:00:00Z", "lower_bound_op": ">=",
-                 "upper_bound": "2026-10-26T12:34:56Z", "empty_at_plan": False}
-        self.assertEqual(
-            self.filters(batch, kind="timestamp_instant(0)"),
-            ["[_batch_id] >= CAST('2026-10-23T00:00:00Z' AS datetimeoffset(0))",
-             "[_batch_id] <= CAST('2026-10-26T12:34:56Z' AS datetimeoffset(0))"],
-        )
-
-
 class TestReadExtractFrame(unittest.TestCase):
     """Frozen-window query assembly and heuristic partition discovery."""
 
@@ -210,21 +174,19 @@ class TestReadExtractFrame(unittest.TestCase):
             columns=built,
         )
 
-    def frame(self, args, batch, kind, projection=None, keys=None, bounds=(1, 100),
-              partitions=1, reader_double=None):
+    def frame(self, args, filters=(), extra_select="", projection=None, keys=None,
+              bounds=(1, 100), partitions=1, reader_double=None):
         reader_double = reader_double if reader_double is not None else RecordingReader(partitions=partitions)
         with patch.object(reader.jdbc, "compatibility_projection", return_value=projection), patch.object(
             reader.jdbc, "key_metadata", return_value=keys or self.key_metadata()
         ) as key_call, patch.object(reader, "read_bounds", return_value=bounds) as probe, patch.object(
             reader, "jdbc_reader", return_value=reader_double
         ) as builder:
-            result = reader.read_extract_frame(self.spark, args, batch, kind)
+            result = reader.read_extract_frame(self.spark, args, filters=filters, extra_select=extra_select)
         return result, reader_double, builder.call_args.args[2], key_call
 
-    def test_snapshot_without_keys_reads_single_partition(self):
-        batch = {"lower_bound": None, "lower_bound_op": ">",
-                 "upper_bound": None, "empty_at_plan": False}
-        result, reader_double, query, key_call = self.frame(make_args(), batch, None)
+    def test_whole_table_read_without_keys_single_partition(self):
+        result, reader_double, query, key_call = self.frame(make_args())
         self.assertIs(result, reader_double)
         self.assertEqual(
             query,
@@ -233,33 +195,30 @@ class TestReadExtractFrame(unittest.TestCase):
         key_call.assert_called_once()
         self.assertNotIn("partitionColumn", reader_double.options)
 
-    def test_snapshot_with_integer_pk_partitions_read(self):
-        batch = {"lower_bound": None, "lower_bound_op": ">",
-                 "upper_bound": None, "empty_at_plan": False}
+    def test_integer_pk_partitions_read(self):
         keys = self.key_metadata(primary_key=["client_id"], columns=[("client_id", "int")])
-        _, reader_double, _, _ = self.frame(make_args(), batch, None, keys=keys)
+        _, reader_double, _, _ = self.frame(make_args(), keys=keys)
         self.assertEqual(
             {key: reader_double.options[key] for key in ("partitionColumn", "lowerBound", "upperBound", "numPartitions")},
             {"partitionColumn": "client_id", "lowerBound": "1", "upperBound": "100", "numPartitions": 4},
         )
 
-    def test_incremental_column_has_no_partition_priority(self):
-        args = make_args(incremental_column="_batch_id")
-        batch = {"lower_bound": "5", "lower_bound_op": ">",
-                 "upper_bound": "10", "empty_at_plan": False}
+    def test_explicit_window_overrides_default_partition_priority(self):
+        args = make_args()
         keys = self.key_metadata(primary_key=["transaction_id"],
                                  columns=[("transaction_id", "bigint"), ("_batch_id", "int")])
-        _, reader_double, query, _ = self.frame(args, batch, "bigint", keys=keys, bounds=(5, 10))
+        _, reader_double, query, _ = self.frame(
+            args, filters=["[_batch_id] > 5", "[_batch_id] <= 10"],
+            extra_select=', [_batch_id] AS "__extract_position"', keys=keys, bounds=(5, 10),
+        )
         self.assertIn("[_batch_id] > 5 AND [_batch_id] <= 10", query)
         self.assertIn(', [_batch_id] AS "__extract_position"', query)
         self.assertEqual(reader_double.options["partitionColumn"], "transaction_id")
 
     def test_timestamp_column_partitions_by_derived_day(self):
-        batch = {"lower_bound": None, "lower_bound_op": ">",
-                 "upper_bound": None, "empty_at_plan": False}
         keys = self.key_metadata(columns=[("updated_at", "TIMESTAMP(9) WITH TIME ZONE")])
         result, reader_double, query, _ = self.frame(
-            make_args(jdbc_url=ORACLE_URL), batch, None, keys=keys, partitions=4)
+            make_args(jdbc_url=ORACLE_URL), keys=keys, partitions=4)
         self.assertIn(
             'CAST(TO_NUMBER(TO_CHAR(SYS_EXTRACT_UTC(extract_source."updated_at"), \'J\'))'
             ' AS NUMBER(10,0)) AS "__jdbc_day"',
@@ -270,23 +229,19 @@ class TestReadExtractFrame(unittest.TestCase):
         self.assertEqual(reader_double.dropped, ["__jdbc_day"])
 
     def test_day_alias_dropped_even_without_parallel(self):
-        batch = {"lower_bound": None, "lower_bound_op": ">",
-                 "upper_bound": None, "empty_at_plan": False}
         keys = self.key_metadata(columns=[("updated_at", "DATE")])
         _, reader_double, query, _ = self.frame(
-            make_args(jdbc_url=ORACLE_URL), batch, None, keys=keys, bounds=(None, None))
+            make_args(jdbc_url=ORACLE_URL), keys=keys, bounds=(None, None))
         self.assertIn('"__jdbc_day"', query)
         self.assertNotIn("partitionColumn", reader_double.options)
         self.assertEqual(reader_double.dropped, ["__jdbc_day"])
 
     def test_day_alias_collision_skips_derived_partitioning(self):
-        batch = {"lower_bound": None, "lower_bound_op": ">",
-                 "upper_bound": None, "empty_at_plan": False}
         keys = self.key_metadata(
             columns=[("updated_at", "TIMESTAMP(6)"), ("__jdbc_day", "NUMBER", 10, 0)]
         )
         with self.assertLogs(jdbc_partitioning.LOGGER, level="WARNING") as logs:
-            _, reader_double, query, _ = self.frame(make_args(jdbc_url=ORACLE_URL), batch, None, keys=keys)
+            _, reader_double, query, _ = self.frame(make_args(jdbc_url=ORACLE_URL), keys=keys)
         self.assertNotIn('TO_NUMBER(TO_CHAR', query)
         self.assertNotIn("partitionColumn", reader_double.options)
         self.assertEqual(reader_double.dropped, [])
@@ -294,35 +249,27 @@ class TestReadExtractFrame(unittest.TestCase):
         self.assertFalse(any("no partition column found" in line for line in logs.output))
 
     def test_date_column_partitions_directly(self):
-        batch = {"lower_bound": None, "lower_bound_op": ">",
-                 "upper_bound": None, "empty_at_plan": False}
         keys = self.key_metadata(columns=[("posting_date", "date")])
-        _, reader_double, query, _ = self.frame(make_args(), batch, None, keys=keys)
+        _, reader_double, query, _ = self.frame(make_args(), keys=keys)
         self.assertNotIn("__jdbc_day", query)
         self.assertEqual(reader_double.options["partitionColumn"], "posting_date")
 
     def test_composite_pk_and_no_candidates_single_partition(self):
-        batch = {"lower_bound": None, "lower_bound_op": ">",
-                 "upper_bound": None, "empty_at_plan": False}
         keys = self.key_metadata(primary_key=["code", "num"],
                                  columns=[("code", "nvarchar"), ("num", "int")])
-        _, reader_double, _, _ = self.frame(make_args(), batch, None, keys=keys)
+        _, reader_double, _, _ = self.frame(make_args(), keys=keys)
         self.assertNotIn("partitionColumn", reader_double.options)
 
     def test_equal_bounds_read_single_partition(self):
-        batch = {"lower_bound": None, "lower_bound_op": ">",
-                 "upper_bound": None, "empty_at_plan": False}
         keys = self.key_metadata(primary_key=["client_id"], columns=[("client_id", "int")])
-        _, reader_double, _, _ = self.frame(make_args(), batch, None, keys=keys, bounds=(7, 7))
+        _, reader_double, _, _ = self.frame(make_args(), keys=keys, bounds=(7, 7))
         self.assertNotIn("partitionColumn", reader_double.options)
 
     def test_long_range_bounds_partition(self):
-        batch = {"lower_bound": None, "lower_bound_op": ">",
-                 "upper_bound": None, "empty_at_plan": False}
         keys = self.key_metadata(primary_key=["id"], columns=[("id", "NUMBER", 38, 0)])
         edge = Decimal(2 ** 63 - 1)
         _, reader_double, _, _ = self.frame(
-            make_args(jdbc_url=ORACLE_URL), batch, None, keys=keys,
+            make_args(jdbc_url=ORACLE_URL), keys=keys,
             bounds=(-edge, edge), partitions=4)
         self.assertEqual(
             {key: reader_double.options[key] for key in ("lowerBound", "upperBound", "numPartitions")},
@@ -330,66 +277,36 @@ class TestReadExtractFrame(unittest.TestCase):
         )
 
     def test_bounds_beyond_long_skip_partitioning_with_warning(self):
-        batch = {"lower_bound": None, "lower_bound_op": ">",
-                 "upper_bound": None, "empty_at_plan": False}
         keys = self.key_metadata(primary_key=["id"], columns=[("id", "NUMBER", 38, 0)])
         beyond = Decimal(2 ** 63)
         with self.assertLogs(reader.LOGGER, level="WARNING") as logs:
             _, reader_double, _, _ = self.frame(
-                make_args(jdbc_url=ORACLE_URL), batch, None, keys=keys,
+                make_args(jdbc_url=ORACLE_URL), keys=keys,
                 bounds=(beyond, beyond + 100), partitions=4)
         self.assertNotIn("partitionColumn", reader_double.options)
         self.assertTrue(any("exceed the signed 64-bit" in line for line in logs.output), logs.output)
 
     def test_log_reports_actual_partitions_of_loaded_frame(self):
-        batch = {"lower_bound": None, "lower_bound_op": ">",
-                 "upper_bound": None, "empty_at_plan": False}
         keys = self.key_metadata(primary_key=["id"], columns=[("id", "int")])
         with self.assertLogs(reader.LOGGER, level="INFO") as logs:
-            self.frame(make_args(), batch, None, keys=keys, bounds=(11, 12), partitions=1)
+            self.frame(make_args(), keys=keys, bounds=(11, 12), partitions=1)
         self.assertTrue(any(
             "window=[11..12] partitions=1 of 4 requested" in line for line in logs.output
         ), logs.output)
 
-    def test_aligned_lookback_lower_uses_inclusive_operator(self):
-        args = make_args(incremental_column="_batch_id")
-        batch = {"lower_bound": "2026-10-23T00:00:00Z",
-                 "lower_bound_op": ">=", "upper_bound": "2026-10-26T12:34:56Z", "empty_at_plan": False}
-        _, _, query, _ = self.frame(args, batch, "timestamp_instant(0)")
-        self.assertIn("[_batch_id] >= ", query)
-
-    def test_missing_lower_bound_fully_dropped(self):
-        args = make_args(incremental_column="_batch_id")
-        batch = {"lower_bound": None, "lower_bound_op": ">=",
-                 "upper_bound": "10", "empty_at_plan": False}
-        _, _, query, _ = self.frame(args, batch, "bigint")
-        self.assertNotIn(">=", query)
-        self.assertIn("[_batch_id] <= 10", query)
-
-    def test_empty_window_proves_no_rows(self):
-        args = make_args(incremental_column="_batch_id")
-        batch = {"lower_bound": "10", "lower_bound_op": ">",
-                 "upper_bound": "10", "empty_at_plan": True}
-        _, _, query, _ = self.frame(args, batch, "bigint")
-        self.assertIn("1=0", query)
-
     def test_disabled_partitioning_skips_probing(self):
-        batch = {"lower_bound": None, "lower_bound_op": ">",
-                 "upper_bound": None, "empty_at_plan": False}
         with patch.object(reader, "jdbc_reader", return_value=RecordingReader()), patch.object(
             reader.jdbc, "key_metadata"
         ) as keys, patch.object(reader, "read_bounds") as probe:
-            reader.read_extract_frame(self.spark, make_args(no_jdbc_partitioning=True), batch, None)
+            reader.read_extract_frame(self.spark, make_args(no_jdbc_partitioning=True))
         keys.assert_not_called()
         probe.assert_not_called()
 
     def test_no_candidate_column_warns_with_observed_metadata(self):
-        batch = {"lower_bound": None, "lower_bound_op": ">",
-                 "upper_bound": None, "empty_at_plan": False}
         keys = self.key_metadata(primary_key=["code"],
                                  columns=[("code", "nvarchar"), ("num", "int", None, None, False)])
         with self.assertLogs(jdbc_partitioning.LOGGER, level="WARNING") as logs:
-            self.frame(make_args(), batch, None, keys=keys)
+            self.frame(make_args(), keys=keys)
         self.assertTrue(any(
             "no partition column" in line and "retail_bank.clients" in line
             and "code nvarchar unsupported" in line and "num int integral null" in line
@@ -397,16 +314,12 @@ class TestReadExtractFrame(unittest.TestCase):
         ), logs.output)
 
     def test_unavailable_metadata_does_not_duplicate_no_candidate_warning(self):
-        batch = {"lower_bound": None, "lower_bound_op": ">",
-                 "upper_bound": None, "empty_at_plan": False}
         with self.assertNoLogs(jdbc_partitioning.LOGGER, level="WARNING"):
-            self.frame(make_args(), batch, None, keys=jdbc.KeyMetadata((), (), {}))
+            self.frame(make_args(), keys=jdbc.KeyMetadata((), (), {}))
 
     def test_compatibility_projection_rewrites_select(self):
-        batch = {"lower_bound": None, "lower_bound_op": ">",
-                 "upper_bound": None, "empty_at_plan": False}
         projection = ['extract_source."a"', 'SYS_EXTRACT_UTC(extract_source."b") AS "b"']
-        _, _, query, _ = self.frame(make_args(jdbc_url=ORACLE_URL), batch, None, projection=projection)
+        _, _, query, _ = self.frame(make_args(jdbc_url=ORACLE_URL), projection=projection)
         self.assertIn('SELECT extract_source."a", SYS_EXTRACT_UTC(extract_source."b") AS "b"', query)
         self.assertIn('FROM (SELECT * FROM "retail_bank"."clients")', query)
 

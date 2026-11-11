@@ -4,9 +4,10 @@ All three stream applications — the incremental window load, the full-slice
 load and the actual-snapshot load — read the source through this module: it
 renders the dialect-quoted table reference, applies compatibility
 projections, picks the JDBC partitioning column and returns a cached frame.
-Pure helpers import without Spark; the args namespace of each application
-carries the JDBC credentials and the optional incremental_column (None for
-whole-table reads).
+Callers pass explicit projections and predicates: the incremental flow builds
+the frozen-window filters and the position column in its own window module,
+whole-table reads pass none. Pure helpers import without Spark; the args
+namespace of each application carries the JDBC credentials.
 """
 
 import logging
@@ -89,32 +90,14 @@ def read_bounds(spark, args, read_query, column) -> tuple:
     return row[0], row[1]
 
 
-def window_filters(dialect, batch, kind, incremental_column):
-    """SQL predicates of the frozen batch window over the incremental column."""
-    column = dialect.quote_identifier(incremental_column)
-    filters = []
-    for key, op in (("lower_bound", batch["lower_bound_op"]), ("upper_bound", "<=")):
-        if batch[key] is not None:
-            filters.append(
-                f"{column} {op} {dialect.position_literal(positions.canonical(batch[key], kind), kind)}"
-            )
-    if batch["empty_at_plan"]:
-        filters.append("1=0")
-    return filters
-
-
-def build_extract_query(spark, args, dialect, source_table, kind, filters, extra_select):
-    """Assemble the wrapping JDBC read query: projection, position, day, window."""
+def build_extract_query(spark, args, dialect, source_table, filters=(), extra_select=""):
+    """Assemble the wrapping JDBC read query: projection, extra columns, filters."""
     select = "extract_source.*"
     projection = jdbc.compatibility_projection(
         spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, source_table
     )
     if projection is not None:
         select = ", ".join(projection)
-    incremental_column = getattr(args, "incremental_column", None)
-    if incremental_column:
-        column = dialect.quote_identifier(incremental_column)
-        select += f', {dialect.position_expression(column, kind)} AS "__extract_position"'
     if extra_select:
         select += extra_select
     return (
@@ -153,25 +136,24 @@ def apply_partition_options(spark, args, reader, query, partition):
     return reader, low, high
 
 
-def read_extract_frame(spark, args, batch, kind):
-    """Read the frozen batch window over JDBC into a cached frame.
+def read_extract_frame(spark, args, filters=(), extra_select=""):
+    """Read the source over JDBC into a cached frame with explicit predicates.
 
-    A null batch reads the whole table (full-slice and snapshot streams).
-    Incremental batches carry the frozen bounds; the frame mirrors the
-    source columns plus the exact typed extraction position as the
-    __extract_position column.
+    Whole-table reads (full-slice and snapshot streams) pass no filters; the
+    incremental flow passes the frozen-window predicates and the exact typed
+    extraction position as extra_select.
     """
     dialect = dialects.by_jdbc_url(args.jdbc_url)
-    incremental_column = getattr(args, "incremental_column", None)
-    filters = window_filters(dialect, batch, kind, incremental_column) if incremental_column else []
     source_table = render_source_table(dialect, args.source_table, allow_expression=True)
-    partition = extra_select = None
+    partition = partition_select = None
     if not args.no_jdbc_partitioning:
         keys = jdbc.key_metadata(
             spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table
         )
-        partition, extra_select = jdbc_partitioning.plan(dialect, keys, args.source_table)
-    query = build_extract_query(spark, args, dialect, source_table, kind, filters, extra_select)
+        partition, partition_select = jdbc_partitioning.plan(dialect, keys, args.source_table)
+    if partition_select:
+        extra_select = f"{extra_select}{partition_select}"
+    query = build_extract_query(spark, args, dialect, source_table, filters, extra_select)
     reader = jdbc_reader(spark, args, query)
     reader, low, high = apply_partition_options(spark, args, reader, query, partition)
     frame = reader.load()

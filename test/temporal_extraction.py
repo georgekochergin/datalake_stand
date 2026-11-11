@@ -210,6 +210,7 @@ def check_post_append_retry(spark, hook, jdbc, token):
     """Inject a real post-append metadata failure and accept a repeated append."""
     load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/incremental/load_entity.py")
     from ingestion import meta
+    from ingestion.meta import registry
 
     args = Namespace(
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
@@ -222,7 +223,7 @@ def check_post_append_retry(spark, hook, jdbc, token):
         lookback_size=0, lookback_unit=None,
         position_type="bigint",
     )
-    with patch.object(meta, "finalize_batch", side_effect=RuntimeError("injected metadata failure")):
+    with patch.object(registry, "finalize_batch", side_effect=RuntimeError("injected metadata failure")):
         try:
             load_entity.managed_load(spark, args)
         except RuntimeError as exc:
@@ -308,7 +309,7 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
         with patch.object(load_entity, "source_position",
                           side_effect=lambda session, _: real_position(session, visible)), \
                 patch.object(load_entity.reader, "read_extract_frame",
-                             side_effect=lambda session, _, *bounds: real_read(session, visible, *bounds)):
+                             side_effect=lambda session, _, **window: real_read(session, visible, **window)):
             load_entity.managed_load(spark, args)
 
     snapshot_args = Namespace(**vars(args))
@@ -390,7 +391,7 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
             f"{source}: empty check cannot claim the previous publication")
     allocate()
     snapshot_args.source_table = projection((20, 21))
-    frame = load_act_snap.read_extract_frame(spark, snapshot_args, None, None)
+    frame = load_act_snap.read_extract_frame(spark, snapshot_args)
     try:
         with patch.object(spark, "sql", side_effect=RuntimeError("injected pre-commit failure")):
             try:
@@ -533,7 +534,7 @@ def check_partitioning(spark, source_jdbc):
 def check_partitioned_load_path(spark, source_jdbc):
     """Run the real read-and-append path with a forced date or timestamp step."""
     reader = load_module("reader", "/opt/spark-jobs/raw/rdbms/reader.py")
-    raw_append = load_module("raw_append", "/opt/spark-jobs/raw/rdbms/raw_append.py")
+    append = load_module("append", "/opt/spark-jobs/raw/append.py")
     from ingestion.sources.rdbms import jdbc, jdbc_partitioning
     from ingestion.sources.rdbms import registry as dialects
 
@@ -560,14 +561,14 @@ def check_partitioned_load_path(spark, source_jdbc):
                 f"{source}: without keys, with a NOT NULL {column}, the heuristic"
                 f" picks the {expected_steps[source]} step")
         with patch.object(reader.jdbc, "key_metadata", return_value=forced):
-            frame = reader.read_extract_frame(spark, args, None, None)
+            frame = reader.read_extract_frame(spark, args)
             try:
-                rows, observed = raw_append.append_raw(spark, args, frame, None)
+                rows = frame.count()
+                append.append_raw(spark, args.target_table, frame, rows, args.process_id)
             finally:
                 frame.unpersist()
         total = jdbc_count(spark, args, reader.render_source_table(dialect, table))
         require(rows == total, f"{source}: partitioned full-slice append writes every source row")
-        require(observed is None, f"{source}: full-slice append reports no extraction position")
         schema_names = {field.name for field in spark.table(target).schema.fields}
         require(jdbc_partitioning.DAY_ALIAS not in schema_names,
                 f"{source}: the day alias never reaches the raw schema")
@@ -584,9 +585,12 @@ def main():
     from ingestion.operators import resolve_source_connection
     from pyspark.sql import SparkSession
 
+    from psycopg2.extensions import make_dsn
+
     meta = BaseHook.get_connection("ingestion_meta")
-    os.environ.update(PGHOST=meta.host, PGPORT=str(meta.port or 5432),
-                      PGDATABASE=meta.schema, PGUSER=meta.login, PGPASSWORD=meta.password)
+    os.environ["INGESTION_META_DSN"] = make_dsn(
+        host=meta.host, port=meta.port or 5432, dbname=meta.schema,
+        user=meta.login, password=meta.password)
     hook = PostgresHook(postgres_conn_id="ingestion_meta")
     with create_session() as session:
         source_jdbc = {
