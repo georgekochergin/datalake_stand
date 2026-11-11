@@ -309,7 +309,7 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
         with patch.object(load_entity, "source_position",
                           side_effect=lambda session, _: real_position(session, visible)), \
                 patch.object(load_entity.reader, "read_extract_frame",
-                             side_effect=lambda session, _, *bounds: real_read(session, visible, *bounds)):
+                             side_effect=lambda session, _, **window: real_read(session, visible, **window)):
             load_entity.managed_load(spark, args)
 
     snapshot_args = Namespace(**vars(args))
@@ -391,7 +391,7 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
             f"{source}: empty check cannot claim the previous publication")
     allocate()
     snapshot_args.source_table = projection((20, 21))
-    frame = load_act_snap.read_extract_frame(spark, snapshot_args, None, None)
+    frame = load_act_snap.read_extract_frame(spark, snapshot_args)
     try:
         with patch.object(spark, "sql", side_effect=RuntimeError("injected pre-commit failure")):
             try:
