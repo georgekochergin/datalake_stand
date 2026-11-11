@@ -31,6 +31,15 @@ def fake_make_dsn(**kwargs):
     return "host={host} port={port} dbname={dbname} user={user} password={password}".format(**kwargs)
 
 
+def load_meta_api():
+    """Load the real ingestion.meta logging module standalone to mirror its API surface."""
+    path = Path(__file__).resolve().parents[2] / "ingestion" / "meta" / "__init__.py"
+    spec = importlib.util.spec_from_file_location("_operator_test_meta", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def load_operators():
     """Import the operators package under a private name and restore mocked modules."""
     import ingestion.sources
@@ -50,7 +59,7 @@ def load_operators():
     modules["airflow.providers.apache.spark.operators.spark_submit"].SparkSubmitOperator = FakeOperator
     modules["psycopg2.extensions"].make_dsn = fake_make_dsn
     modules["ingestion"] = types.ModuleType("ingestion")
-    modules["ingestion"].meta = MagicMock()
+    modules["ingestion"].meta = MagicMock(spec=load_meta_api())
     modules["ingestion"].sources = ingestion.sources
     modules["ingestion"].spark = ingestion.spark
     modules["ingestion.meta"] = modules["ingestion"].meta
@@ -65,6 +74,19 @@ def load_operators():
     module.BaseHook = modules["airflow.sdk"].BaseHook
     module.meta = modules["ingestion"].meta
     return module
+
+
+class TestMetaDouble(unittest.TestCase):
+    """The ingestion.meta double mirrors the real module: logging only, no batch registry."""
+
+    def test_registry_and_watermark_names_are_rejected(self):
+        module = load_operators()
+        for name in (
+            "plan_batch", "start_batch", "finalize_batch", "fail_batch",
+            "get_watermark", "set_watermark", "registry",
+        ):
+            with self.subTest(name=name), self.assertRaises(AttributeError):
+                getattr(module.meta, name)
 
 
 class TestIngestOperator(unittest.TestCase):
@@ -115,7 +137,9 @@ class TestIngestOperator(unittest.TestCase):
         for flag in ("--incremental-config", "--incremental-column", "--lookback-size", "--lookback-unit", "--lookback-given"):
             self.assertNotIn(flag, args)
         self.assertEqual(operator.env_vars, {"EXISTING": "kept"})
-        self.module.meta.get_watermark.assert_not_called()
+        self.assertEqual(self.module.meta.mock_calls, [])
+        requested = [c.args[0] for c in self.module.BaseHook.get_connection.call_args_list]
+        self.assertNotIn("ingestion_meta", requested)
 
     def test_full_operator_rejects_incremental_parameters(self):
         import inspect
@@ -131,7 +155,7 @@ class TestIngestOperator(unittest.TestCase):
         args = operator.application_args
         self.assertEqual(json.loads(args[args.index("--incremental-config") + 1]), self.config)
         self.assertNotIn("--watermark-value", args)
-        self.module.meta.get_watermark.assert_not_called()
+        self.assertEqual(self.module.meta.mock_calls, [])
 
     def test_partitioning_arguments_for_full_and_incremental_loads(self):
         for make in (self.full_operator, self.incremental_operator):
@@ -280,12 +304,7 @@ class TestTableLogOperator(unittest.TestCase):
             "process_id": 42, "source_id": "bank", "entity_fqn": "s.t",
             "datalake_table": "raw.bank.s__t", "status": "END",
         })
-        self.module.meta.get_watermark.assert_not_called()
-        self.module.meta.set_watermark.assert_not_called()
-        self.module.meta.plan_batch.assert_not_called()
-        self.module.meta.start_batch.assert_not_called()
-        self.module.meta.finalize_batch.assert_not_called()
-        self.module.meta.fail_batch.assert_not_called()
+        self.assertEqual([entry[0] for entry in self.module.meta.mock_calls], ["log_task"])
 
     def test_logging_interface_has_no_extraction_parameters(self):
         import inspect
@@ -299,11 +318,10 @@ class TestTableLogOperator(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "log failed"):
             self.operator(status="END").execute({})
 
-    def test_start_and_snapshot_end_do_not_query_watermark(self):
+    def test_start_and_end_only_log_lifecycle(self):
         self.operator(status="START").execute({})
         self.operator(status="END").execute({})
-        self.module.meta.get_watermark.assert_not_called()
-        self.module.meta.set_watermark.assert_not_called()
+        self.assertEqual([entry[0] for entry in self.module.meta.mock_calls], ["log_task", "log_task"])
         self.assertEqual(self.events, ["START", "END"])
 
     def test_invalid_pid_fails_cleanly(self):
@@ -437,6 +455,8 @@ class TestIngestActSnapOperator(unittest.TestCase):
         self.assertNotIn("INGESTION_META_DSN", operator.env_vars or {})
         self.assertNotIn("--lookback-size", operator.application_args)
         self.assertNotIn("--incremental-column", operator.application_args)
+        requested = [c.args[0] for c in self.module.BaseHook.get_connection.call_args_list]
+        self.assertEqual(requested, ["source"])
 
     def test_no_marker_protocol(self):
         operator = self.operator()
