@@ -79,7 +79,8 @@ Trino/pg-meta → партиции в silo → устойчивость к эв�
 Подключения DBeaver, которые нужно подготовить заранее:
 
 - **Trino**: драйвер Trino, host `localhost`, port `8443`, catalog/database
-  `raw`, SSL включён; свойства драйвера `SSL=true`, `SSLVerification=NONE`
+  `raw`, SSL включён.
+  - Свойства драйвера: `SSL=true`, `SSLVerification=NONE`
   (сертификат стенда самоподписанный). JDBC URL:
   `jdbc:trino://localhost:8443/raw?SSL=true&SSLVerification=NONE`.
 - **pg-meta**: драйвер PostgreSQL, host `localhost`, port `55432`, database
@@ -113,14 +114,15 @@ http://localhost:8090/health должен вернуть HTTP 200. При пер
    (расписания нет — запуск только ручной, кнопкой ▶ справа).
 2. Запустить оба (можно параллельно), открыть Grid View.
 3. Пока идут: таски `migrate_bank` и `migrate_broker` применяют наборы операций из
-   `airflow/plugins/migrations/{bank,broker}.json`. На каждый запуск каждого
-   источника: +20 клиентов, +20 счетов, +200 сделок, +5000 транзакций;
-   каскадное удаление 10 сделок и связанных с ними строк. Поэтому итоговый
-   прирост сделок — 190, а транзакций — не обязательно ровно 5000.
-   В bank обновляются до 2 статусов клиентов на `VIP`, до 2 статусов счетов
-   на `Frozen` и до 10 статусов сделок на `Closed`; в broker — до 2 профилей
-   риска клиентов на `Aggressive`, до 2 статусов счетов на `Closed` и до 10
-   значений рынка сделок на `OTC`.
+   `airflow/plugins/migrations/{bank,broker}.json`:
+   - На каждый запуск каждого источника добавляются 20 клиентов, 20 счетов,
+     200 сделок и 5000 транзакций.
+   - Каскадно удаляются 10 сделок и связанные с ними строки. Поэтому итоговый
+     прирост сделок — 190, а транзакций — не обязательно ровно 5000.
+   - В bank обновляются до 2 статусов клиентов на `VIP`, до 2 статусов счетов
+     на `Frozen` и до 10 статусов сделок на `Closed`.
+   - В broker обновляются до 2 профилей риска клиентов на `Aggressive`,
+     до 2 статусов счетов на `Closed` и до 10 значений рынка сделок на `OTC`.
 4. Дождаться зелёного статуса обоих DAG-ов. В логе соответствующего таска
    виден результат применения операций.
 
@@ -190,7 +192,8 @@ rm airflow/dags/generated/ingest__*.py
    обновление списка может занять больше одного цикла) → четыре ingest-DAG-а
    становятся неактивными или скрываются фильтром активных DAG-ов: их
    определяют файлы в `airflow/dags/generated/`. История запусков в базе
-   Airflow сохраняется; `update_source_*` остаются активными.
+   Airflow сохраняется.
+   - `update_source_*` остаются активными.
 3. Сгенерировать DAG-и заново:
 
 ```bash
@@ -200,8 +203,8 @@ python3 -m ingestion.generator.generate_dags --check
 ```
 
 4. Показать сгенерированные файлы: `ingest__rdbms__bank__main.py`,
-   `ingest__rdbms__bank__refs.py` и два для broker; `--check` печатает
-   `check: 0 difference(s)` — артефакты соответствуют [манифестам](glossary.md#term-manifest).
+   `ingest__rdbms__bank__refs.py` и два для broker.
+   - `--check` печатает `check: 0 difference(s)` — артефакты соответствуют [манифестам](glossary.md#term-manifest).
 5. Airflow UI → после цикла парсинга четыре DAG-а
    `ingest__rdbms__{bank,broker}__{main,refs}` **появились снова**. Открыть
    `ingest__rdbms__bank__main`: видна структура
@@ -218,12 +221,12 @@ python3 -m ingestion.generator.generate_dags --check
 [JDBC-партиций](glossary.md#term-jdbc-partition) для transactions и отключение параллельного чтения для остальных:
 
 1. **Конфигурация** (до запуска): `ingestion/conf/settings.yaml` —
-   `spark.jdbc.num_partitions: 4`; `ingestion/conf/pipelines/bank/main.yaml` — у
-   `transactions` нет `spark.jdbc_partitioning: false` (параллельное чтение
-   разрешено), у `deals` и всех таблиц `refs` — `spark.jdbc_partitioning:
-   false` (один поток). Колонка нарезки выбирается автоматически единой
-   эвристикой: у всех демо-таблиц это целочисленный первичный ключ
-   (`transaction_id`).
+   `spark.jdbc.num_partitions: 4`.
+   - В `ingestion/conf/pipelines/bank/main.yaml` у `transactions` нет
+     `spark.jdbc_partitioning: false`: параллельное чтение разрешено.
+   - У `deals` и всех таблиц `refs` — `spark.jdbc_partitioning: false`: один поток.
+   - Колонка нарезки выбирается автоматически единой эвристикой:
+     у всех демо-таблиц это целочисленный первичный ключ (`transaction_id`).
 2. **Живьём на источнике (MSSQL)**: пока идёт `ingest__rdbms__bank__main`, в
    DBeaver (bank) выполнить — можно увидеть соединения чтения transactions
    и deals (Login `sydafa`, HostName — контейнер spark-worker):
@@ -252,7 +255,7 @@ WHERE username = 'SYDAFA' AND program LIKE 'JDBC%';
 3. **В логе load-таска**: открыть лог
    `ingest_group.load_retail_bank__transactions.load` и показать команду
    Spark с `--num-jdbc-partitions 4` и JSON `--incremental-config`, содержащим
-   contract (колонку и [канонический тип позиции](glossary.md#term-canonical)) и конкретный [lookback](glossary.md#term-lookback);
+   contract (колонку и [канонический тип позиции](glossary.md#term-canonical)) и конкретный [lookback](glossary.md#term-lookback).
    у deals и таблиц refs передаётся `--no-jdbc-partitioning`. Ниже в том же
    логе — строка выбора колонки нарезки вида
 
@@ -272,9 +275,12 @@ WHERE username = 'SYDAFA' AND program LIKE 'JDBC%';
 
 ### Ограничение числа загрузок
 
-**[Пул](glossary.md#term-pool) Airflow**: Admin → [Pools](glossary.md#term-pool) → `ingest_loads` (4 [слота](glossary.md#term-slot); transactions
-занимает 2, остальные загрузки по 1). Во время загрузок колонки Running/Queued
-[Slots](glossary.md#term-slot) оживают; на главной странице есть виджет [Pool](glossary.md#term-pool) [Slots](glossary.md#term-slot).
+**[Пул](glossary.md#term-pool) Airflow**: Admin → [Pools](glossary.md#term-pool) → `ingest_loads`:
+
+- Ёмкость — 4 [слота](glossary.md#term-slot).
+- `transactions` занимает 2 [слота](glossary.md#term-slot), остальные загрузки — по 1.
+- Во время загрузок колонки Running/Queued [Slots](glossary.md#term-slot) оживают.
+- На главной странице есть виджет [Pool](glossary.md#term-pool) [Slots](glossary.md#term-slot).
 
 **Что рассказать:**
 
@@ -313,7 +319,7 @@ WHERE __load_dttm = (SELECT max(__load_dttm) FROM raw.bank.retail_bank__clients)
 - Для [инкремента](glossary.md#term-increment) в pg-meta есть отдельная запись [партии](glossary.md#term-batch).
   [Полные срезы](glossary.md#term-full) в реестре `incremental_batches` не учитываются.
 
-**pg-meta** (DBeaver, подключение из раздела подготовки; запросы поочерёдно):
+**pg-meta** (DBeaver, подключение из раздела подготовки, запросы поочерёдно):
 
 ```sql
 SELECT process_id, dag_id, run_id, status, ts
@@ -548,7 +554,7 @@ Spark-приложение запускается, но чтение строк 
 
 1. http://localhost:9001 (`admin123` / `admin123`) → bucket `datalake`.
 2. Путь `datalake / raw / bank / retail_bank__transactions / data` — каталоги
-   вида `__load_dttm_day=2026-10-26` — дневные партиции загрузки; внутри —
+   вида `__load_dttm_day=2026-10-26` — дневные партиции загрузки. Внутри —
    Parquet-файлы данных.
 3. Рядом `datalake / raw / bank / retail_bank__transactions / metadata` —
    файлы метаданных Iceberg (manifest-файлы и [снапшоты Iceberg](glossary.md#term-iceberg-snapshot) — история коммитов таблицы).
@@ -655,7 +661,7 @@ Spark-приложение запускается, но чтение строк 
 
 В каждом ответе возвращается весь профиль таблицы — удобно показать, что
 остальные генераторы не тронуты. (Инварианты связности добавляются на таблицу
-по одному — `POST /sources/{source}/rules/{fqn}/invariants`; справочникам
+по одному — `POST /sources/{source}/rules/{fqn}/invariants`. Справочникам
 клиентов они не нужны, поэтому на демо не выполняются.)
 
 ### 7.5. Проверка схемы источника
@@ -702,11 +708,11 @@ GROUP BY 1 ORDER BY 1;
 не упала и ничего не потеряла молча:
 
 - `client_type` **сохранён** в [raw](glossary.md#term-raw) (история читается по-старому), у новых
-  [порций](glossary.md#term-portion) NULL — удаление на источнике не удалило историю в озере;
+  [порций](glossary.md#term-portion) NULL — удаление на источнике не удалило историю в озере.
 - `client_name` **добавлен** (переименование на источнике выглядит как
-  удалить+добавить): старые [порции](glossary.md#term-portion) NULL, новые — со значениями;
+  удалить+добавить): старые [порции](glossary.md#term-portion) NULL, новые — со значениями.
 - `email` добавлен автоматически: старые [порции](glossary.md#term-portion) NULL, новая [порция](glossary.md#term-portion) — со
-  значениями (после назначения генератора и обновления источника);
+  значениями (после назначения генератора и обновления источника).
 - порядок колонок в таблице не важен: сопоставление по имени
   (`mergeSchema=true`, свойство таблицы `write.spark.accept-any-schema=true`
   и опция записи `check-ordering=false`). Новые колонки добавляются при записи,
@@ -726,9 +732,9 @@ FROM ingestion.incremental_batches ORDER BY process_id DESC LIMIT 8;
 
 1. В Airflow (DAGs) найти снимочный DAG банка: фильтр по тегу `act_snap` или
    по префиксу имени `ingest__rdbms__bank__main__act_snap_` (суффикс-алиас
-   вычисляется из [FQN](glossary.md#term-fqn) [сущности](glossary.md#term-entity); у каждого инкрементального источника свой
-   DAG-снимок — их ровно два: банк и брокер). Расписание не задано —
-   запустить вручную (Trigger), без параметров.
+   вычисляется из [FQN](glossary.md#term-fqn) [сущности](glossary.md#term-entity)).
+   - У каждого инкрементального источника свой DAG-снимок — их ровно два: банк и брокер.
+   - Расписание не задано: запустить вручную (Trigger), без параметров.
 2. Структура запуска та же, что у пайплайна: `generate_process_id`
    (свой номер процесса) → `activate_source` → группа `snap_...`:
    `log_start → load → log_end → publish_asset`. В [манифестах](glossary.md#term-manifest) явно задан
@@ -778,7 +784,7 @@ WHERE key = 'snapshot.process_id';
 ```
 
 **Что рассказать:** время последней публикации — момент коммита Iceberg,
-автор — табличное свойство `snapshot.process_id`; оба читаются без pg-meta.
+автор — табличное свойство `snapshot.process_id`. Оба читаются без pg-meta.
 Реестр [инкремента](glossary.md#term-increment) (`incremental_batches`) снимком не пополняется — у
 [инкремента](glossary.md#term-increment) и снимка раздельные потоки, а пустое чтение источника не
 перезаписывает существующий непустой снимок (защита от затирания данных).
@@ -789,7 +795,10 @@ WHERE key = 'snapshot.process_id';
 Для снимка она читает одну строку `__process_id` через Trino и публикует
 `raw://bank/retail_bank.transactions/act_snap`, только если строка принадлежит
 текущему процессу. Пустая таблица или старый процесс означают пропуск задачи
-без события; ошибка Trino — ошибку задачи. Локальный файл результата не нужен.
+без события.
+
+- Ошибка Trino означает ошибку задачи.
+- Локальный файл результата не нужен.
 У обычных загрузок тот же PythonOperator публикует [Asset](glossary.md#term-asset) без проверки.
 
 ### Независимые настройки снимка
