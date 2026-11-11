@@ -6,11 +6,11 @@
 - [Приоритет: важно](#приоритет-важно)
   - [Определить и проверить минимальные поддерживаемые версии компонентов](#определить-и-проверить-минимальные-поддерживаемые-версии-компонентов)
   - [Разделить реестр источников на YAML-файлы и настроить JDBC-параллелизм по источникам](#разделить-реестр-источников-на-yaml-файлы-и-настроить-jdbc-параллелизм-по-источникам)
-  - [Изолировать Spark drivers через DockerOperator](#изолировать-spark-drivers-через-dockeroperator)
-  - [Обработка подвисших процессов Spark при retry задач](#обработка-подвисших-процессов-spark-при-retry-задач)
+  - [Останавливать предыдущие Spark-приложения перед записью в целевую таблицу](#останавливать-предыдущие-spark-приложения-перед-записью-в-целевую-таблицу)
   - [Шаблонизация кода в generator/generate_dags.py](#шаблонизация-кода-в-generatorgenerate_dagspy)
   - [Управление ресурсами Spark на уровне отдельной джобы](#управление-ресурсами-spark-на-уровне-отдельной-джобы)
 - [Приоритет: можно отложить](#приоритет-можно-отложить)
+  - [Изолировать Spark drivers через DockerOperator](#изолировать-spark-drivers-через-dockeroperator)
   - [Автоматически формировать теги DAG и исключать дубликаты](#автоматически-формировать-теги-dag-и-исключать-дубликаты)
   - [Разделить пулы Airflow для загрузок и служебных задач](#разделить-пулы-airflow-для-загрузок-и-служебных-задач)
   - [Убрать пароль JDBC-источника из аргументов spark-submit](#убрать-пароль-jdbc-источника-из-аргументов-spark-submit)
@@ -192,161 +192,7 @@ spark:
   - Реализация выполняется отдельно по спек-циклу.
   - Здесь добавляется только задача бэклога.
 
-### Изолировать Spark drivers через DockerOperator
-
-#### Задача Jira
-
-DATARCH-2244
-
-#### Контекст
-
-Spark [driver](glossary.md#term-driver) — управляющий процесс приложения: выполняет основной код, строит план вычислений, распределяет задачи между [executors](glossary.md#term-executor) и получает результаты. [Executors](glossary.md#term-executor) выполняют распределённую обработку данных на Spark workers.
-
-`deploy_mode` определяет место запуска [driver](glossary.md#term-driver), а не [executors](glossary.md#term-executor):
-
-- `client`: [driver](glossary.md#term-driver) работает там, где запущен `spark-submit`.
-- `cluster`: [driver](glossary.md#term-driver) размещается менеджером вычислительного кластера.
-
-Текущий запуск:
-
-- Spark Standalone 3.5.5 и Airflow LocalExecutor.
-- Операторы загрузки `IngestFullOperator`/`IngestIncrementalOperator` наследуют `SparkSubmitOperator`, режим — `client`.
-- `spark-submit` и [driver](glossary.md#term-driver) работают в `airflow-scheduler`.
-- [Executors](glossary.md#term-executor) работают на `spark-worker`.
-
-Исходные файлы:
-
-- Загрузчики: `ingestion/spark/raw/rdbms/incremental/load_entity.py`
-  и `ingestion/spark/raw/rdbms/full/load_entity.py`.
-- Оператор: `ingestion/operators.py`.
-- Окружение: `docker-compose.yaml` и `conf/airflow/Dockerfile`.
-
-Spark Standalone 3.5.5 не поддерживает `cluster` deploy mode для Python-приложений. Поэтому одной сменой `deploy_mode` изолировать текущий PySpark [driver](glossary.md#term-driver) нельзя. Production не требует именно cluster mode: важны изоляция ресурсов и управляемый жизненный цикл [driver](glossary.md#term-driver).
-
-#### Проблема
-
-[Driver](glossary.md#term-driver) потребляет CPU и память контейнера Airflow. Несколько параллельных загрузок создают несколько [drivers](glossary.md#term-driver)/JVM рядом со scheduler и конкурируют с оркестратором за ресурсы. При остановке этого контейнера текущая загрузка теряет [driver](glossary.md#term-driver) и не может нормально завершиться.
-
-Airflow [pools](glossary.md#term-pool) ограничивают допуск и вес одновременно работающих загрузок, но не обеспечивают отдельные CPU/memory limits для каждого [driver](glossary.md#term-driver). Образ Airflow также содержит Spark, Java и JDBC-зависимости.
-
-Пример: две одновременно работающие загрузки запускают два [driver](glossary.md#term-driver)-процесса в `airflow-scheduler`, хотя [executors](glossary.md#term-executor) выполняются на отдельном worker.
-
-Кейс воспроизведения (не проверен в рамках оформления бэклога): запустить две параллельные загрузки и проверить размещение процессов и потребление ресурсов.
-
-- Ожидаемое целевое поведение — отдельный контейнер с CPU/memory limits для каждого [driver](glossary.md#term-driver).
-- Текущее поведение по описанию выше — оба [driver](glossary.md#term-driver) работают в контейнере scheduler и делят его ресурсы.
-
-#### Предпочтительный путь решения
-
-Перевести режимные операторы загрузки (`IngestFullOperator`, `IngestIncrementalOperator`) на `DockerOperator`: одна задача загрузки — отдельный контейнер со `spark-submit` и [driver](glossary.md#term-driver). Сохранить Spark Standalone и `deploy_mode=client`.
-
-```text
-Airflow: IngestFullOperator / IngestIncrementalOperator (DockerOperator)
-    → контейнер загрузки: spark-submit + driver
-        → Spark Standalone: executors на worker
-```
-
-Результат перехода:
-
-- Окружение и ресурсы [driver](glossary.md#term-driver) отделены от scheduler.
-- Для каждой загрузки можно задать лимиты CPU и памяти.
-- Остановка scheduler не завершает [driver](glossary.md#term-driver) непосредственно.
-
-Ограничения:
-
-- Сохранение контейнера, мониторинг и восстановление управления требуют реализации.
-- Сам переход не гарантирует продолжение загрузки после сбоя Airflow.
-- Автоматическое восстановление и отсутствие повторных записей не обеспечиваются одной контейнеризацией.
-
-##### Образ и зависимости
-
-- Адаптировать существующую Spark-сборку без необоснованного дублирования. Включить загрузчик, Spark/Python, Iceberg и MSSQL/Oracle JDBC drivers в образ, без host bind mounts кода для каждого запуска.
-- Проверить совместимость Java/Python и библиотек [driver](glossary.md#term-driver)/[executors](glossary.md#term-executor).
-  - Для Python workers требуется совпадение minor-версий Python.
-- Передавать конфигурацию каталога и credentials при запуске.
-  - Не запекать secrets в образ.
-- Определить воспроизводимые build/tag и сборку образа до запуска DAG основного и [e2e](glossary.md#term-e2e)-контуров.
-- Добавить совместимый Docker provider. Убирать Spark/Java/SparkSubmit provider из Airflow image только после проверки остальных потребителей, включая пользовательские DAG.
-
-После перехода изменить размещение JDBC-драйверов:
-
-- Сейчас JAR-файлы установлены и в образе Airflow, и в образе Spark:
-  [driver](glossary.md#term-driver) работает в `airflow-scheduler`,
-  [executors](glossary.md#term-executor) — на `spark-worker`.
-  Описание текущего состава — в [README](../README.md#почему-jdbc-драйверы-установлены-в-обоих-образах).
-- В целевой схеме `spark-submit`, [driver](glossary.md#term-driver), Java, Spark
-  и JDBC JAR должны находиться в образе отдельного контейнера загрузки.
-  Этот образ должен включать те же версии драйверов, что и окружение
-  [executors](glossary.md#term-executor).
-- В образе Spark оставить JDBC-драйверы: рабочие процессы по-прежнему открывают соединения к источнику.
-- Удалить установку JDBC JAR из `conf/airflow/Dockerfile`, только если проверка
-  остальных потребителей подтверждает, что внутри Airflow больше не выполняется
-  Spark-код или другой код, которому нужны эти драйверы. Замена одного оператора
-  сама по себе не доказывает, что остальные потребители отсутствуют.
-- Проверить загрузки в новой схеме без JDBC JAR в Airflow и наличие нужных классов
-  как в отдельном контейнере [driver](glossary.md#term-driver),
-  так и на стороне [executors](glossary.md#term-executor).
-
-##### Контракт оператора
-
-- Сохранить [runtime](glossary.md#term-runtime)-разрешение Airflow Connections/source.type, получение process_id и [watermark](glossary.md#term-watermark), [pool](glossary.md#term-pool)/pool_slots.
-- [Retry](glossary.md#term-retry) запускает новый контейнер, но сохраняет process_id своего DAG run.
-- Собирать команду без небезопасной shell interpolation.
-  - Исключить пароли из командной строки, logs и rendered fields.
-  - Environment не является защищённым secret store: значения доступны привилегированному Docker API.
-- Ожидать завершения контейнера, передавать stdout/stderr в task logs, ненулевой exit code трактовать как failure.
-
-##### Сеть и ресурсы
-
-- Подключать контейнер к сети соответствующего compose-проекта.
-  - Не смешивать основной и тестовый контуры.
-- Обеспечить доступ к Spark master, источникам, Nessie/SILO и обратное подключение [executors](glossary.md#term-executor) к [driver](glossary.md#term-driver). Настроить уникальные имена/адреса попыток, `spark.driver.host`, bind address и отсутствие конфликтов портов параллельных [drivers](glossary.md#term-driver).
-- Определить конфигурацию образа, CPU/memory limits и необходимых Spark resources:
-  - Точные ключи — по версии DockerOperator.
-  - Согласовать место хранения с задачей [«Разделить реестр источников на YAML-файлы и настроить JDBC-параллелизм по источникам»](#разделить-реестр-источников-на-yaml-файлы-и-настроить-jdbc-параллелизм-по-источникам): существующий `ingestion/conf/settings.yaml` содержит только глобальный JDBC-параллелизм и в рамках той миграции удаляется.
-  - Не расширять его настройками DockerOperator и не восстанавливать после удаления.
-  - Отдельный контракт конфигурации запуска определить при проектировании DockerOperator, независимо от порядка реализации задач.
-  - Ресурсы Spark на уровне [сущности](glossary.md#term-entity) согласовать с задачей [«Управление ресурсами Spark на уровне отдельной джобы»](#управление-ресурсами-spark-на-уровне-отдельной-джобы), не создавая второй источник тех же значений.
-- Согласовать JVM memory с лимитом контейнера, оставив запас для Python, JVM overhead и native memory.
-- Разделять Airflow [slots](glossary.md#term-slot) (admission control), Docker limits (ресурсы [driver](glossary.md#term-driver)) и Spark/JDBC parallelism (распределённое выполнение).
-
-##### Жизненный цикл
-
-- Определить удаление контейнеров после success/failure и доступность логов после удаления.
-- При отмене задачи останавливать её контейнер и проверять освобождение [executors](glossary.md#term-executor).
-- Помечать контейнеры контуром, DAG run, task и попыткой.
-  - Предусмотреть scoped cleanup orphan-контейнеров после аварии scheduler.
-- Проверить temporary mounts DockerOperator: пути внутри Airflow не обязательно доступны Docker daemon host.
-
-##### Риски и границы решения
-
-- Docker API/socket даёт широкие права на Docker-хост:
-  - Read-only mount socket не ограничивает операции API.
-  - Доступ предоставлять только компоненту, исполняющему задачи.
-  - Не исправлять права глобальным небезопасным chmod и не требовать privileged-контейнеров.
-- Контейнеризация [driver](glossary.md#term-driver) изолирует ресурсы, но сама по себе не создаёт строгую границу безопасности, не устраняет сетевые зависимости и добавляет управление образами, orphan cleanup и обработку cancellation.
-- Production-топология и возможная смена платформы выполнения — отдельное решение, не обязательная часть этой задачи.
-  - Здесь выбран DockerOperator со Spark Standalone в client mode.
-  - Выбор иной платформы не входит в объём работ.
-
-##### Проверки и критерии готовности
-
-- [Unit](glossary.md#term-unit):
-  - Настройки команды, credentials transport, Connection resolution, [pool](glossary.md#term-pool)/[slots](glossary.md#term-slot), уникальные labels/сеть, resource limits, exit code и cancellation.
-  - Отсутствие паролей в команде/logs/rendered fields.
-- [E2E](glossary.md#term-e2e):
-  - Четыре демонстрационных DAG работают из отдельных [driver](glossary.md#term-driver)-контейнеров.
-  - Проверены [executor](glossary.md#term-executor) → [driver](glossary.md#term-driver) и параллельные [drivers](glossary.md#term-driver).
-  - [Driver](glossary.md#term-driver) не выполняется в scheduler.
-- Проверены failure/[retry](glossary.md#term-retry) со сквозным process_id, cleanup success/failure/cancel и отсутствие воздействия на чужой контур.
-- Сохранены [snapshot](glossary.md#term-snapshot)/[incremental](glossary.md#term-increment)/schema-evolution проверки. Обновлены README.md и описание PR при наличии доступа.
-- [Unit](glossary.md#term-unit), генерация/`--check` и полный `./test/test.sh` проходят:
-  - [E2E](glossary.md#term-e2e) — `FAIL=0`, exit 0.
-  - Недоступные fault/cancellation проверки указывать явно.
-
-Задача не является предварительным условием работы над [инкрементом](glossary.md#term-increment).
-
-### Обработка подвисших процессов Spark при retry задач
+### Останавливать предыдущие Spark-приложения перед записью в целевую таблицу
 
 #### Задача Jira
 
@@ -354,53 +200,107 @@ DATARCH-2245
 
 #### Контекст
 
-Airflow различает жизненные циклы отказа задачи:
-
-- `on_failure_callback`: вызывается при финальном отказе (исчерпаны все [retry](glossary.md#term-retry)).
-- `on_retry_callback`: вызывается перед каждым повтором задачи.
-
-Текущие операторы загрузки `IngestFullOperator`/`IngestIncrementalOperator` (унаследованы от `SparkSubmitOperator`) используют `on_failure_callback` для логирования конечного отказа в meta-БД. Однако на [retry](glossary.md#term-retry) процесс Spark ([driver](glossary.md#term-driver) и распределённые [executors](glossary.md#term-executor)) может оставаться запущенным и не контролируемым, если потребляет ресурсы или блокирует порты.
+- Текущие `IngestFullOperator`, `IngestIncrementalOperator` и `IngestActSnapOperator` наследуют `SparkSubmitOperator`, используют Spark Standalone и `deploy_mode=client`.
+  - [Driver](glossary.md#term-driver) работает в `airflow-scheduler`, [executors](glossary.md#term-executor) — на Spark worker.
+- Базовый архитектурный контракт: одна задача пишет в одну целевую таблицу, другая задача не может писать в ту же таблицу. Параллельная запись в один target запрещена.
+  - Все генерируемые DAG имеют фиксированное `max_active_runs=1`, включая DAG [актуальных снимков](glossary.md#term-snapshot).
+  - Это обязательная настройка, не параметр пользовательской конфигурации. В `ingestion/generator/generate_dags.py` уже задано `MAX_ACTIVE_RUNS = 1` для обоих шаблонов.
+- `ingestion/meta/registry.py::start_batch` предполагает отсутствие живого предыдущего обработчика. [CAS revision](glossary.md#term-cas) защищает финализацию метаданных, но не останавливает старое Spark-приложение и не отменяет выполненную запись в Iceberg.
+- Основные файлы: `ingestion/operators/raw_rdbms.py`, `ingestion/operators/process.py`, `ingestion/generator/generate_dags.py`, загрузчики в `ingestion/spark/raw/rdbms/`.
 
 #### Проблема
 
-При [retry](glossary.md#term-retry) задачи:
+Airflow может завершить задачу и начать [retry](glossary.md#term-retry), пока её прежнее Spark-приложение ещё работает. `max_active_runs=1` ограничивает запуски DAG в Airflow, но не учитывает оставшееся внешнее приложение после отказа процесса задачи.
 
-1. Spark [driver](glossary.md#term-driver)/[executors](glossary.md#term-executor) из предыдущей попытки могут остаться запущенными (особенно при сбое scheduler или сетевом разрыве).
-2. Новая попытка создаёт новые [driver](glossary.md#term-driver)/[executors](glossary.md#term-executor), что приводит к истощению ресурсов.
-3. Порты и соединения предыдущего драйвера могут оставаться заняты, препятствуя новой попытке.
-4. Нет видимого мониторинга и cleanup подвисших процессов между попытками.
+В изолированном диагностическом контуре 2026-11-11 с Airflow 3.3.2 и Spark provider 6.3.2 проверено:
 
-Кейс воспроизведения: запустить оператор загрузки с `retries > 0`, нарочно вызвать сбой (например, подключение к источнику разорвано). Проверить процессы Spark на scheduler — ожидается наличие старого [driver](glossary.md#term-driver) после [retry](glossary.md#term-retry). После нескольких [retry](glossary.md#term-retry) ресурсы исчерпаны.
+- `SIGKILL` task runner оставил живой [driver](glossary.md#term-driver). [Retry](glossary.md#term-retry) создал второе приложение, оба одновременно работали на worker.
+- Убийство отдельного [executor](glossary.md#term-executor) не остановило приложение: Spark создал замену.
+- `POST /app/kill/` Spark master остановил целое client-mode приложение. В наблюдении завершились и [executors](glossary.md#term-executor), и локальные JVM/Python [driver](glossary.md#term-driver).
+- Очистка через `on_retry_callback` сработала после `SIGKILL`, но `on_failure_callback` последней убитой задачи не выполнился в наблюдаемом интервале.
+- Исключение из `on_execute_callback` было подавлено Airflow: новый `spark-submit` всё равно запустился.
+- Обычное исключение приложения и timeout в проверенных запусках не оставили работающих приложений. При полном убийстве контейнера scheduler Spark штатно освободил [executors](glossary.md#term-executor).
+
+Это проверка жизненного цикла на диагностическом Spark-приложении без записи данных, а не воспроизведение повреждения данных реальной загрузки. Последующее ревью исходников Spark 3.5.5 уточнило:
+
+- Master удаляет приложение из `activeapps` до фактического завершения его [executors](glossary.md#term-executor). Для подтверждения остановки нужны состояния workers.
+- Уведомление `ApplicationRemoved` инициирует остановку SparkContext client-mode [driver](glossary.md#term-driver), но не является принудительным завершением всего Python-скрипта. Механика выполнения описана в [архитектуре](architecture.md#как-python-скрипт-выполняется-в-spark).
 
 #### Предпочтительный путь решения
 
-Добавить `on_retry_callback` к операторам загрузки для явной очистки подвисших процессов перед повтором:
+Сохранить текущий `SparkSubmitOperator` и client mode. Перед каждым новым `spark-submit` обязательно останавливать все предыдущие приложения записи в тот же target и подтверждать завершение. Решение независимо от [перехода на DockerOperator](#изолировать-spark-drivers-через-dockeroperator).
 
-1. **Логирование [retry](glossary.md#term-retry)-события**: записать в meta-БД событие [retry](glossary.md#term-retry) для отслеживания истории попыток.
-2. **Cleanup старых процессов**: определить и завершить процессы Spark предыдущей попытки ([driver](glossary.md#term-driver) и [executors](glossary.md#term-executor)) на scheduler, используя процессный ID из XCom.
-3. **Сброс ресурсов**: освободить занятые порты и соединения.
-4. **Сохранение state**: process_id DAG-рана остаётся неизменным.
-   - [Retry](glossary.md#term-retry) использует тот же процесс-идентификатор для сквозного логирования.
+##### Маркировка и область очистки
 
-##### Реализация и граница решения
+- Задавать однозначно разбираемую маркировку приложения через `spark.app.name`:
+  - Ключ очистки — текущий контур и полное каноническое имя целевой таблицы, включая каталог и namespace.
+  - `source_id`, `fqn`, тип потока `main`/`act_snap`, `dag_id`, `task_id`, `run_id` и уникальный идентификатор [попытки](glossary.md#term-attempt) — дополнительные поля принадлежности и диагностики.
+  - Основная таблица и [актуальный снимок](glossary.md#term-snapshot) имеют разные targets и не должны останавливать друг друга.
+- Сформировать имя в одном месте и передать загрузчику отдельным аргументом до регистрации Spark-приложения. Загрузчик использует его дословно в `SparkSession.builder.appName(...)`, без независимого построения другого имени.
+- Искать по точному ключу, не по подстроке или одному PID. Не зависеть от XCom предыдущего запуска.
+  - [Executors](glossary.md#term-executor) сопоставляются по application ID, отдельные теги на каждом процессе не требуются.
 
-- Этап 1: добавить `on_retry_callback` для логирования [retry](glossary.md#term-retry)-события в meta-БД.
-- Этап 2: добавить cleanup процессов (параллелен работе над задачей [«Изолировать Spark drivers через DockerOperator»](#изолировать-spark-drivers-через-dockeroperator)). На DockerOperator управление контейнерами будет явным и встроенным.
-- Текущее решение (без DockerOperator) требует ручного управления процессами и не гарантирует освобождение ресурсов в случае сбоя Airflow.
-- Полное решение требует совместной работы с задачей [«Изолировать Spark drivers через DockerOperator»](#изолировать-spark-drivers-через-dockeroperator), где управление жизненным циклом контейнера обеспечит автоматический cleanup при сбое.
+##### Обязательная проверка перед запуском
 
-#### Проверки и критерии готовности
+- Выполнять очистку в начале `execute` всех трёх существующих операторов, до `super().execute()`, отправки приложения и начала записи.
+  - Не использовать `on_execute_callback` как обязательный барьер: его ошибка не запрещает выполнение задачи в проверенной версии Airflow.
+- Найти все активные приложения записи с тем же ключом target, включая остатки прежних [retry](glossary.md#term-retry), [Clear](glossary.md#term-clear) и других запусков DAG.
+  - Получить состояние через `GET <master_webui>/json/`. Сохранить application IDs и список workers из `workers[].webuiaddress` до отправки остановки.
+- Для каждого приложения вызвать остановку через Spark master: `POST /app/kill/` с `id=<application_id>` и `terminate=true`.
+  - Это UI endpoint Standalone, не REST submission API для cluster-mode `driver-...`.
+  - Проверить доступность endpoint, `spark.ui.killEnabled` и UI ACL. HTTP-ответ после redirect не подтверждает исполнение команды.
+  - В текущем стенде master UI уже опубликован на порту хоста 8080, worker UI — 8081, аутентификация не настроена. Зафиксировать это существующее ограничение исследовательского контура, не расширять доступ ради очистки и не переносить такую конфигурацию в production как безопасную.
+- С ограниченным временем ожидания подтвердить завершение приложений и освобождение связанных [executors](glossary.md#term-executor).
+  - Опросить master до исчезновения приложения из `activeapps` и появления `KILLED` в `completedapps`. Корректно обработать естественное завершение приложения одновременно с очисткой.
+  - Опросить `GET <worker_webui>/json/` всех workers, которые могли исполнять приложения. Подтвердить отсутствие соответствующих `appid` в активном массиве `executors`. Записи в `finishedexecutors` не являются работающими процессами.
+  - Использовать сохранённый список workers и учитывать обновления состава кластера. Исчезновение worker из списка master не считать подтверждением остановки его [executors](glossary.md#term-executor).
+  - HTTP 200, `KILLED` в master или одно исчезновение из `activeapps` без проверки workers недостаточны.
+- При недоступности master или необходимого worker, некорректном ответе, ошибке остановки, неизвестном состоянии или истечении ожидания завершать задачу ошибкой. Новый `spark-submit` не вызывать.
+  - Гарантия — запрет новой загрузки до подтверждения остановки предыдущих, а не возможность завершить приложение при любой аварии.
+- Сохранить и проверить обязательное `max_active_runs=1` во всех генерируемых DAG и уникальность задачи-владельца target. Не вводить отдельную блокировку target при соблюдении этих контрактов.
+  - Генератор уже отклоняет коллизии targets в общем наборе, включая пересечения основной таблицы и [актуального снимка](glossary.md#term-snapshot). Закрепить существующее поведение тестами.
+
+##### Callbacks и метаданные
+
+- Использовать общую идемпотентную процедуру остановки в `on_retry_callback` и `on_failure_callback` как дополнительную раннюю очистку.
+  - В callbacks завершения ограничивать область конкретным запуском/[попыткой](glossary.md#term-attempt) по маркировке самого приложения, чтобы запоздалый callback не остановил уже работающую новую загрузку.
+  - Не определять принадлежность по `ti.state`: в проверенном callback DAG processor это поле было `None`. Не рассчитывать, что callback обязательно выполнится раньше следующего submit.
+  - Не заменять существующее логирование FAILED. Записывать событие [retry](glossary.md#term-retry), application IDs, причину и результат очистки без credentials.
+- Сохранять `process_id` и идентичность [партии загрузки](glossary.md#term-batch) при повторе задачи загрузки.
+  - Повтор `generate_process_id` по действующему контракту выделяет новый номер.
+- Сохранять фиксированное [окно](glossary.md#term-window), no-op для успешно завершённой [партии загрузки](glossary.md#term-batch) и гарантии [watermark](glossary.md#term-watermark).
+
+##### Границы решения
+
+- Не управлять PID, группами процессов или отдельным принудительным kill JVM/Python. Управлять Spark-приложением через менеджер кластера.
+  - Подтверждать освобождение [executors](glossary.md#term-executor). Spark инициирует остановку SparkContext, но завершение всего Python-процесса [driver](glossary.md#term-driver) не гарантируется.
+  - Обычный Python-код, включая финализацию pg-meta после уже выполненного Iceberg append, может продолжить работу. Остановка приложения не отменяет уже выполненные операции хранения.
+- Восстановление после полного отказа Airflow, периодический внешний сборщик оставшихся приложений и production-платформа не входят в задачу.
+- Поиск в master покрывает зарегистрированные приложения. Зависший до регистрации [driver](glossary.md#term-driver) не покрывается этой механикой и не должен выдаваться за решённый сценарий.
+- Не обещать exactly-once: авария между Iceberg append и финализацией pg-meta по-прежнему допускает повторную запись по модели at-least-once.
+  - Если прежняя финализация ещё не завершилась, новый запуск может увидеть незавершённую [партию](glossary.md#term-batch) и повторить загрузку. Это существующее ограничение контракта, а не основание вводить отдельный kill Python-процесса.
+  - [CAS revision](glossary.md#term-cas) защищает финализацию метаданных, но не является общей блокировкой не-Spark действий [driver](glossary.md#term-driver).
+
+##### Проверки и критерии готовности
 
 - [Unit](glossary.md#term-unit):
-  - `on_retry_callback` вызывает логирование [retry](glossary.md#term-retry)-события.
-  - Исходящий process_id из XCom не меняется.
-- [E2E](glossary.md#term-e2e):
-  - Задача с `retries > 0` повторяется успешно.
-  - Старые Spark процессы завершаются перед новой попыткой.
-  - Ресурсы (память, порты) освобождаются.
-- Полный набор [e2e-тестов](glossary.md#term-e2e) (`./test/test.sh`) проходит.
-  - Проверены сценарии единичной загрузки и параллельных загрузок с [retry](glossary.md#term-retry).
-- Проверено отсутствие подвисших процессов на scheduler после завершения всех [retry](glossary.md#term-retry).
+  - Однозначная маркировка, точное сравнение target/контура, различение `main` и `act_snap`, независимость от XCom.
+  - Очистка нуля, одного и нескольких старых приложений, идемпотентность, ожидание и запрет submit при любой неподтверждённой остановке.
+  - Обработка некорректных ответов master/workers, изменения состава workers и естественного завершения одновременно с остановкой.
+  - Запоздалый callback не затрагивает новую загрузку, логирование FAILED сохранено.
+  - Все обычные и [snapshot](glossary.md#term-snapshot) DAG имеют неизменяемое `max_active_runs=1`, коллизии задачи-владельца target отклоняются.
+- [E2E](glossary.md#term-e2e) для всех трёх операторов:
+  - Старое зарегистрированное приложение остаётся после убийства task runner. Перед новым submit оно завершается вместе со связанными [executors](glossary.md#term-executor).
+  - Несколько оставшихся приложений одного target очищаются до старта нового.
+  - Ошибка/недоступность master и отсутствие подтверждения остановки не допускают нового приложения.
+  - Master уже показывает `KILLED`, но [executor](glossary.md#term-executor) ещё активен на worker: новый submit запрещён до фактического завершения.
+  - Необходимый worker недоступен или возвращает некорректное состояние: новый submit запрещён.
+  - Callback старой [попытки](glossary.md#term-attempt) намеренно задержан до регистрации нового приложения того же target и не останавливает его.
+  - Другие targets, [актуальный снимок](glossary.md#term-snapshot) и другой контур не затрагиваются.
+  - Обычная ошибка и timeout, [retry](glossary.md#term-retry) со сквозным `process_id` и повтор после окончательного отказа сохраняют контракты загрузки.
+  - Для реальной загрузки [инкремента](glossary.md#term-increment) проверен сбой около границы Iceberg append → финализация pg-meta. Сохранены идентичность [партии](glossary.md#term-batch) и гарантии [watermark](glossary.md#term-watermark), отсутствие повторных записей не требуется.
+- Генерация/`--check`, [unit-тесты](glossary.md#term-unit) и полный `./test/test.sh` проходят: `FAIL=0`, exit 0.
+- При реализации обновлены README, архитектурная документация и граф. Ограничения endpoint и непроверенные аварийные сценарии указаны явно.
 
 ### Шаблонизация кода в generator/generate_dags.py
 
@@ -542,7 +442,7 @@ DATARCH-2247
 - [Executors](glossary.md#term-executor) выполняют задачи и записывают данные. При нехватке памяти
   промежуточные данные выгружаются на локальный диск — это **[spill](glossary.md#term-spill)**.
 - На стенде [driver](glossary.md#term-driver) работает в `airflow-scheduler`, [executors](glossary.md#term-executor) — на `spark-worker`.
-  Изоляция описана в [отдельной задаче](#изолировать-spark-drivers-через-dockeroperator).
+  Изоляция описана в [отдельной задаче DockerOperator](#изолировать-spark-drivers-через-dockeroperator).
 - `filter`, `join`, `groupBy` строят план. Действия `count`, `show`, `write`
   запускают вычисления — **[job](glossary.md#term-job)**.
 - [Job](glossary.md#term-job) делится на стадии (**[stages](glossary.md#term-job)**) по границам обмена данными.
@@ -680,7 +580,7 @@ entities:
   - [Сущность](glossary.md#term-entity) без явных ресурсов запрашивает все ядра worker и блокирует параллельные приложения.
 - `driver_memory` согласован с контейнером, где работает [driver](glossary.md#term-driver):
   - Сейчас — `airflow-scheduler`.
-  - После задачи [«Изолировать Spark drivers через DockerOperator»](#изолировать-spark-drivers-через-dockeroperator) — лимиты контейнера [driver](glossary.md#term-driver).
+  - После [перехода на DockerOperator](#изолировать-spark-drivers-через-dockeroperator) — лимиты контейнера [driver](glossary.md#term-driver).
 - `shuffle_partitions` критичен прежде всего для будущих слоёв с join/groupBy.
   - Текущая [raw](glossary.md#term-raw)-загрузка порождает мало [shuffle](glossary.md#term-shuffle).
 - Задача управляет только ресурсами запуска:
@@ -701,6 +601,90 @@ entities:
 - Схема секции `spark:` манифеста (ключ — тип — дефолт — назначение) обновлена в документации проекта по его правилам.
 
 ## Приоритет: можно отложить
+
+### Изолировать Spark drivers через DockerOperator
+
+#### Задача Jira
+
+DATARCH-2244
+
+#### Контекст
+
+- Сейчас Spark Standalone 3.5.5 и Airflow LocalExecutor запускают `spark-submit` и [driver](glossary.md#term-driver) в контейнере `airflow-scheduler`, [executors](glossary.md#term-executor) — на `spark-worker`.
+- `IngestFullOperator`, `IngestIncrementalOperator` и `IngestActSnapOperator` в `ingestion/operators/raw_rdbms.py` наследуют `SparkSubmitOperator`, `deploy_mode=client`.
+- Spark Standalone 3.5.5 не поддерживает `cluster` deploy mode для Python-приложений. Смена одного параметра не изолирует текущий PySpark [driver](glossary.md#term-driver).
+- Окружение описано в `docker-compose.yaml`, `conf/airflow/Dockerfile` и `conf/spark/Dockerfile`.
+
+#### Проблема
+
+[Drivers](glossary.md#term-driver) разных загрузок делят CPU и память с оркестратором. Airflow [pools](glossary.md#term-pool) ограничивают допуск, но не обеспечивают отдельные CPU/memory limits. Образ Airflow содержит Java, Spark и JDBC-зависимости.
+
+Пример: разные DAG запускают несколько JVM рядом со scheduler. Убийство его контейнера завершает все размещённые в нём [drivers](glossary.md#term-driver).
+
+Кейс размещения подтверждается конфигурацией. Нагрузочное измерение влияния параллельных загрузок на scheduler не проводилось. Остановка контейнера scheduler в диагностическом контуре завершила текущую загрузку и освободила [executors](glossary.md#term-executor).
+
+#### Предпочтительный путь решения
+
+Перевести все три оператора загрузки на `DockerOperator`: один запуск — отдельный контейнер со `spark-submit` и [driver](glossary.md#term-driver), Spark Standalone и `deploy_mode=client` сохраняются.
+
+```text
+Airflow → контейнер загрузки: spark-submit + driver
+             → Spark Standalone: executors на worker
+```
+
+Это независимая задача изоляции ресурсов, не предварительное условие [остановки предыдущих Spark-приложений](#останавливать-предыдущие-spark-приложения-перед-записью-в-целевую-таблицу).
+
+##### Образ и зависимости
+
+- Адаптировать существующую Spark-сборку без необоснованного дублирования. Включить загрузчик, Spark/Python, Iceberg и MSSQL/Oracle JDBC drivers в образ без host bind mounts кода для каждого запуска.
+- Проверить совместимость Java/Python и библиотек [driver](glossary.md#term-driver)/[executors](glossary.md#term-executor), включая совпадение minor-версий Python для Python workers.
+- Передавать конфигурацию каталога и credentials при запуске, не запекать secrets в образ.
+- Определить воспроизводимые build/tag и сборку образа до запуска основного и [e2e](glossary.md#term-e2e)-контуров.
+- Добавить совместимый Docker provider. Убирать Spark/Java/SparkSubmit provider и JDBC JAR из Airflow только после проверки остальных потребителей, включая пользовательские DAG.
+  - Сейчас JDBC JAR установлены в обоих образах, причины описаны в [README](../README.md#почему-jdbc-драйверы-установлены-в-обоих-образах).
+  - В целевой схеме JAR должны быть в контейнере загрузки и на Spark workers, с согласованными версиями.
+  - Проверить доступность JDBC-классов в обоих местах без JDBC JAR в Airflow, если проверка позволяет их удалить.
+
+##### Контракт оператора
+
+- Сохранить [runtime](glossary.md#term-runtime)-разрешение Connections/source.type, получение `process_id` и [watermark](glossary.md#term-watermark), [pool](glossary.md#term-pool)/pool_slots и фиксированное `max_active_runs=1` для всех генерируемых DAG.
+- Сохранить маркировку и обязательную очистку старых Spark-приложений по target из [отдельной задачи](#останавливать-предыдущие-spark-приложения-перед-записью-в-целевую-таблицу), независимо от порядка реализации.
+- [Retry](glossary.md#term-retry) задачи загрузки запускает новый контейнер, но сохраняет `process_id` и контракты [партии загрузки](glossary.md#term-batch).
+- Собирать команду без небезопасной shell interpolation. Исключить пароли из команды, logs и rendered fields.
+  - Environment не является защищённым secret store: значения доступны привилегированному Docker API.
+- Ожидать завершения контейнера, передавать stdout/stderr в task logs, ненулевой exit code трактовать как failure.
+
+##### Сеть и ресурсы
+
+- Подключать контейнер к сети соответствующего compose-проекта, не смешивать основной и тестовый контуры.
+- Обеспечить доступ к Spark master, источникам, Nessie/SILO и обратное подключение [executors](glossary.md#term-executor) к [driver](glossary.md#term-driver).
+  - Настроить уникальные адреса запусков, `spark.driver.host`, bind address и отсутствие конфликтов портов параллельных [drivers](glossary.md#term-driver) разных targets.
+- Определить конфигурацию образа, CPU/memory limits и Spark resources по версии DockerOperator.
+  - Согласовать её с задачами [реестра источников](#разделить-реестр-источников-на-yaml-файлы-и-настроить-jdbc-параллелизм-по-источникам) и [ресурсов Spark](#управление-ресурсами-spark-на-уровне-отдельной-джобы), не дублировать значения.
+  - Не расширять существующий `ingestion/conf/settings.yaml` настройками DockerOperator и не восстанавливать его после запланированного удаления. Контракт конфигурации запуска определить отдельно в спек-цикле.
+- Согласовать JVM memory с лимитом контейнера, оставить запас для Python, JVM overhead и native memory.
+- Разделять Airflow [slots](glossary.md#term-slot), Docker limits и Spark/JDBC parallelism.
+
+##### Жизненный цикл и риски
+
+- Определить удаление контейнеров после success/failure и доступность логов после удаления.
+- При управляемой отмене останавливать контейнер и проверять освобождение [executors](glossary.md#term-executor).
+- Задавать labels контура, target, DAG, задачи и запуска для адресного поиска оставшихся контейнеров. Определить восстановление управления и их очистку после аварии Airflow.
+- Проверить temporary mounts DockerOperator: пути внутри Airflow не обязательно доступны Docker daemon host.
+- Docker socket даёт широкие права на хост. Read-only mount не ограничивает операции API.
+  - Доступ предоставлять только исполняющему задачи компоненту, без глобального небезопасного chmod и privileged-контейнеров.
+- Контейнеризация не гарантирует продолжение загрузки после сбоя Airflow, автоматическое восстановление и отсутствие повторных записей. Она не создаёт строгую границу безопасности сама по себе.
+- Production-топология и выбор иной платформы выполнения не входят в объём задачи.
+
+##### Проверки и критерии готовности
+
+- [Unit](glossary.md#term-unit): команда, credentials transport, Connections, [pool](glossary.md#term-pool)/[slots](glossary.md#term-slot), labels/сеть, limits, exit code и cancellation. Пароли отсутствуют в команде/logs/rendered fields.
+- [E2E](glossary.md#term-e2e):
+  - Демонстрационные загрузки и [актуальные снимки](glossary.md#term-snapshot) работают из отдельных контейнеров, [driver](glossary.md#term-driver) не выполняется в scheduler.
+  - Проверены обратная связь worker с контейнером, параллельные загрузки разных targets, cleanup success/failure/cancel и изоляция контуров.
+  - Сохранены очистка приложений по target, [retry](glossary.md#term-retry) со сквозным `process_id`, [incremental](glossary.md#term-increment), [snapshot](glossary.md#term-snapshot) и schema-evolution проверки.
+- Генерация/`--check`, [unit-тесты](glossary.md#term-unit) и полный `./test/test.sh` проходят: `FAIL=0`, exit 0.
+- При реализации обновлены README, архитектурная документация и граф. Недоступные аварийные проверки и ограничения контейнеризации указаны явно.
 
 ### Автоматически формировать теги DAG и исключать дубликаты
 
@@ -839,7 +823,7 @@ Airflow [pools](glossary.md#term-pool) ограничивают допуск з�
   - Не записывать пароль в манифесты, сгенерированные DAG-и, XCom или Spark conf.
   - Передачу в JDBC выполнять из памяти приложения, без повторного формирования CLI с секретом.
 - Не считать environment защищённым хранилищем: администратор контейнера или субъект с соответствующими правами может читать окружение. Решение устраняет присутствие секрета в аргументах процесса, но не заменяет управление доступом к среде выполнения.
-- Выполнить эту задачу независимо от перехода на DockerOperator (задача [«Изолировать Spark drivers через DockerOperator»](#изолировать-spark-drivers-через-dockeroperator)):
+- Выполнить эту задачу независимо от [перехода на DockerOperator](#изолировать-spark-drivers-через-dockeroperator):
   - Не расширять её до замены системы хранения секретов.
   - При последующей смене режима запуска сохранить отсутствие пароля в командной строке.
 
