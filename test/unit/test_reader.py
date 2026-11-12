@@ -63,15 +63,11 @@ class TestRenderSourceTable(unittest.TestCase):
             '"retail_bank"."Clients"',
         )
 
-    def test_expression_passthrough_only_when_allowed(self):
-        dialect = registry.by_conn_type("mssql")
-        expression = "(SELECT * FROM s.t WHERE 1=0)"
-        self.assertEqual(
-            reader.render_source_table(dialect, expression, allow_expression=True),
-            expression,
-        )
+    def test_expression_reference_rejected(self):
         with self.assertRaises(ValueError):
-            reader.render_source_table(dialect, expression)
+            reader.render_source_table(
+                registry.by_conn_type("mssql"), "(SELECT * FROM s.t WHERE 1=0)"
+            )
 
     def test_malformed_reference_rejected(self):
         with self.assertRaises(ValueError):
@@ -161,7 +157,8 @@ class TestReadExtractFrame(unittest.TestCase):
     def setUp(self):
         self.spark = MagicMock()
 
-    def key_metadata(self, primary_key=(), unique_columns=(), columns=()):
+    def key_metadata(self, primary_key=(), unique_columns=(),
+                     columns=(("client_id", "int", None, None, False),)):
         """Build KeyMetadata from (name, type[, precision, scale, not_null]) tuples."""
         built = {}
         for item in columns:
@@ -294,12 +291,13 @@ class TestReadExtractFrame(unittest.TestCase):
             "window=[11..12] partitions=1 of 4 requested" in line for line in logs.output
         ), logs.output)
 
-    def test_disabled_partitioning_skips_probing(self):
+    def test_disabled_partitioning_still_requires_metadata(self):
+        keys = self.key_metadata()
         with patch.object(reader, "jdbc_reader", return_value=RecordingReader()), patch.object(
-            reader.jdbc, "key_metadata"
-        ) as keys, patch.object(reader, "read_bounds") as probe:
+            reader.jdbc, "key_metadata", return_value=keys
+        ) as key_call, patch.object(reader, "read_bounds") as probe:
             reader.read_extract_frame(self.spark, make_args(no_jdbc_partitioning=True))
-        keys.assert_not_called()
+        key_call.assert_called_once()
         probe.assert_not_called()
 
     def test_no_candidate_column_warns_with_observed_metadata(self):
@@ -313,9 +311,10 @@ class TestReadExtractFrame(unittest.TestCase):
             for line in logs.output
         ), logs.output)
 
-    def test_unavailable_metadata_does_not_duplicate_no_candidate_warning(self):
+    def test_unavailable_metadata_fails_fast_without_partitioning_warning(self):
         with self.assertNoLogs(jdbc_partitioning.LOGGER, level="WARNING"):
-            self.frame(make_args(), keys=jdbc.KeyMetadata((), (), {}))
+            with self.assertRaisesRegex(RuntimeError, "catalog metadata unavailable"):
+                self.frame(make_args(), keys=jdbc.KeyMetadata((), (), {}))
 
     def test_compatibility_projection_rewrites_select(self):
         projection = ['extract_source."a"', 'SYS_EXTRACT_UTC(extract_source."b") AS "b"']

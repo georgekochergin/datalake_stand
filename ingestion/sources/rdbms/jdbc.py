@@ -46,24 +46,6 @@ def connection(jvm, jdbc_url, user, password):
         jdbc_connection.close()
 
 
-def column_metadata(jdbc_connection, sql) -> list[tuple]:
-    """Return (label, raw type name, precision, scale) per column of a query."""
-    jdbc_statement = jdbc_connection.createStatement()
-    try:
-        result = jdbc_statement.executeQuery(sql)
-        try:
-            metadata = result.getMetaData()
-            return [
-                (metadata.getColumnLabel(index), metadata.getColumnTypeName(index),
-                 metadata.getPrecision(index), metadata.getScale(index))
-                for index in range(1, metadata.getColumnCount() + 1)
-            ]
-        finally:
-            result.close()
-    finally:
-        jdbc_statement.close()
-
-
 def first_row(jdbc_connection, sql) -> list[str]:
     """Execute a query and return its first row rendered as strings."""
     jdbc_statement = jdbc_connection.createStatement()
@@ -83,60 +65,90 @@ def _row_size(result) -> int:
     return result.getMetaData().getColumnCount()
 
 
-def compatibility_projection(jvm, dialect, jdbc_url, user, password, table_sql) -> list[str] | None:
+def column_position_kind(dialect, info: ColumnMeta) -> str | None:
+    """Canonical kind of a catalog column, or None when the dialect rejects it.
+
+    Drivers decorate catalog type names with engine specifics (MSSQL appends
+    "identity" to integer types), so a rejected full name is retried by its
+    first token; the dialect contract itself stays strict.
+    """
+    try:
+        return dialect.position_kind(info.type_name, info.precision, info.scale)
+    except (ValueError, NotImplementedError):
+        pass
+    base = info.type_name.split()[0] if info.type_name else ""
+    if base != info.type_name:
+        try:
+            return dialect.position_kind(base, info.precision, info.scale)
+        except (ValueError, NotImplementedError):
+            return None
+    return None
+
+
+def compatibility_projection(dialect, keys: KeyMetadata) -> list[str] | None:
     """Build projected select items when the dialect rewrites special columns.
 
+    Column facts come from the JDBC catalog (getColumns), the same source as
+    the partitioning choice, so no SQL is executed against the source.
     Returns None when the dialect reads every column natively, leaving the
     plain extract_source.* select untouched.
     """
-    with connection(jvm, jdbc_url, user, password) as jdbc_connection:
-        columns = column_metadata(jdbc_connection, f"SELECT * FROM {table_sql} WHERE 1=0")
     projected = []
     rewrote = False
-    for label, type_name, _, _ in columns:
-        reference = dialect.quote_identifier(str(label))
-        expression = dialect.column_projection(
-            normalize_type_name(type_name), f"extract_source.{reference}"
-        )
+    for info in keys.columns.values():
+        alias = dialect.quote_identifier(info.name)
+        reference = f"extract_source.{alias}"
+        expression = dialect.column_projection(info.type_name, reference)
         if expression is None:
-            projected.append(f"extract_source.{reference}")
+            projected.append(reference)
         else:
             rewrote = True
-            projected.append(f"{expression} AS {reference}")
+            projected.append(f"{expression} AS {alias}")
     return projected if rewrote else None
 
 
 def key_metadata(jvm, dialect, jdbc_url, user, password, source_table) -> KeyMetadata:
-    """Best-effort key metadata for the partitioning heuristic.
+    """Catalog column facts with best-effort keys for the partitioning heuristic.
 
-    A located table without keys still returns its columns: the heuristic
-    can partition by a plain date or timestamp column. Unavailable metadata
-    degrades to a warning and an empty result: the loader then falls back
-    to an unpartitioned read.
+    Columns are the required part: when they are unavailable the caller
+    fails fast. Primary-key and index lookups degrade independently, so a
+    driver or account that cannot serve them keeps the columns and the
+    heuristic loses only its key-based steps.
     """
     try:
         parts = parse_source_table(source_table)
         with connection(jvm, jdbc_url, user, password) as jdbc_connection:
             metadata = jdbc_connection.getMetaData()
-            for location in dialect.metadata_candidates(parts):
-                columns = _column_metadata(metadata, location)
-                if columns:
-                    return KeyMetadata(
-                        primary_key=_primary_key(metadata, location),
-                        unique_columns=_unique_single_columns(metadata, location),
-                        columns=columns,
-                    )
+            location = dialect.metadata_location(parts)
+            columns = _column_metadata(metadata, location)
+            if not columns:
+                _LOGGER.warning(
+                    "No JDBC table metadata found for %s; falling back to an unpartitioned read",
+                    source_table,
+                )
+                return KeyMetadata((), (), {})
+            primary_key = _degraded_metadata(
+                "primary key", lambda: _primary_key(metadata, location))
+            unique_columns = _degraded_metadata(
+                "unique indexes", lambda: _unique_single_columns(metadata, location))
+            return KeyMetadata(primary_key, unique_columns, columns)
     except Exception as exc:
         _LOGGER.warning(
             "JDBC metadata unavailable for %s; falling back to an unpartitioned read: %s",
             source_table, exc,
         )
         return KeyMetadata((), (), {})
-    _LOGGER.warning(
-        "No JDBC table metadata found for %s; falling back to an unpartitioned read",
-        source_table,
-    )
-    return KeyMetadata((), (), {})
+
+
+def _degraded_metadata(label: str, lookup):
+    """Run one optional catalog lookup, degrading to empty on failure."""
+    try:
+        return lookup()
+    except Exception as exc:
+        _LOGGER.warning(
+            "JDBC %s metadata unavailable; partitioning degraded: %s", label, exc,
+        )
+        return ()
 
 
 def _primary_key(metadata, location) -> tuple[str, ...]:
@@ -187,12 +199,40 @@ def _optional_int(result, label) -> int | None:
     return None if result.wasNull() else value
 
 
+def _exact_pattern(metadata, name: str) -> str:
+    """Render an exact identifier as a JDBC metadata pattern.
+
+    getColumns treats `_` and `%` in its schema and table arguments as
+    wildcards; every metacharacter is escaped with the driver's own escape
+    reported by getSearchStringEscape.
+    """
+    escape = metadata.getSearchStringEscape()
+    if not isinstance(escape, str) or not escape:
+        return name
+    return (
+        name.replace(escape, escape + escape)
+        .replace("_", escape + "_")
+        .replace("%", escape + "%")
+    )
+
+
 def _column_metadata(metadata, location) -> dict[str, ColumnMeta]:
     """Map lowercased column names to type facts for one table location."""
     result: dict[str, ColumnMeta] = {}
-    columns = metadata.getColumns(location.catalog, location.schema, location.table, None)
+    columns = metadata.getColumns(
+        location.catalog,
+        location.schema if location.schema is None else _exact_pattern(metadata, location.schema),
+        location.table if location.table is None else _exact_pattern(metadata, location.table),
+        None,
+    )
     try:
         while columns.next():
+            row_schema = columns.getString("TABLE_SCHEM")
+            row_table = columns.getString("TABLE_NAME")
+            if (row_schema is not None and row_schema != location.schema) or (
+                row_table is not None and row_table != location.table
+            ):
+                continue
             name = columns.getString("COLUMN_NAME")
             type_name = columns.getString("TYPE_NAME")
             if name is None or type_name is None:

@@ -25,22 +25,19 @@ def fake_jvm():
 class TestKeyMetadata(unittest.TestCase):
     """Quote-aware metadata resolution and observable fallback."""
 
-    def test_only_unquoted_fragments_fold(self):
+    def test_exact_fqn_location_queried_once(self):
         spark, connection = fake_jvm()
         metadata = connection.getMetaData.return_value
         located = {"id": jdbc.ColumnMeta("id", "INTEGER", 10, 0, True)}
-        with patch.object(jdbc, "_column_metadata", side_effect=[{}, located]) as columns, patch.object(
+        with patch.object(jdbc, "_column_metadata", return_value=located) as columns, patch.object(
             jdbc, "_primary_key", return_value=("id",)
         ) as primary, patch.object(jdbc, "_unique_single_columns", return_value=()):
             result = jdbc.key_metadata(
                 spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", 'schema."Mixed.Table"'
             )
         self.assertEqual(result, jdbc.KeyMetadata(("id",), (), located))
-        self.assertEqual(columns.call_args_list[0].args,
-                         (metadata, MetadataLocation(None, "schema", "Mixed.Table")))
-        self.assertEqual(columns.call_args_list[1].args,
-                         (metadata, MetadataLocation(None, "SCHEMA", "Mixed.Table")))
-        primary.assert_called_once_with(metadata, MetadataLocation(None, "SCHEMA", "Mixed.Table"))
+        columns.assert_called_once_with(metadata, MetadataLocation(None, "schema", "Mixed.Table"))
+        primary.assert_called_once_with(metadata, MetadataLocation(None, "schema", "Mixed.Table"))
         connection.close.assert_called_once()
 
     def test_fully_quoted_names_never_fold(self):
@@ -78,9 +75,9 @@ class TestKeyMetadata(unittest.TestCase):
 class CatalogDialect(RdbmsDialect):
     """Stub engine addressing objects through a JDBC catalog instead of a schema."""
 
-    def metadata_candidates(self, parts):
+    def metadata_location(self, parts):
         """One exact location: the database is the catalog, no schema level."""
-        return (MetadataLocation(parts[0][0], None, parts[1][0]),)
+        return MetadataLocation(parts[0][0], None, parts[1][0])
 
 
 class ScriptedResult:
@@ -158,20 +155,19 @@ class TestCatalogAddressing(unittest.TestCase):
 class TestCompatibilityProjection(unittest.TestCase):
     """Dialect projections build select items only when a column is rewritten."""
 
-    def setUp(self):
-        self.spark, self.connection = fake_jvm()
-        result = self.connection.createStatement.return_value.executeQuery.return_value
-        metadata = result.getMetaData.return_value
-        metadata.getColumnCount.return_value = 2
-        metadata.getColumnLabel.side_effect = ["plain_col", "tz_col"]
-        metadata.getColumnTypeName.side_effect = ["NUMBER", "TIMESTAMP(9) WITH TIME ZONE"]
-        metadata.getPrecision.return_value = 10
-        metadata.getScale.return_value = 0
+    @staticmethod
+    def keys():
+        return jdbc.KeyMetadata(
+            primary_key=(),
+            unique_columns=(),
+            columns={
+                "plain_col": jdbc.ColumnMeta("plain_col", "NUMBER", 10, 0, True),
+                "tz_col": jdbc.ColumnMeta("tz_col", "TIMESTAMP(9) WITH TIME ZONE", None, 9, True),
+            },
+        )
 
     def test_oracle_projects_timezone_columns(self):
-        projection = jdbc.compatibility_projection(
-            self.spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", '"s"."t"'
-        )
+        projection = jdbc.compatibility_projection(ORACLE, self.keys())
         self.assertEqual(projection, [
             'extract_source."plain_col"',
             'SYS_EXTRACT_UTC(extract_source."tz_col") AS "tz_col"',
@@ -179,10 +175,7 @@ class TestCompatibilityProjection(unittest.TestCase):
 
     def test_native_read_returns_none(self):
         mssql = registry.by_conn_type("mssql")
-        projection = jdbc.compatibility_projection(
-            self.spark._jvm, mssql, "jdbc:sqlserver://h", "u", "p", "[s].[t]"
-        )
-        self.assertIsNone(projection)
+        self.assertIsNone(jdbc.compatibility_projection(mssql, self.keys()))
 
 
 class TestFirstRow(unittest.TestCase):
@@ -297,6 +290,85 @@ class TestColumnMetadata(unittest.TestCase):
             {"COLUMN_NAME": "ok", "TYPE_NAME": None},
         ])
         self.assertEqual(result, {})
+
+
+class TestCatalogPatternFiltering(unittest.TestCase):
+    """Exact FQN components must not leak sibling objects through JDBC patterns."""
+
+    def columns(self, rows, schema="retail_bank", table="transactions"):
+        metadata = MagicMock()
+        metadata.getSearchStringEscape.return_value = "\\"
+        metadata.getColumns.return_value = ScriptedResult(rows)
+        result = jdbc._column_metadata(metadata, MetadataLocation(None, schema, table))
+        return metadata, result
+
+    def test_underscores_escaped_in_pattern(self):
+        metadata, _ = self.columns([{"COLUMN_NAME": "id", "TYPE_NAME": "bigint"}])
+        self.assertEqual(
+            metadata.getColumns.call_args.args,
+            (None, "retail\\_bank", "transactions", None),
+        )
+
+    def test_percent_and_escape_char_escaped_in_pattern(self):
+        metadata, _ = self.columns(
+            [{"COLUMN_NAME": "id", "TYPE_NAME": "bigint"}],
+            schema="50%_bank", table="tr\\ans",
+        )
+        self.assertEqual(
+            metadata.getColumns.call_args.args,
+            (None, "50\\%\\_bank", "tr\\\\ans", None),
+        )
+
+    def test_foreign_object_rows_filtered(self):
+        _, result = self.columns([
+            {"TABLE_SCHEM": "retail_bank", "TABLE_NAME": "transactions",
+             "COLUMN_NAME": "id", "TYPE_NAME": "NUMBER", "COLUMN_SIZE": 19,
+             "DECIMAL_DIGITS": 0, "IS_NULLABLE": "NO"},
+            {"TABLE_SCHEM": "retailXbank", "TABLE_NAME": "transactions",
+             "COLUMN_NAME": "tz_col", "TYPE_NAME": "TIMESTAMP(9) WITH TIME ZONE"},
+            {"TABLE_SCHEM": "retail_bank", "TABLE_NAME": "transactionsX",
+             "COLUMN_NAME": "stray", "TYPE_NAME": "NUMBER"},
+        ])
+        self.assertEqual(list(result), ["id"])
+
+    def test_same_named_foreign_column_does_not_overwrite(self):
+        _, result = self.columns([
+            {"TABLE_SCHEM": "retail_bank", "TABLE_NAME": "transactions",
+             "COLUMN_NAME": "pos", "TYPE_NAME": "NUMBER", "COLUMN_SIZE": 19,
+             "DECIMAL_DIGITS": 0, "IS_NULLABLE": "NO"},
+            {"TABLE_SCHEM": "retailXbank", "TABLE_NAME": "transactions",
+             "COLUMN_NAME": "pos", "TYPE_NAME": "FLOAT"},
+        ])
+        self.assertEqual(result["pos"].type_name, "NUMBER")
+
+
+class TestDegradedKeyMetadata(unittest.TestCase):
+    """Column facts survive key or index lookup failures."""
+
+    def located(self):
+        return {"id": jdbc.ColumnMeta("id", "INTEGER", 10, 0, True)}
+
+    def test_primary_key_failure_keeps_columns(self):
+        spark, _ = fake_jvm()
+        with patch.object(jdbc, "_column_metadata", return_value=self.located()), patch.object(
+            jdbc, "_primary_key", side_effect=RuntimeError("pk views denied")
+        ), patch.object(jdbc, "_unique_single_columns", return_value=()), self.assertLogs(
+            jdbc.__name__, level="WARNING"
+        ) as logs:
+            result = jdbc.key_metadata(spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", "s.t")
+        self.assertEqual(result, jdbc.KeyMetadata((), (), self.located()))
+        self.assertIn("primary key", logs.output[0])
+
+    def test_index_failure_keeps_columns_and_primary_key(self):
+        spark, _ = fake_jvm()
+        with patch.object(jdbc, "_column_metadata", return_value=self.located()), patch.object(
+            jdbc, "_primary_key", return_value=("id",)
+        ), patch.object(
+            jdbc, "_unique_single_columns", side_effect=RuntimeError("index views denied")
+        ), self.assertLogs(jdbc.__name__, level="WARNING") as logs:
+            result = jdbc.key_metadata(spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", "s.t")
+        self.assertEqual(result, jdbc.KeyMetadata(("id",), (), self.located()))
+        self.assertIn("unique indexes", logs.output[0])
 
 
 if __name__ == "__main__":

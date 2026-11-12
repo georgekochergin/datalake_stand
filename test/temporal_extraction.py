@@ -5,6 +5,7 @@ import importlib.util
 import os
 import re
 from argparse import Namespace
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from uuid import uuid4
 from unittest.mock import patch
@@ -16,6 +17,60 @@ def load_module(name, path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+VIRTUAL_SOURCES = {}
+
+
+def register_virtual(fqn, sql, columns):
+    """Bind a synthetic SQL fixture to a stable FQN for the next loader reads."""
+    VIRTUAL_SOURCES[fqn] = {"sql": sql, "columns": columns}
+
+
+def unregister_virtual(fqn):
+    """Drop one virtual fixture binding."""
+    VIRTUAL_SOURCES.pop(fqn, None)
+
+
+@contextmanager
+def virtual_sources(*modules):
+    """Let the unchanged loader read virtual fixtures through their stable FQNs.
+
+    The loader resolves sources strictly through schema.table FQNs; registered
+    fixtures redirect only the rendered reference and the catalog column facts,
+    so planning, windows, reads and appends stay on the real code paths.
+    """
+    from ingestion.sources.rdbms import jdbc as jdbc_pkg
+    from ingestion.spark.raw.rdbms import reader as reader_pkg
+
+    real_render = reader_pkg.render_source_table
+    real_keys = jdbc_pkg.key_metadata
+
+    def render(dialect, source_table):
+        fixture = VIRTUAL_SOURCES.get(source_table)
+        return fixture["sql"] if fixture else real_render(dialect, source_table)
+
+    def keys(jvm, dialect, jdbc_url, user, password, source_table):
+        fixture = VIRTUAL_SOURCES.get(source_table)
+        if fixture:
+            return jdbc_pkg.KeyMetadata((), (), dict(fixture["columns"]))
+        return real_keys(jvm, dialect, jdbc_url, user, password, source_table)
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(reader_pkg, "render_source_table", render))
+        stack.enter_context(patch.object(jdbc_pkg, "key_metadata", keys))
+        for module in modules:
+            stack.enter_context(patch.object(module, "render_source_table", render))
+        yield
+
+
+def render_source_reference(dialect, source_table):
+    """Render a real FQN reference; a virtual fixture renders to its SQL."""
+    fixture = VIRTUAL_SOURCES.get(source_table)
+    if fixture:
+        return fixture["sql"]
+    reader = load_module("reader", "/opt/spark-jobs/raw/rdbms/reader.py")
+    return reader.render_source_table(dialect, source_table)
 
 
 def require(condition, message):
@@ -43,7 +98,6 @@ def metadata_row(hook, table, source_id, entity_fqn):
 
 def source_count(spark, args, lower, upper, kind, lower_op=">"):
     """Count the exact source predicate without Spark temporal conversion."""
-    reader = load_module("reader", "/opt/spark-jobs/raw/rdbms/reader.py")
     from ingestion.sources.rdbms import positions
     from ingestion.sources.rdbms import registry as dialects
 
@@ -55,7 +109,7 @@ def source_count(spark, args, lower, upper, kind, lower_op=">"):
             predicates.append(
                 f"{column} {operator} {dialect.position_literal(positions.canonical(value, kind), kind)}"
             )
-    query = f"SELECT COUNT(*) FROM {reader.render_source_table(dialect, args.source_table, allow_expression=True)}"
+    query = f"SELECT COUNT(*) FROM {render_source_reference(dialect, args.source_table)}"
     if predicates:
         query += " WHERE " + " AND ".join(predicates)
     connection = spark._jvm.java.sql.DriverManager.getConnection(
@@ -77,7 +131,7 @@ def source_count(spark, args, lower, upper, kind, lower_op=">"):
 
 
 def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, token,
-             expected_upper=None):
+             expected_upper=None, fixture=None):
     """Verify bootstrap, aligned lookback, empty resume, and successful retry."""
     load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/incremental/load_entity.py")
     from ingestion import meta
@@ -92,95 +146,103 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
         process_id=None, lookback_size=0, lookback_unit=None,
         position_type=expected_kind,
     )
-    require(metadata_row(hook, "incremental_state", args.source_id, table) is None,
-            target + " starts with fresh isolated metadata")
-    require(not spark.catalog.tableExists(args.target_table), target + " starts with fresh raw table")
-    kind, upper, empty, has_null = load_entity.source_position(spark, args)
-    require(kind == expected_kind, f"{target} exact JDBC kind is {expected_kind}, got {kind}")
-    declared = args.position_type
-    args.position_type = "bigint"
+    if fixture is not None:
+        register_virtual(table, *fixture)
     try:
-        load_entity.source_kind(spark, args)
-    except ValueError as error:
-        require("Incremental type mismatch" in str(error), target + " rejects wrong declared type")
-    else:
-        raise AssertionError(target + " accepted a wrong declared type")
+        with virtual_sources(load_entity):
+            require(metadata_row(hook, "incremental_state", args.source_id, table) is None,
+                    target + " starts with fresh isolated metadata")
+            require(not spark.catalog.tableExists(args.target_table), target + " starts with fresh raw table")
+            kind, upper, empty, has_null = load_entity.source_position(spark, args)
+            require(kind == expected_kind, f"{target} exact JDBC kind is {expected_kind}, got {kind}")
+            declared = args.position_type
+            args.position_type = "bigint"
+            try:
+                load_entity.source_kind(spark, args)
+            except ValueError as error:
+                require("Incremental type mismatch" in str(error), target + " rejects wrong declared type")
+            else:
+                raise AssertionError(target + " accepted a wrong declared type")
+            finally:
+                args.position_type = declared
+            require(not empty and not has_null and upper is not None, target + " has non-null temporal data")
+            if expected_upper is not None:
+                require(upper == expected_upper, target + " source MAX preserves full fractional precision")
+                digits = upper.removesuffix("Z")
+                previous = digits[:-1] + str(int(digits[-1]) - 1) + ("Z" if upper.endswith("Z") else "")
+                require(source_count(spark, args, previous, upper, kind) == 1,
+                        target + " source predicate distinguishes adjacent sub-microsecond positions")
+            total = 0
+            watermark = None
+            for revision, phase in enumerate(("bootstrap", "lookback", "normal"), start=1):
+                args.run_id = f"{token}-{target}-{phase}"
+                args.process_id = meta.allocate_process_id(dag_id=args.dag_id, run_id=args.run_id,
+                                                           db_connect=hook.get_conn)
+                args.lookback_size = 1 if phase == "lookback" else 0
+                args.lookback_unit = "d" if args.lookback_size else None
+                if phase == "lookback":
+                    lower, lower_op = positions.window_bounds(watermark, kind, 1, "d")
+                else:
+                    lower, lower_op = (watermark if phase == "normal" else None), ">"
+                bound = upper
+                expected_count = source_count(spark, args, lower, bound, kind, lower_op)
+                if phase == "normal":
+                    require(expected_count == 0, target + " unchanged source has empty strict resume")
+                if phase == "lookback":
+                    require(expected_count > 0, target + " lookback includes overlapping source rows")
+                    require(lower_op == ">=", target + " temporal lookback uses the inclusive aligned operator")
+                load_entity.managed_load(spark, args)
+                batch = metadata_row(hook, "incremental_batches", args.source_id, table)
+                state = metadata_row(hook, "incremental_state", args.source_id, table)
+                label = f"{target}/{phase}"
+                require(batch is not None and state is not None, label + " persisted batch and state")
+                require(batch["run_id"] == args.run_id and batch["process_id"] == args.process_id,
+                        label + " stable run/process identity")
+                require(batch["status"] == "SUCCEEDED" and batch["attempt_count"] == (1 if expected_count else 0),
+                        label + " finalized; empty window starts no executor")
+                require(batch["finished_at"] is not None, label + " finalized cleanly")
+                require(batch["incremental_type"] == kind and state["incremental_type"] == kind,
+                        label + " persists original JDBC kind")
+                require(batch["lower_bound"] == lower and batch["upper_bound"] == bound,
+                        label + " frozen exact lower/upper bounds")
+                require(batch["lower_bound_op"] == lower_op, label + " persisted applied lower operator")
+                require(batch["watermark_before"] == watermark, label + " retains previous watermark")
+                reason = "bootstrap" if phase == "bootstrap" else "regular"
+                require(batch["reason"] == reason,
+                        label + " bootstrap is the opening phase of the incremental stream")
+                require(batch["row_count"] == expected_count, label + " row count matches exact JDBC predicate")
+                require(batch["observed_max"] == (upper if expected_count else None),
+                        label + " observed MAX retains exact source precision")
+                if expected_count:
+                    watermark = upper
+                require(batch["watermark_after"] == watermark and state["watermark"] == watermark,
+                        label + " state watermark matches finalized batch")
+                require(state["revision"] == revision + 1 and batch["expected_revision"] == revision,
+                        label + " advances one state revision")
+                require(state["last_process_id"] == batch["process_id"], label + " state points to latest batch")
+                require(state["incremental_column"] == column,
+                        label + " preserves configured incremental contract")
+                total += expected_count
+                frame = spark.table(args.target_table)
+                require(frame.count() == total, label + " raw append-only count")
+                require(frame.filter(frame["__process_id"] == batch["process_id"]).count() == expected_count,
+                        label + " raw rows carry the process identity")
+                require(frame.filter(frame["__process_id"].isNull()).count() == 0,
+                        label + " every raw row has a process identity")
+                load_entity.managed_load(spark, args)
+                retried = metadata_row(hook, "incremental_batches", args.source_id, table)
+                require(retried == batch and spark.table(args.target_table).count() == total,
+                        label + " successful retry neither appends nor mutates persisted batch")
+                require(metadata_row(hook, "incremental_state", args.source_id, table) == state,
+                        label + " successful retry preserves state revision")
     finally:
-        args.position_type = declared
-    require(not empty and not has_null and upper is not None, target + " has non-null temporal data")
-    if expected_upper is not None:
-        require(upper == expected_upper, target + " source MAX preserves full fractional precision")
-        digits = upper.removesuffix("Z")
-        previous = digits[:-1] + str(int(digits[-1]) - 1) + ("Z" if upper.endswith("Z") else "")
-        require(source_count(spark, args, previous, upper, kind) == 1,
-                target + " source predicate distinguishes adjacent sub-microsecond positions")
-    total = 0
-    watermark = None
-    for revision, phase in enumerate(("bootstrap", "lookback", "normal"), start=1):
-        args.run_id = f"{token}-{target}-{phase}"
-        args.process_id = meta.allocate_process_id(dag_id=args.dag_id, run_id=args.run_id,
-                                                   db_connect=hook.get_conn)
-        args.lookback_size = 1 if phase == "lookback" else 0
-        args.lookback_unit = "d" if args.lookback_size else None
-        if phase == "lookback":
-            lower, lower_op = positions.window_bounds(watermark, kind, 1, "d")
-        else:
-            lower, lower_op = (watermark if phase == "normal" else None), ">"
-        bound = upper
-        expected_count = source_count(spark, args, lower, bound, kind, lower_op)
-        if phase == "normal":
-            require(expected_count == 0, target + " unchanged source has empty strict resume")
-        if phase == "lookback":
-            require(expected_count > 0, target + " lookback includes overlapping source rows")
-            require(lower_op == ">=", target + " temporal lookback uses the inclusive aligned operator")
-        load_entity.managed_load(spark, args)
-        batch = metadata_row(hook, "incremental_batches", args.source_id, table)
-        state = metadata_row(hook, "incremental_state", args.source_id, table)
-        label = f"{target}/{phase}"
-        require(batch is not None and state is not None, label + " persisted batch and state")
-        require(batch["run_id"] == args.run_id and batch["process_id"] == args.process_id,
-                label + " stable run/process identity")
-        require(batch["status"] == "SUCCEEDED" and batch["attempt_count"] == (1 if expected_count else 0),
-                label + " finalized; empty window starts no executor")
-        require(batch["finished_at"] is not None, label + " finalized cleanly")
-        require(batch["incremental_type"] == kind and state["incremental_type"] == kind,
-                label + " persists original JDBC kind")
-        require(batch["lower_bound"] == lower and batch["upper_bound"] == bound,
-                label + " frozen exact lower/upper bounds")
-        require(batch["lower_bound_op"] == lower_op, label + " persisted applied lower operator")
-        require(batch["watermark_before"] == watermark, label + " retains previous watermark")
-        reason = "bootstrap" if phase == "bootstrap" else "regular"
-        require(batch["reason"] == reason,
-                label + " bootstrap is the opening phase of the incremental stream")
-        require(batch["row_count"] == expected_count, label + " row count matches exact JDBC predicate")
-        require(batch["observed_max"] == (upper if expected_count else None),
-                label + " observed MAX retains exact source precision")
-        if expected_count:
-            watermark = upper
-        require(batch["watermark_after"] == watermark and state["watermark"] == watermark,
-                label + " state watermark matches finalized batch")
-        require(state["revision"] == revision + 1 and batch["expected_revision"] == revision,
-                label + " advances one state revision")
-        require(state["last_process_id"] == batch["process_id"], label + " state points to latest batch")
-        require(state["incremental_column"] == column,
-                label + " preserves configured incremental contract")
-        total += expected_count
-        frame = spark.table(args.target_table)
-        require(frame.count() == total, label + " raw append-only count")
-        require(frame.filter(frame["__process_id"] == batch["process_id"]).count() == expected_count,
-                label + " raw rows carry the process identity")
-        require(frame.filter(frame["__process_id"].isNull()).count() == 0,
-                label + " every raw row has a process identity")
-        load_entity.managed_load(spark, args)
-        retried = metadata_row(hook, "incremental_batches", args.source_id, table)
-        require(retried == batch and spark.table(args.target_table).count() == total,
-                label + " successful retry neither appends nor mutates persisted batch")
-        require(metadata_row(hook, "incremental_state", args.source_id, table) == state,
-                label + " successful retry preserves state revision")
+        unregister_virtual(table)
 
 
 def precision_fixtures(source):
     """Provide immutable two-row JDBC queries differing below Spark microseconds."""
+    from ingestion.sources.rdbms import jdbc as jdbc_pkg
+
     if source == "bank":
         for name, sql_type, kind, suffix in (
             ("datetime2", "datetime2(7)", "timestamp_local(7)", ""),
@@ -191,7 +253,8 @@ def precision_fixtures(source):
                 for index in (1, 2)
             )
             upper = "2024-06-15T" + ("10" if suffix else "12") + ":34:56.1234562" + ("Z" if suffix else "")
-            yield name, f"({query}) temporal_fixture", kind, upper
+            column = jdbc_pkg.ColumnMeta("position", sql_type.split("(")[0].upper(), None, 7, True)
+            yield name, f"({query}) temporal_fixture", kind, upper, column
     else:
         for name, sql_type, function, kind, suffix in (
             ("timestamp9", "TIMESTAMP(9)", "TO_TIMESTAMP", "timestamp_local(9)", ""),
@@ -203,7 +266,8 @@ def precision_fixtures(source):
                 for index in (1, 2)
             )
             upper = "2024-06-15T" + ("10" if suffix else "12") + ":34:56.123456782" + ("Z" if suffix else "")
-            yield name, f"({query}) temporal_fixture", kind, upper
+            column = jdbc_pkg.ColumnMeta("position", sql_type, None, None, True)
+            yield name, f"({query}) temporal_fixture", kind, upper, column
 
 
 def check_post_append_retry(spark, hook, jdbc, token):
@@ -211,10 +275,11 @@ def check_post_append_retry(spark, hook, jdbc, token):
     load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/incremental/load_entity.py")
     from ingestion import meta
     from ingestion.meta import registry
+    from ingestion.sources.rdbms import jdbc as jdbc_pkg
 
     args = Namespace(
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
-        source_table="(SELECT CAST(1 AS bigint) AS position) retry_fixture",
+        source_table="fixture.retry_probe",
         target_table="raw.e2e_contract.post_append_retry", source_id="e2e_retry",
         incremental_column="position", no_jdbc_partitioning=True,
         num_partitions=1, dag_id="e2e_post_append_retry",
@@ -223,27 +288,33 @@ def check_post_append_retry(spark, hook, jdbc, token):
         lookback_size=0, lookback_unit=None,
         position_type="bigint",
     )
-    with patch.object(registry, "finalize_batch", side_effect=RuntimeError("injected metadata failure")):
-        try:
+    register_virtual(args.source_table, "(SELECT CAST(1 AS bigint) AS position) retry_fixture",
+                     {"position": jdbc_pkg.ColumnMeta("position", "BIGINT", 19, 0, True)})
+    try:
+        with virtual_sources(load_entity):
+            with patch.object(registry, "finalize_batch", side_effect=RuntimeError("injected metadata failure")):
+                try:
+                    load_entity.managed_load(spark, args)
+                except RuntimeError as exc:
+                    require(str(exc) == "injected metadata failure", "expected post-append failure")
+                else:
+                    raise AssertionError("fault injection must fail the first execution")
+            require(spark.table(args.target_table).count() == 1, "first append survives metadata failure")
+            require(metadata_row(hook, "incremental_state", args.source_id, args.source_table)["watermark"] is None,
+                    "metadata failure does not advance watermark")
+            failed = metadata_row(hook, "incremental_batches", args.source_id, args.source_table)
+            require(failed["status"] == "FAILED", "ordinary failed batch permits retry")
             load_entity.managed_load(spark, args)
-        except RuntimeError as exc:
-            require(str(exc) == "injected metadata failure", "expected post-append failure")
-        else:
-            raise AssertionError("fault injection must fail the first execution")
-    require(spark.table(args.target_table).count() == 1, "first append survives metadata failure")
-    require(metadata_row(hook, "incremental_state", args.source_id, args.source_table)["watermark"] is None,
-            "metadata failure does not advance watermark")
-    failed = metadata_row(hook, "incremental_batches", args.source_id, args.source_table)
-    require(failed["status"] == "FAILED", "ordinary failed batch permits retry")
-    load_entity.managed_load(spark, args)
-    finished = metadata_row(hook, "incremental_batches", args.source_id, args.source_table)
-    require(finished["process_id"] == failed["process_id"] and finished["attempt_count"] == 2,
-            "post-append retry retains batch identity")
-    require(finished["status"] == "SUCCEEDED" and finished["row_count"] == 1,
-            "post-append retry finalizes latest execution")
-    require(spark.table(args.target_table).count() == 2, "at-least-once retry intentionally appends twice")
-    require(spark.table(args.target_table).select("__process_id").distinct().count() == 1,
-            "both commits retain the same process identity")
+            finished = metadata_row(hook, "incremental_batches", args.source_id, args.source_table)
+            require(finished["process_id"] == failed["process_id"] and finished["attempt_count"] == 2,
+                    "post-append retry retains batch identity")
+            require(finished["status"] == "SUCCEEDED" and finished["row_count"] == 1,
+                    "post-append retry finalizes latest execution")
+            require(spark.table(args.target_table).count() == 2, "at-least-once retry intentionally appends twice")
+            require(spark.table(args.target_table).select("__process_id").distinct().count() == 1,
+                    "both commits retain the same process identity")
+    finally:
+        unregister_virtual(args.source_table)
 
 
 def check_snapshot_recovery(spark, hook, source, jdbc, token):
@@ -299,17 +370,16 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
         finally:
             connection.close()
 
-    real_position = load_entity.source_position
-    real_read = load_entity.reader.read_extract_frame
+    from ingestion.sources.rdbms import jdbc as jdbc_pkg
+
+    sql_type, precision = ("NUMBER", 18) if source == "broker" else ("BIGINT", 19)
+    position_columns = {"position": jdbc_pkg.ColumnMeta("position", sql_type, precision, 0, True)}
+    register_virtual(args.source_table, projection(()), position_columns)
 
     def incremental(values):
         """Execute the unchanged loader with controlled JDBC source visibility."""
-        visible = Namespace(**vars(args))
-        visible.source_table = projection(values)
-        with patch.object(load_entity, "source_position",
-                          side_effect=lambda session, _: real_position(session, visible)), \
-                patch.object(load_entity.reader, "read_extract_frame",
-                             side_effect=lambda session, _, **window: real_read(session, visible, **window)):
+        register_virtual(args.source_table, projection(values), position_columns)
+        with virtual_sources(load_entity):
             load_entity.managed_load(spark, args)
 
     snapshot_args = Namespace(**vars(args))
@@ -319,7 +389,7 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
     def snapshot(values, crash=False):
         """Read a real JDBC projection and optionally fail after the RTAS commit."""
         snapshot_args.process_id = args.process_id
-        snapshot_args.source_table = projection(values)
+        register_virtual(snapshot_args.source_table, projection(values), position_columns)
         before = registry()
         overwrite = load_act_snap._overwrite_snapshot
 
@@ -330,10 +400,12 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
 
         try:
             if crash:
-                with patch.object(load_act_snap, "_overwrite_snapshot", side_effect=commit_then_crash):
+                with patch.object(load_act_snap, "_overwrite_snapshot", side_effect=commit_then_crash), \
+                        virtual_sources():
                     load_act_snap.managed_snapshot(spark, snapshot_args)
             else:
-                load_act_snap.managed_snapshot(spark, snapshot_args)
+                with virtual_sources():
+                    load_act_snap.managed_snapshot(spark, snapshot_args)
         finally:
             require(registry() == before, f"{source}: snapshot leaves all registry fields and batches untouched")
 
@@ -373,7 +445,6 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
     else:
         raise AssertionError("snapshot fault injection did not execute")
     committed = version()
-    snapshot_args.source_table = projection(())
     with patch.object(load_act_snap, "read_extract_frame", side_effect=AssertionError("retry must not read")):
         load_act_snap.managed_snapshot(spark, snapshot_args)
     require(version() == committed, f"{source}: committed retry does not change freshness or version")
@@ -390,8 +461,9 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
     require(load_act_snap.current_snapshot_author(spark, snapshot_args.target_table) != args.process_id,
             f"{source}: empty check cannot claim the previous publication")
     allocate()
-    snapshot_args.source_table = projection((20, 21))
-    frame = load_act_snap.read_extract_frame(spark, snapshot_args)
+    register_virtual(snapshot_args.source_table, projection((20, 21)), position_columns)
+    with virtual_sources():
+        frame = load_act_snap.read_extract_frame(spark, snapshot_args)
     try:
         with patch.object(spark, "sql", side_effect=RuntimeError("injected pre-commit failure")):
             try:
@@ -487,7 +559,7 @@ def check_partitioning(spark, source_jdbc):
         require(choice is not None and choice.column == "transaction_id"
                 and choice.step == jdbc_partitioning.STEP_PRIMARY_KEY,
                 f"{source}: heuristic picks the primary key")
-        table_sql = reader.render_source_table(dialect, table, allow_expression=True)
+        table_sql = reader.render_source_table(dialect, table)
         total = jdbc_count(spark, args, table_sql)
         require(total > 0, f"{source}: source table has rows")
         day_info = keys.columns[column.lower()]
@@ -504,8 +576,7 @@ def check_partitioning(spark, source_jdbc):
         zone_kind = dialect.position_kind(zone_info.type_name, zone_info.precision, zone_info.scale)
         require(zone_kind.startswith("timestamp_instant"),
                 f"{source}: zone fixture column classifies as an instant")
-        zone_sql_rendered = reader.render_source_table(dialect, zone_sql, allow_expression=True)
-        zone_frame = derived_day_frame(spark, reader, dialect, args, zone_sql_rendered,
+        zone_frame = derived_day_frame(spark, reader, dialect, args, zone_sql,
                                        zone_info, zone_kind)
         require(zone_frame.count() == 2,
                 f"{source}: time-zone derived-day partitioned read returns both fixture rows")
@@ -614,9 +685,11 @@ def main():
         ):
             jdbc = source_jdbc[source]
             exercise(spark, hook, source, jdbc, table, f"{source}_temporal", "posting_date", kind, token)
-            for name, query, fixture_kind, upper in precision_fixtures(source):
-                exercise(spark, hook, source, jdbc, query, f"{source}_{name}", "position",
-                         fixture_kind, token, expected_upper=upper)
+            for name, query, fixture_kind, upper, column in precision_fixtures(source):
+                fqn = f"fixture.{source}_{name}"
+                exercise(spark, hook, source, jdbc, fqn, f"{source}_{name}", "position",
+                         fixture_kind, token, expected_upper=upper,
+                         fixture=(query, {"position": column}))
         print("PASS temporal extraction contracts; FAIL=0", flush=True)
     finally:
         spark.stop()

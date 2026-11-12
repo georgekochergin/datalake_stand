@@ -89,19 +89,28 @@ def empty_incremental_window(batch) -> bool:
 
 
 def source_kind(spark, args):
-    """Validate only JDBC metadata, without source aggregates or row reads."""
+    """Validate the incremental column contract against JDBC catalog metadata."""
     dialect = dialects.by_jdbc_url(args.jdbc_url)
-    column = dialect.quote_identifier(args.incremental_column)
-    table = render_source_table(dialect, args.source_table, allow_expression=True)
-    with jdbc.connection(spark._jvm, args.jdbc_url, args.jdbc_user, args.jdbc_password) as connection:
-        _, type_name, precision, scale = jdbc.column_metadata(
-            connection, f"SELECT {column} FROM {table} WHERE 1=0"
-        )[0]
-    kind = dialect.position_kind(type_name, precision, scale)
+    keys = jdbc.key_metadata(
+        spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table
+    )
+    info = keys.columns.get(args.incremental_column.lower())
+    if info is None:
+        raise ValueError(
+            f"Incremental column {args.incremental_column!r} not found in JDBC metadata for "
+            f"{args.source_id}.{args.source_table}"
+        )
+    kind = jdbc.column_position_kind(dialect, info)
+    if kind is None:
+        raise ValueError(
+            f"Unsupported JDBC type of incremental column "
+            f"{args.source_id}.{args.source_table}.{args.incremental_column}: "
+            f"{info.type_name} precision={info.precision} scale={info.scale}"
+        )
     if kind != args.position_type:
         raise ValueError(
             f"Incremental type mismatch for {args.source_id}.{args.source_table}.{args.incremental_column}: "
-            f"expected={args.position_type} actual={kind} JDBC={type_name} precision={precision} scale={scale}"
+            f"expected={args.position_type} actual={kind} JDBC={info.type_name} precision={info.precision} scale={info.scale}"
         )
     return kind
 
@@ -110,7 +119,7 @@ def source_position(spark, args):
     """Inspect original JDBC type and obtain exact MAX plus NULL/empty diagnostics."""
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     column = dialect.quote_identifier(args.incremental_column)
-    table = render_source_table(dialect, args.source_table, allow_expression=True)
+    table = render_source_table(dialect, args.source_table)
     kind = source_kind(spark, args)
     with jdbc.connection(spark._jvm, args.jdbc_url, args.jdbc_user, args.jdbc_password) as connection:
         expression = dialect.position_expression(f"MAX({column})", kind)
