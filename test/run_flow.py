@@ -15,6 +15,12 @@
    таблиц-снимков __act_snap: полное соответствие источнику, единый
    __process_id и __load_dttm, атомарная перезапись при повторе (одна порция),
    свежесть и автор публикации по метаданным Iceberg ($snapshots, $properties).
+7. Эволюцию схемы реальных источников MSSQL и Oracle: удаление, переименование
+   и добавление колонок через API sydafa, расширения типов прямыми DDL под
+   административным пользователем контура (int -> bigint, float -> double,
+   decimal(p,s) -> decimal(p',s), удлинение строк) с успешной загрузкой,
+   promotion схем Iceberg, а затем несовместимое изменение типа с отказом
+   load-задачи без нового снапшота Iceberg.
 """
 from __future__ import annotations
 
@@ -31,6 +37,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
+
+import source_ddl
 
 SYDAFA = os.environ.get("SYDAFA_URL", "http://sydafa:8000")
 AIRFLOW = os.environ.get("AIRFLOW_URL", "http://airflow-webserver:8080")
@@ -74,6 +82,149 @@ RAW_INCREMENTAL_TABLES = [
     "raw.bank.retail_bank__transactions",
     "raw.broker.trading_core__transactions",
 ]
+
+EVOLUTION_SOURCES = {
+    "bank": {
+        "engine": "mssql",
+        "host_suffix": "-src-mssql-bank:1433",
+        "entity": "retail_bank.clients",
+        "raw_table": "raw.bank.retail_bank__clients",
+        "refs_dag": "ingest__rdbms__bank__refs",
+        "dropped": "client_type",
+        "renamed": ("full_name", "client_name"),
+        "added": "email",
+        "added_rule": {"kind": "faker", "provider": "email", "null_ratio": 0.0},
+        "renamed_rule": {"kind": "faker", "provider": "name", "locale": "ru_RU", "null_ratio": 0.0},
+        "float_seeded_on_first_load": True,
+        "create_columns": [
+            "ALTER TABLE [retail_bank].[clients] ADD [e2e_int] INT NULL, "
+            "[e2e_float] REAL NULL, [e2e_dec] DECIMAL(9,2) NULL, [e2e_danger] INT NULL",
+        ],
+        "seed_values": [
+            "UPDATE [retail_bank].[clients] SET [e2e_int] = 100000 + [client_id], "
+            "[e2e_float] = 1.5, [e2e_dec] = 12345.67",
+        ],
+        "widen_types": [
+            "ALTER TABLE [retail_bank].[clients] ALTER COLUMN [e2e_int] BIGINT",
+            "ALTER TABLE [retail_bank].[clients] ALTER COLUMN [e2e_float] DOUBLE PRECISION",
+            "ALTER TABLE [retail_bank].[clients] ALTER COLUMN [e2e_dec] DECIMAL(14,2)",
+            "ALTER TABLE [retail_bank].[clients] ALTER COLUMN [client_name] NVARCHAR(800) NULL",
+        ],
+        "overflow_values": [
+            "UPDATE [retail_bank].[clients] SET [e2e_int] = 3000000000 + [client_id], "
+            "[e2e_float] = 1.0e300, [e2e_dec] = 12345678901.50, "
+            "[client_name] = N'e2e-widened-' + REPLICATE(N'x', 500)",
+        ],
+        "widen_checks": [
+            ("bank: e2e_int расширен в bigint на источнике",
+             "SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='retail_bank' "
+             "AND TABLE_NAME='clients' AND COLUMN_NAME='e2e_int'", "bigint"),
+            ("bank: e2e_float расширен в double на источнике",
+             "SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='retail_bank' "
+             "AND TABLE_NAME='clients' AND COLUMN_NAME='e2e_float'", "float"),
+            ("bank: e2e_dec расширен в decimal(14,2) на источнике",
+             "SELECT DATA_TYPE + '(' + CAST(NUMERIC_PRECISION AS varchar(10)) + ',' "
+             "+ CAST(NUMERIC_SCALE AS varchar(10)) + ')' FROM INFORMATION_SCHEMA.COLUMNS "
+             "WHERE TABLE_SCHEMA='retail_bank' AND TABLE_NAME='clients' AND COLUMN_NAME='e2e_dec'",
+             "decimal(14,2)"),
+            ("bank: client_name расширен до 800 символов на источнике",
+             "SELECT DATA_TYPE + '(' + CAST(CHARACTER_MAXIMUM_LENGTH AS varchar(10)) + ')' "
+             "FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='retail_bank' "
+             "AND TABLE_NAME='clients' AND COLUMN_NAME='client_name'", "nvarchar(800)"),
+        ],
+        "iceberg_first": {
+            "e2e_int": "integer", "e2e_float": "real", "e2e_dec": "decimal(9,2)",
+            "e2e_danger": "integer", "email": "varchar", "client_name": "varchar",
+            "client_type": "varchar",
+        },
+        "iceberg_widened": {
+            "e2e_int": "bigint", "e2e_float": "double", "e2e_dec": "decimal(14,2)",
+            "client_name": "varchar",
+        },
+        "danger_type": (
+            "ALTER TABLE [retail_bank].[clients] ALTER COLUMN [e2e_danger] NVARCHAR(64) NULL"
+        ),
+        "danger_insert": (
+            "INSERT INTO [retail_bank].[clients] ([client_id], [client_name], [status], "
+            "[_batch_id], [e2e_danger]) VALUES (910000001, N'e2e-danger-row', N'E2E', NULL, "
+            "N'not-a-number')"
+        ),
+        "danger_type_check": (
+            "SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='retail_bank' "
+            "AND TABLE_NAME='clients' AND COLUMN_NAME='e2e_danger'"
+        ),
+        "danger_type_expected": "nvarchar",
+    },
+    "broker": {
+        "engine": "oracle",
+        "host_suffix": "-src-oracle-broker:1521",
+        "entity": "trading_core.clients",
+        "raw_table": "raw.broker.trading_core__clients",
+        "refs_dag": "ingest__rdbms__broker__refs",
+        "dropped": "is_qualified",
+        "renamed": ("full_name", "client_name"),
+        "added": "email",
+        "added_rule": {"kind": "faker", "provider": "email", "null_ratio": 0.0},
+        "renamed_rule": {"kind": "faker", "provider": "name", "locale": "ru_RU", "null_ratio": 0.0},
+        "float_seeded_on_first_load": False,
+        "create_columns": [
+            'ALTER TABLE "trading_core"."clients" ADD ("e2e_int" NUMBER(9,0), '
+            '"e2e_float" BINARY_FLOAT, "e2e_dec" NUMBER(9,2), "e2e_danger" NUMBER(9,0))',
+        ],
+        "seed_values": [
+            'UPDATE "trading_core"."clients" SET "e2e_int" = 100000 + "client_id", '
+            '"e2e_dec" = 12345.67',
+        ],
+        "widen_types": [
+            'ALTER TABLE "trading_core"."clients" MODIFY ("e2e_int" NUMBER(18,0))',
+            'ALTER TABLE "trading_core"."clients" MODIFY ("e2e_float" BINARY_DOUBLE)',
+            'ALTER TABLE "trading_core"."clients" MODIFY ("e2e_dec" NUMBER(14,2))',
+            'ALTER TABLE "trading_core"."clients" MODIFY ("client_name" VARCHAR2(800))',
+        ],
+        "overflow_values": [
+            'UPDATE "trading_core"."clients" SET "e2e_int" = 3000000000 + "client_id", '
+            '"e2e_float" = 1.0e300D, "e2e_dec" = 12345678901.50, '
+            "\"client_name\" = 'e2e-widened-' || RPAD('x', 500, 'x')",
+        ],
+        "widen_checks": [
+            ("broker: e2e_int расширен в NUMBER(18,0) на источнике",
+             "SELECT data_type || '(' || data_precision || ',' || data_scale || ')' "
+             "FROM all_tab_columns WHERE owner='trading_core' AND table_name='clients' "
+             "AND column_name='e2e_int'", "NUMBER(18,0)"),
+            ("broker: e2e_float расширен в BINARY_DOUBLE на источнике",
+             "SELECT data_type FROM all_tab_columns WHERE owner='trading_core' "
+             "AND table_name='clients' AND column_name='e2e_float'", "BINARY_DOUBLE"),
+            ("broker: e2e_dec расширен в NUMBER(14,2) на источнике",
+             "SELECT data_type || '(' || data_precision || ',' || data_scale || ')' "
+             "FROM all_tab_columns WHERE owner='trading_core' AND table_name='clients' "
+             "AND column_name='e2e_dec'", "NUMBER(14,2)"),
+            ("broker: client_name расширен до 800 символов на источнике",
+             "SELECT data_type || '(' || char_length || ')' FROM all_tab_columns "
+             "WHERE owner='trading_core' AND table_name='clients' "
+             "AND column_name='client_name'", "VARCHAR2(800)"),
+        ],
+        "iceberg_first": {
+            "e2e_int": "decimal(9,0)", "e2e_float": "real", "e2e_dec": "decimal(9,2)",
+            "e2e_danger": "decimal(9,0)", "email": "varchar", "client_name": "varchar",
+            "is_qualified": "varchar",
+        },
+        "iceberg_widened": {
+            "e2e_int": "decimal(18,0)", "e2e_float": "double", "e2e_dec": "decimal(14,2)",
+            "client_name": "varchar",
+        },
+        "danger_type": 'ALTER TABLE "trading_core"."clients" MODIFY ("e2e_danger" VARCHAR2(64))',
+        "danger_insert": (
+            'INSERT INTO "trading_core"."clients" ("client_id", "client_name", "status", '
+            '"_batch_id", "e2e_danger") VALUES (910000001, \'e2e-danger-row\', \'E2E\', NULL, '
+            "'not-a-number')"
+        ),
+        "danger_type_check": (
+            "SELECT data_type FROM all_tab_columns WHERE owner='trading_core' "
+            "AND table_name='clients' AND column_name='e2e_danger'"
+        ),
+        "danger_type_expected": "VARCHAR2",
+    },
+}
 
 _CTX = ssl.create_default_context()
 _CTX.check_hostname = False
@@ -124,24 +275,34 @@ def wait_http(url: str, want: int, tries: int = 40, interval: int = 3, body: Any
     return code, raw
 
 
-def sydafa_post(path: str, body: Any) -> tuple[int, Any]:
-    """Отправляет POST-запрос в API sydafa."""
-    code, raw = http("POST", SYDAFA + path, body, {"Content-Type": "application/json"})
+def sydafa_request(method: str, path: str, body: Any = None) -> tuple[int, Any]:
+    """Отправляет запрос в API sydafa и разбирает JSON-ответ."""
+    code, raw = http(method, SYDAFA + path, body, {"Content-Type": "application/json"})
     try:
         parsed = json.loads(raw) if raw else None
     except Exception:
         parsed = raw
     return code, parsed
+
+
+def sydafa_post(path: str, body: Any) -> tuple[int, Any]:
+    """Отправляет POST-запрос в API sydafa."""
+    return sydafa_request("POST", path, body)
 
 
 def sydafa_get(path: str) -> tuple[int, Any]:
     """Отправляет GET-запрос в API sydafa."""
-    code, raw = http("GET", SYDAFA + path, None, {"Content-Type": "application/json"})
-    try:
-        parsed = json.loads(raw) if raw else None
-    except Exception:
-        parsed = raw
-    return code, parsed
+    return sydafa_request("GET", path)
+
+
+def sydafa_rule_put(source: str, entity: str, column: str, rule: dict[str, Any]) -> tuple[int, Any]:
+    """Назначает генератор одной колонке через rules API."""
+    return sydafa_request("PUT", "/sources/%s/rules/%s/columns/%s" % (source, entity, column), rule)
+
+
+def sydafa_rule_delete(source: str, entity: str, column: str) -> tuple[int, Any]:
+    """Удаляет правило генерации одной колонки через rules API."""
+    return sydafa_request("DELETE", "/sources/%s/rules/%s/columns/%s" % (source, entity, column))
 
 
 def sydafa_migrate(source: str, operations: list[dict[str, Any]]) -> tuple[int, Any]:
@@ -272,6 +433,39 @@ def airflow_check_asset_publication(token: str, dag_id: str, run_id: str) -> Non
               bool(end_date and start_date and start_date >= end_date), True)
 
 
+def airflow_task_states(token: str, dag_id: str, run_id: str) -> dict[str, str]:
+    """Состояния задач DagRun: task_id -> state."""
+    url = "%s/api/v2/dags/%s/dagRuns/%s/taskInstances?limit=100" % (AIRFLOW, dag_id, run_id)
+    code, raw = http("GET", url, None, {"Authorization": "Bearer " + token})
+    if code != 200:
+        return {}
+    payload = json.loads(raw)
+    return {item["task_id"]: item.get("state") for item in payload.get("task_instances", [])}
+
+
+def airflow_task_log(token: str, dag_id: str, run_id: str, task_id: str) -> str:
+    """Хвост лога первой попытки задачи."""
+    url = "%s/api/v2/dags/%s/dagRuns/%s/taskInstances/%s/logs/1" % (AIRFLOW, dag_id, run_id, task_id)
+    _, raw = http("GET", url, None, {"Authorization": "Bearer " + token}, timeout=120)
+    return raw[-20000:]
+
+
+def airflow_wait_run_failed(token: str, dag_id: str, run_id: str, timeout: int = 900, name: str | None = None) -> bool:
+    """Дождаться ожидаемого отказа DagRun без печати логов: причину проверяет вызывающий код."""
+    url = "%s/api/v2/dags/%s/dagRuns/%s" % (AIRFLOW, dag_id, run_id)
+    deadline = time.time() + timeout
+    last = "unknown"
+    while time.time() < deadline:
+        code, raw = http("GET", url, None, {"Authorization": "Bearer " + token})
+        if code == 200:
+            last = json.loads(raw).get("state", "unknown")
+            if last in ("failed", "success"):
+                break
+        time.sleep(5)
+    check((name or dag_id) + " -> failed", last, "failed")
+    return last == "failed"
+
+
 def trino_query(sql: str, timeout: int = 120) -> list[list[Any]]:
     """Выполняет SQL в Trino через REST (/v1/statement) и возвращает строки данных.
 
@@ -320,6 +514,23 @@ def raw_stats(table: str) -> tuple[int, int, int]:
 def raw_rows_with_process(table: str, process_id: int) -> int:
     """Число строк, загруженных конкретным запуском."""
     rows = trino_query("SELECT count(*) FROM %s WHERE __process_id = %d" % (table, process_id))
+    return int(rows[0][0])
+
+
+def raw_column_types(table: str) -> dict[str, str]:
+    """Типы колонок raw-таблицы Iceberg из information_schema Trino."""
+    namespace, name = table.split(".")[1:]
+    rows = trino_query(
+        "SELECT column_name, data_type FROM raw.information_schema.columns "
+        "WHERE table_schema = '%s' AND table_name = '%s'" % (namespace, name)
+    )
+    return {row[0]: row[1] for row in rows}
+
+
+def raw_snapshot_count(table: str) -> int:
+    """Число снапшотов Iceberg у raw-таблицы."""
+    namespace, name = table.split(".")[1:]
+    rows = trino_query('SELECT count(*) FROM "raw"."%s"."%s$snapshots"' % (namespace, name))
     return int(rows[0][0])
 
 
@@ -540,6 +751,252 @@ def validate_manifests_and_dags() -> None:
         check("snapshot DAG %s uses slash Asset URI" % dag_id, "/act_snap\")" in content, True)
         check("snapshot DAG %s uses explicitly configured shared pool" % dag_id, 'pool="ingest_loads"' in content, True)
         check("snapshot DAG %s uses configured pool weight" % dag_id, "pool_slots=2" in content, True)
+
+
+def evolution_host(cfg: dict[str, Any]) -> str:
+    """Внутренний адрес контейнера источника текущего контура."""
+    prefix = os.environ.get("SYDAFA_CONTAINER_PREFIX", "sydafa-dlh-test")
+    return prefix + cfg["host_suffix"]
+
+
+def evolution_ddl(source: str, cfg: dict[str, Any], statements: list[str], label: str) -> int:
+    """Выполнить прямые DDL/DML источника; отказ фиксируется проверкой, а не аварией."""
+    try:
+        affected = source_ddl.execute(cfg["engine"], evolution_host(cfg), statements)
+        check("%s: %s" % (source, label), True, True)
+        return affected
+    except Exception as exc:
+        check("%s: %s" % (source, label), "%s: %s" % (type(exc).__name__, exc), True)
+        return -1
+
+
+def evolution_source_check(source: str, cfg: dict[str, Any], sql: str, want: Any, label: str) -> None:
+    """Сверить одно значение из словаря СУБД с ожидаемым."""
+    try:
+        got = source_ddl.query_scalar(cfg["engine"], evolution_host(cfg), sql)
+    except Exception as exc:
+        got = "%s: %s" % (type(exc).__name__, exc)
+    check("%s: %s" % (source, label), got, want)
+
+
+def evolution_load_refs(token: str, source: str, stamp: str, phase: str) -> bool:
+    """Запустить refs-DAG источника и дождаться завершения."""
+    cfg = EVOLUTION_SOURCES[source]
+    run_id = "e2e-evo%s-%s-%s" % (phase, source, stamp)
+    code, _ = airflow_trigger_retry(token, cfg["refs_dag"], run_id)
+    check("trigger %s (evolution %s)" % (cfg["refs_dag"], phase), code, 200)
+    return airflow_wait_run(token, cfg["refs_dag"], run_id, timeout=900,
+                            name="%s evolution load %s" % (source, phase))
+
+
+def evolution_prepare_sources(token: str, stamp: str) -> None:
+    """Безопасные операции схемы через API sydafa и генерация данных новыми колонками.
+
+    Прямые DDL выполняются только после генерации: модель sydafa не знает
+    e2e-колонок, и генератор не должен выполняться после расхождения
+    физической схемы с сохранённой моделью.
+    """
+    for source, cfg in EVOLUTION_SOURCES.items():
+        old_name, new_name = cfg["renamed"]
+        code, _ = sydafa_migrate(source, [
+            {"op": "drop_column", "entity_fqn": cfg["entity"], "name": cfg["dropped"]}])
+        check("%s: migrate drop_column %s" % (source, cfg["dropped"]), code, 200)
+        code, _ = sydafa_migrate(source, [
+            {"op": "rename_column", "entity_fqn": cfg["entity"],
+             "from_name": old_name, "to_name": new_name}])
+        check("%s: migrate rename_column %s -> %s" % (source, old_name, new_name), code, 200)
+        code, _ = sydafa_migrate(source, [
+            {"op": "add_column", "entity_fqn": cfg["entity"],
+             "column": {"name": cfg["added"], "type": "string"}}])
+        check("%s: migrate add_column %s" % (source, cfg["added"]), code, 200)
+        code, _ = sydafa_rule_put(source, cfg["entity"], cfg["added"], cfg["added_rule"])
+        check("%s: генератор добавленной колонки %s" % (source, cfg["added"]), code, 200)
+        code, _ = sydafa_rule_put(source, cfg["entity"], new_name, cfg["renamed_rule"])
+        check("%s: генератор перенесён на %s" % (source, new_name), code, 200)
+        code, _ = sydafa_rule_delete(source, cfg["entity"], old_name)
+        check("%s: правило прежнего имени %s удалено" % (source, old_name), code, 200)
+    for source in EVOLUTION_SOURCES:
+        update_dag = "update_source_%s" % source
+        run_id = "e2e-evo-gen-%s-%s" % (source, stamp)
+        code, _ = airflow_trigger_retry(token, update_dag, run_id)
+        check("trigger %s (evolution data)" % update_dag, code, 200)
+        airflow_wait_run(token, update_dag, run_id, timeout=360,
+                         name="%s evolution data generation" % source)
+
+
+def evolution_first_load(token: str, stamp: str) -> dict[str, int]:
+    """Создать e2e-колонки прямыми DDL, заполнить контрольные значения и загрузить первый раз."""
+    for source, cfg in EVOLUTION_SOURCES.items():
+        evolution_ddl(source, cfg, cfg["create_columns"], "e2e-колонки созданы прямым DDL")
+        seeded = evolution_ddl(source, cfg, cfg["seed_values"], "контрольные значения до расширения")
+        if seeded >= 0:
+            check("%s: строк с контрольными значениями до расширения" % source, seeded > 0, True)
+    for source in EVOLUTION_SOURCES:
+        evolution_load_refs(token, source, stamp, "1")
+    first_pids: dict[str, int] = {}
+    try:
+        for source, cfg in EVOLUTION_SOURCES.items():
+            added, new_name, old_name, dropped = (
+                cfg["added"], cfg["renamed"][1], cfg["renamed"][0], cfg["dropped"])
+            pid = int(trino_query("SELECT max(__process_id) FROM %s" % cfg["raw_table"])[0][0])
+            first_pids[source] = pid
+            portion = raw_rows_with_process(cfg["raw_table"], pid)
+            check("%s: порция эволюции 1 непустая" % source, portion > 0, True)
+            counts = trino_query(
+                "SELECT count(%s), count(%s), count(%s), count(%s), count(e2e_int), "
+                "count(e2e_dec), count(e2e_danger) FROM %s WHERE __process_id = %d"
+                % (added, new_name, old_name, dropped, cfg["raw_table"], pid))[0]
+            check("%s: добавленная колонка заполнена у новых строк" % source,
+                  0 < counts[0] < portion, True)
+            check("%s: переименованная колонка пришла со значениями" % source,
+                  counts[1] > 0, True)
+            check("%s: прежнее имя колонки NULL во всей порции" % source, counts[2], 0)
+            check("%s: удалённая колонка NULL во всей порции" % source, counts[3], 0)
+            check("%s: e2e_int заполнен у обновлённых строк" % source, counts[4] > 0, True)
+            check("%s: e2e_dec заполнен у обновлённых строк" % source, counts[5] > 0, True)
+            check("%s: e2e_danger NULL в порции" % source, counts[6], 0)
+            history = trino_query(
+                "SELECT count(%s), count(%s), count(%s), count(%s) FROM %s WHERE __process_id < %d"
+                % (added, new_name, old_name, dropped, cfg["raw_table"], pid))[0]
+            check("%s: добавленная колонка NULL в истории" % source, history[0], 0)
+            check("%s: переименованная колонка NULL в истории" % source, history[1], 0)
+            check("%s: прежнее имя колонки сохранено в истории" % source, history[2] > 0, True)
+            check("%s: удалённая колонка сохранена в истории" % source, history[3] > 0, True)
+            types = raw_column_types(cfg["raw_table"])
+            for column, want in cfg["iceberg_first"].items():
+                check("%s: тип Iceberg %s после эволюции" % (source, column),
+                      types.get(column), want)
+            if cfg["float_seeded_on_first_load"]:
+                distinct = trino_query(
+                    "SELECT count(DISTINCT e2e_float) FROM %s WHERE __process_id = %d "
+                    "AND e2e_float IS NOT NULL" % (cfg["raw_table"], pid))[0][0]
+                check("%s: e2e_float посеян значением 1.5" % source, int(distinct), 1)
+            else:
+                filled = trino_query(
+                    "SELECT count(e2e_float) FROM %s WHERE __process_id = %d"
+                    % (cfg["raw_table"], pid))[0][0]
+                check("%s: e2e_float пустая до расширения (ограничение DDL Oracle)" % source,
+                      int(filled), 0)
+    except Exception as exc:
+        check("evolution first portion checks", "%s: %s" % (type(exc).__name__, exc), "ok")
+    return first_pids
+
+
+def evolution_widen(token: str, stamp: str, first_pids: dict[str, int]) -> None:
+    """Расширить типы на источнике прямыми DDL и проверить promotion схемы Iceberg."""
+    for source, cfg in EVOLUTION_SOURCES.items():
+        evolution_ddl(source, cfg, cfg["widen_types"], "типы расширены прямым DDL")
+        for label, sql, want in cfg["widen_checks"]:
+            evolution_source_check(source, cfg, sql, want, label)
+        affected = evolution_ddl(source, cfg, cfg["overflow_values"],
+                                 "контрольные значения после расширения")
+        if affected >= 0:
+            check("%s: строк с контрольными значениями после расширения" % source,
+                  affected > 0, True)
+    for source in EVOLUTION_SOURCES:
+        evolution_load_refs(token, source, stamp, "2")
+    try:
+        for source, cfg in EVOLUTION_SOURCES.items():
+            new_name = cfg["renamed"][1]
+            pid = int(trino_query("SELECT max(__process_id) FROM %s" % cfg["raw_table"])[0][0])
+            portion = trino_query(
+                "SELECT count(*), count(e2e_int), min(e2e_int), count(e2e_dec), "
+                "count(e2e_float), min(e2e_float), min(length(%s)) FROM %s WHERE __process_id = %d"
+                % (new_name, cfg["raw_table"], pid))[0]
+            total = int(portion[0])
+            check("%s: порция эволюции 2 непустая" % source, total > 0, True)
+            check("%s: e2e_int заполнен во всей порции" % source, int(portion[1]), total)
+            check("%s: e2e_int за пределами int (> 2147483647)" % source,
+                  portion[2] is not None and int(portion[2]) > 2147483647, True)
+            check("%s: e2e_dec заполнен во всей порции" % source, int(portion[3]), total)
+            check("%s: e2e_float заполнен во всей порции" % source, int(portion[4]), total)
+            check("%s: e2e_float за пределами real (> 1e38)" % source,
+                  portion[5] is not None and float(portion[5]) > 1.0e38, True)
+            check("%s: переименованная колонка длиннее 400 символов" % source,
+                  portion[6] is not None and int(portion[6]) > 400, True)
+            exact = int(trino_query(
+                "SELECT count(*) FROM %s WHERE __process_id = %d "
+                "AND e2e_dec = DECIMAL '12345678901.50'" % (cfg["raw_table"], pid))[0][0])
+            check("%s: значение e2e_dec не потеряно при расширении" % source, exact, total)
+            types = raw_column_types(cfg["raw_table"])
+            for column, want in cfg["iceberg_widened"].items():
+                check("%s: тип Iceberg %s после расширения" % (source, column),
+                      types.get(column), want)
+            if source in first_pids:
+                previous = trino_query(
+                    "SELECT max(e2e_int) FROM %s WHERE __process_id = %d "
+                    "AND e2e_int IS NOT NULL" % (cfg["raw_table"], first_pids[source]))[0][0]
+                check("%s: история порции 1 не перезаписана расширением" % source,
+                      previous is not None and int(previous) < 3000000000, True)
+    except Exception as exc:
+        check("evolution widened portion checks", "%s: %s" % (type(exc).__name__, exc), "ok")
+
+
+def evolution_incompatible(token: str, stamp: str) -> None:
+    """Несовместимое изменение типа на источнике: отказ load-задачи без записи в Iceberg."""
+    for source, cfg in EVOLUTION_SOURCES.items():
+        try:
+            before_rows = int(trino_query("SELECT count(*) FROM %s" % cfg["raw_table"])[0][0])
+            before_snapshots = raw_snapshot_count(cfg["raw_table"])
+            before_pid = int(trino_query("SELECT max(__process_id) FROM %s" % cfg["raw_table"])[0][0])
+        except Exception as exc:
+            check("%s: состояние raw до несовместимого изменения" % source,
+                  "%s: %s" % (type(exc).__name__, exc), "ok")
+            continue
+        evolution_ddl(source, cfg, [cfg["danger_type"]],
+                      "несовместимый тип применён к e2e_danger прямым DDL")
+        evolution_source_check(source, cfg, cfg["danger_type_check"],
+                               cfg["danger_type_expected"], "e2e_danger на источнике стал строкой")
+        inserted = evolution_ddl(source, cfg, [cfg["danger_insert"]],
+                                 "строка с неприводимым значением вставлена напрямую")
+        check("%s: вставлена ровно одна строка" % source, inserted, 1)
+        cfg_dag = cfg["refs_dag"]
+        run_id = "e2e-evo3-%s-%s" % (source, stamp)
+        code, _ = airflow_trigger_retry(token, cfg_dag, run_id)
+        check("trigger %s (incompatible type)" % cfg_dag, code, 200)
+        failed = airflow_wait_run_failed(
+            token, cfg_dag, run_id, timeout=900,
+            name="%s: загрузка отвергла несовместимый тип" % source)
+        if failed:
+            states = airflow_task_states(token, cfg_dag, run_id)
+            loads = {task_id: state for task_id, state in states.items()
+                     if task_id.endswith(".load")}
+            check("%s: load задачи выполнены до отказа" % source, len(loads) >= 2, True)
+            clients_state = next((state for task_id, state in loads.items()
+                                  if "clients" in task_id), None)
+            check("%s: load clients failed" % source, clients_state, "failed")
+            other_state = next((state for task_id, state in loads.items()
+                                if "clients" not in task_id), None)
+            check("%s: соседние load не задеты" % source, other_state, "success")
+            clients_task = next((task_id for task_id in loads if "clients" in task_id), None)
+            if clients_task:
+                log = airflow_task_log(token, cfg_dag, run_id, clients_task)
+                check("%s: причина отказа — смена типа колонки e2e_danger" % source,
+                      "Cannot change column type" in log and "e2e_danger" in log, True)
+        try:
+            after_rows = int(trino_query("SELECT count(*) FROM %s" % cfg["raw_table"])[0][0])
+            after_snapshots = raw_snapshot_count(cfg["raw_table"])
+            after_pid = int(trino_query("SELECT max(__process_id) FROM %s" % cfg["raw_table"])[0][0])
+            leaked = int(trino_query(
+                "SELECT count(*) FROM %s WHERE client_id = 910000001" % cfg["raw_table"])[0][0])
+            check("%s: новые строки не добавлены после отказа" % source, after_rows, before_rows)
+            check("%s: новый снапшот Iceberg не создан" % source, after_snapshots, before_snapshots)
+            check("%s: process_id не вырос после отказа" % source, after_pid, before_pid)
+            check("%s: строка с несовместимым значением не попала в raw" % source, leaked, 0)
+        except Exception as exc:
+            check("%s: состояние raw после несовместимого изменения" % source,
+                  "%s: %s" % (type(exc).__name__, exc), "ok")
+
+
+def run_source_schema_evolution(token: str, stamp: str) -> None:
+    """Полный цикл эволюции схемы реальных источников: операции, расширения, отказ."""
+    print("\n==> Шаг 14: Эволюция схемы источников: безопасные операции через API sydafa...")
+    evolution_prepare_sources(token, stamp)
+    print("\n==> Шаг 15: Первая загрузка после эволюции, затем расширения типов и Iceberg promotion...")
+    first_pids = evolution_first_load(token, stamp)
+    evolution_widen(token, stamp, first_pids)
+    print("\n==> Шаг 16: Несовместимое изменение типа на источнике → отказ загрузки без нового снапшота...")
+    evolution_incompatible(token, stamp)
 
 
 def main() -> None:
@@ -901,6 +1358,8 @@ def main() -> None:
                 {"Authorization": "Bearer " + token})
             if check(phase + " Clear accepted", code, 200):
                 airflow_wait_run(token, dag, run, timeout=900, name=phase + " Clear rerun")
+
+    run_source_schema_evolution(token, stamp)
 
 
 if __name__ == "__main__":
