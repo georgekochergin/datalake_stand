@@ -55,7 +55,7 @@ def source_count(spark, args, lower, upper, kind, lower_op=">"):
             predicates.append(
                 f"{column} {operator} {dialect.position_literal(positions.canonical(value, kind), kind)}"
             )
-    query = f"SELECT COUNT(*) FROM {reader.render_source_table(dialect, args.source_table, allow_expression=True)}"
+    query = f"SELECT COUNT(*) FROM {reader.render_source_table(dialect, args.source_table)}"
     if predicates:
         query += " WHERE " + " AND ".join(predicates)
     connection = spark._jvm.java.sql.DriverManager.getConnection(
@@ -487,7 +487,7 @@ def check_partitioning(spark, source_jdbc):
         require(choice is not None and choice.column == "transaction_id"
                 and choice.step == jdbc_partitioning.STEP_PRIMARY_KEY,
                 f"{source}: heuristic picks the primary key")
-        table_sql = reader.render_source_table(dialect, table, allow_expression=True)
+        table_sql = reader.render_source_table(dialect, table)
         total = jdbc_count(spark, args, table_sql)
         require(total > 0, f"{source}: source table has rows")
         day_info = keys.columns[column.lower()]
@@ -504,8 +504,7 @@ def check_partitioning(spark, source_jdbc):
         zone_kind = dialect.position_kind(zone_info.type_name, zone_info.precision, zone_info.scale)
         require(zone_kind.startswith("timestamp_instant"),
                 f"{source}: zone fixture column classifies as an instant")
-        zone_sql_rendered = reader.render_source_table(dialect, zone_sql, allow_expression=True)
-        zone_frame = derived_day_frame(spark, reader, dialect, args, zone_sql_rendered,
+        zone_frame = derived_day_frame(spark, reader, dialect, args, zone_sql,
                                        zone_info, zone_kind)
         require(zone_frame.count() == 2,
                 f"{source}: time-zone derived-day partitioned read returns both fixture rows")

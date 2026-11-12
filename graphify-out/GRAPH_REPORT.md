@@ -1,7 +1,7 @@
-# Graph Report - datalake_stand  (2026-11-11)
+# Graph Report - datalake_stand  (2026-11-12)
 
 ## Corpus Check
-- 149 files · ~131,053 words
+- 149 files · ~132,413 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 12 file(s) not represented in the graph (top: (none) 9, .properties 2, .conf 1)
 
@@ -11,7 +11,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `b8d7e3a1`
+- Built from commit: `25bbc773`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -767,7 +767,7 @@ _Questions this graph is uniquely positioned to answer:_
 - **Should `Incremental Batch Loader` be split into smaller, more focused modules?**
   _Cohesion score 0.0858843537414966 - nodes in this community are weakly interconnected._
 - **Why does `README — стенд хранилища и озера данных` connect `Project Agent Guides` to `Architecture Documentation`, `Dev Tooling Documentation`, `Project Documentation`, `Docker Compose Layout`, `Demo Walkthrough Docs`?**
-  _High betweenness centrality (0.124) - this node is a cross-community bridge._
+  _High betweenness centrality (0.123) - this node is a cross-community bridge._
 - **Are the 2 inferred relationships involving `generate_all()` (e.g. with `IncrementalEntityConfig` and `SourceConfig`) actually correct?**
   _`generate_all()` has 2 INFERRED edges - model-reasoned connections that need verification._
 

@@ -92,7 +92,7 @@ def source_kind(spark, args):
     """Validate only JDBC metadata, without source aggregates or row reads."""
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     column = dialect.quote_identifier(args.incremental_column)
-    table = render_source_table(dialect, args.source_table, allow_expression=True)
+    table = render_source_table(dialect, args.source_table)
     with jdbc.connection(spark._jvm, args.jdbc_url, args.jdbc_user, args.jdbc_password) as connection:
         _, type_name, precision, scale = jdbc.column_metadata(
             connection, f"SELECT {column} FROM {table} WHERE 1=0"
@@ -110,7 +110,7 @@ def source_position(spark, args):
     """Inspect original JDBC type and obtain exact MAX plus NULL/empty diagnostics."""
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     column = dialect.quote_identifier(args.incremental_column)
-    table = render_source_table(dialect, args.source_table, allow_expression=True)
+    table = render_source_table(dialect, args.source_table)
     kind = source_kind(spark, args)
     with jdbc.connection(spark._jvm, args.jdbc_url, args.jdbc_user, args.jdbc_password) as connection:
         expression = dialect.position_expression(f"MAX({column})", kind)

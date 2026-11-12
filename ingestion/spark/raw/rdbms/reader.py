@@ -22,22 +22,14 @@ from ingestion.sources.rdbms.contracts import parse_source_table
 LOGGER = logging.getLogger(__name__)
 
 
-def render_source_table(dialect, source_table: str, allow_expression: bool = False) -> str:
+def render_source_table(dialect, source_table: str) -> str:
     """Render a schema.table reference quoted for the source dialect.
 
     Every part of the reference is quoted per dialect (Oracle double quotes,
-    MSSQL brackets), exactly as the object was created by sydafa. With
-    allow_expression a reference that is not schema.table (already a subquery
-    expression) is passed through unchanged; otherwise malformed references
-    are rejected.
+    MSSQL brackets), exactly as the object was created by sydafa. References
+    that are not schema.table are rejected.
     """
-    try:
-        parts = parse_source_table(source_table)
-    except ValueError:
-        if allow_expression:
-            return source_table
-        raise
-    return dialect.render_table(parts)
+    return dialect.render_table(parse_source_table(source_table))
 
 
 def jdbc_reader(spark, args, read_query):
@@ -144,7 +136,7 @@ def read_extract_frame(spark, args, filters=(), extra_select=""):
     extraction position as extra_select.
     """
     dialect = dialects.by_jdbc_url(args.jdbc_url)
-    source_table = render_source_table(dialect, args.source_table, allow_expression=True)
+    source_table = render_source_table(dialect, args.source_table)
     partition = partition_select = None
     if not args.no_jdbc_partitioning:
         keys = jdbc.key_metadata(

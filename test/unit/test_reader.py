@@ -63,15 +63,11 @@ class TestRenderSourceTable(unittest.TestCase):
             '"retail_bank"."Clients"',
         )
 
-    def test_expression_passthrough_only_when_allowed(self):
-        dialect = registry.by_conn_type("mssql")
-        expression = "(SELECT * FROM s.t WHERE 1=0)"
-        self.assertEqual(
-            reader.render_source_table(dialect, expression, allow_expression=True),
-            expression,
-        )
+    def test_expression_reference_rejected(self):
         with self.assertRaises(ValueError):
-            reader.render_source_table(dialect, expression)
+            reader.render_source_table(
+                registry.by_conn_type("mssql"), "(SELECT * FROM s.t WHERE 1=0)"
+            )
 
     def test_malformed_reference_rejected(self):
         with self.assertRaises(ValueError):
