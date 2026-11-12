@@ -82,12 +82,9 @@ def read_bounds(spark, args, read_query, column) -> tuple:
     return row[0], row[1]
 
 
-def build_extract_query(spark, args, dialect, source_table, filters=(), extra_select=""):
+def build_extract_query(source_table, projection, filters=(), extra_select=""):
     """Assemble the wrapping JDBC read query: projection, extra columns, filters."""
     select = "extract_source.*"
-    projection = jdbc.compatibility_projection(
-        spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, source_table
-    )
     if projection is not None:
         select = ", ".join(projection)
     if extra_select:
@@ -131,21 +128,29 @@ def apply_partition_options(spark, args, reader, query, partition):
 def read_extract_frame(spark, args, filters=(), extra_select=""):
     """Read the source over JDBC into a cached frame with explicit predicates.
 
-    Whole-table reads (full-slice and snapshot streams) pass no filters; the
-    incremental flow passes the frozen-window predicates and the exact typed
-    extraction position as extra_select.
+    Catalog metadata (columns, keys, indexes) is always required: it feeds
+    both the compatibility projection and the JDBC partitioning choice, so
+    no metadata SQL is executed against the source. Whole-table reads
+    (full-slice and snapshot streams) pass no filters; the incremental flow
+    passes the frozen-window predicates and the exact typed extraction
+    position as extra_select.
     """
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     source_table = render_source_table(dialect, args.source_table)
+    keys = jdbc.key_metadata(
+        spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table
+    )
+    if not keys.columns:
+        raise RuntimeError(
+            f"JDBC catalog metadata unavailable for {args.source_table}: cannot build a safe read"
+        )
+    projection = jdbc.compatibility_projection(dialect, keys)
     partition = partition_select = None
     if not args.no_jdbc_partitioning:
-        keys = jdbc.key_metadata(
-            spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table
-        )
         partition, partition_select = jdbc_partitioning.plan(dialect, keys, args.source_table)
     if partition_select:
         extra_select = f"{extra_select}{partition_select}"
-    query = build_extract_query(spark, args, dialect, source_table, filters, extra_select)
+    query = build_extract_query(source_table, projection, filters, extra_select)
     reader = jdbc_reader(spark, args, query)
     reader, low, high = apply_partition_options(spark, args, reader, query, partition)
     frame = reader.load()

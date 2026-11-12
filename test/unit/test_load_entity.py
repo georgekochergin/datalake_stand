@@ -157,24 +157,29 @@ class TestSourcePosition(unittest.TestCase):
         argv = build_argv(*sum(([k, v] for k, v in extra.items()), []))
         return load_entity.parse_args(argv)
 
-    def inspect(self, metadata, row):
+    def inspect(self, meta, row):
         spark = MagicMock()
-        with patch.object(load_entity.jdbc, "connection") as managed, patch.object(
-            load_entity.jdbc, "column_metadata", return_value=metadata
-        ) as columns, patch.object(load_entity.jdbc, "first_row", return_value=row) as first:
+        keys = load_entity.jdbc.KeyMetadata((), (), {"_batch_id": meta})
+        with patch.object(load_entity.jdbc, "key_metadata", return_value=keys) as catalog, patch.object(
+            load_entity.jdbc, "connection"
+        ), patch.object(load_entity.jdbc, "first_row", return_value=row) as first:
             result = load_entity.source_position(spark, self.args())
-        self.assertEqual(managed.call_count, 2)
-        self.assertIn("FROM [retail_bank].[transactions]", columns.call_args.args[1])
+        catalog.assert_called_once()
         return result, first.call_args.args[1]
 
     def test_regular_inspection(self):
-        result, sql = self.inspect([("_batch_id", "bigint", 19, 0)], ["10", "5", "5"])
+        result, sql = self.inspect(
+            load_entity.jdbc.ColumnMeta("_batch_id", "bigint", 19, 0, True), ["10", "5", "5"]
+        )
         self.assertEqual(result, ("bigint", "10", False, False))
         self.assertEqual(sql, "SELECT MAX([_batch_id]), COUNT(*), COUNT([_batch_id]) FROM [retail_bank].[transactions]")
 
     def test_type_mismatch_prevents_aggregates(self):
-        with patch.object(load_entity.jdbc, "connection"), patch.object(
-            load_entity.jdbc, "column_metadata", return_value=[("_batch_id", "int", 10, 0)]
+        keys = load_entity.jdbc.KeyMetadata(
+            (), (), {"_batch_id": load_entity.jdbc.ColumnMeta("_batch_id", "int", 10, 0, True)}
+        )
+        with patch.object(load_entity.jdbc, "key_metadata", return_value=keys), patch.object(
+            load_entity.jdbc, "connection"
         ), patch.object(load_entity.jdbc, "first_row") as aggregate:
             with self.assertRaisesRegex(ValueError, "expected=bigint actual=integer"):
                 load_entity.source_position(MagicMock(), self.args())
@@ -194,16 +199,23 @@ class TestSourcePosition(unittest.TestCase):
         aggregate.assert_not_called()
 
     def test_empty_and_null_diagnostics(self):
-        self.assertEqual(self.inspect([("_batch_id", "bigint", 19, 0)], ["0", "0", "0"])[0][2:], (True, False))
-        self.assertEqual(self.inspect([("_batch_id", "bigint", 19, 0)], ["5", "5", "4"])[0][2:], (False, True))
+        meta = load_entity.jdbc.ColumnMeta("_batch_id", "bigint", 19, 0, True)
+        self.assertEqual(self.inspect(meta, ["0", "0", "0"])[0][2:], (True, False))
+        self.assertEqual(self.inspect(meta, ["5", "5", "4"])[0][2:], (False, True))
 
     def test_oracle_temporal_kind(self):
         spark = MagicMock()
         args = load_entity.parse_args(build_argv("--jdbc-url", ORACLE_URL))
         args.position_type = "timestamp_instant(6)"
-        with patch.object(load_entity.jdbc, "connection"), patch.object(
-            load_entity.jdbc, "column_metadata", return_value=[("_batch_id", "TIMESTAMP(6) WITH TIME ZONE", 0, 6)]
-        ), patch.object(load_entity.jdbc, "first_row", return_value=["2026-01-01T00:00:00.000000Z", "3", "3"]) as first:
+        keys = load_entity.jdbc.KeyMetadata((), (), {
+            "_batch_id": load_entity.jdbc.ColumnMeta(
+                "_batch_id", "TIMESTAMP(6) WITH TIME ZONE", None, 6, True)
+        })
+        with patch.object(load_entity.jdbc, "key_metadata", return_value=keys), patch.object(
+            load_entity.jdbc, "connection"
+        ), patch.object(
+            load_entity.jdbc, "first_row", return_value=["2026-01-01T00:00:00.000000Z", "3", "3"]
+        ) as first:
             result = load_entity.source_position(spark, args)
         self.assertEqual(result[0], "timestamp_instant(6)")
         self.assertIn("TO_CHAR", first.call_args.args[1])

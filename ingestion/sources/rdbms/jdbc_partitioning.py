@@ -11,6 +11,7 @@ jdbc.py owns the metadata access.
 import logging
 from dataclasses import dataclass
 
+from . import jdbc
 from . import positions
 
 LOGGER = logging.getLogger(__name__)
@@ -52,29 +53,9 @@ def day_expression(dialect, keys, choice: PartitionChoice) -> str:
     return dialect.day_expression(projected or reference)
 
 
-def _position_kind(dialect, info):
-    """Canonical kind of a column, or None when the dialect rejects it.
-
-    Drivers decorate type names with engine specifics (MSSQL appends
-    "identity" to integer types), so a rejected full name is retried by its
-    first token; the dialect contract itself stays strict.
-    """
-    try:
-        return dialect.position_kind(info.type_name, info.precision, info.scale)
-    except (ValueError, NotImplementedError):
-        pass
-    base = info.type_name.split()[0] if info.type_name else ""
-    if base != info.type_name:
-        try:
-            return dialect.position_kind(base, info.precision, info.scale)
-        except (ValueError, NotImplementedError):
-            return None
-    return None
-
-
 def _family(dialect, info) -> str | None:
     """Position family of a column, or None when unsupported."""
-    kind = _position_kind(dialect, info)
+    kind = jdbc.column_position_kind(dialect, info)
     return positions.kind_info(kind)[0] if kind is not None else None
 
 
@@ -118,7 +99,7 @@ def choose(dialect, keys) -> PartitionChoice | None:
     if len(keys.primary_key) == 1:
         info = keys.columns.get(keys.primary_key[0].lower())
         if info is not None and _family(dialect, info) == "integral":
-            return PartitionChoice(info.name, _position_kind(dialect, info), STEP_PRIMARY_KEY, False)
+            return PartitionChoice(info.name, jdbc.column_position_kind(dialect, info), STEP_PRIMARY_KEY, False)
     unique_infos = [
         keys.columns[name.lower()] for name in keys.unique_columns
         if name.lower() in keys.columns
@@ -130,7 +111,7 @@ def choose(dialect, keys) -> PartitionChoice | None:
     ):
         info = _first_candidate(dialect, infos, families)
         if info is not None:
-            return PartitionChoice(info.name, _position_kind(dialect, info), step, derived)
+            return PartitionChoice(info.name, jdbc.column_position_kind(dialect, info), step, derived)
     return None
 
 

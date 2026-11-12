@@ -155,20 +155,19 @@ class TestCatalogAddressing(unittest.TestCase):
 class TestCompatibilityProjection(unittest.TestCase):
     """Dialect projections build select items only when a column is rewritten."""
 
-    def setUp(self):
-        self.spark, self.connection = fake_jvm()
-        result = self.connection.createStatement.return_value.executeQuery.return_value
-        metadata = result.getMetaData.return_value
-        metadata.getColumnCount.return_value = 2
-        metadata.getColumnLabel.side_effect = ["plain_col", "tz_col"]
-        metadata.getColumnTypeName.side_effect = ["NUMBER", "TIMESTAMP(9) WITH TIME ZONE"]
-        metadata.getPrecision.return_value = 10
-        metadata.getScale.return_value = 0
+    @staticmethod
+    def keys():
+        return jdbc.KeyMetadata(
+            primary_key=(),
+            unique_columns=(),
+            columns={
+                "plain_col": jdbc.ColumnMeta("plain_col", "NUMBER", 10, 0, True),
+                "tz_col": jdbc.ColumnMeta("tz_col", "TIMESTAMP(9) WITH TIME ZONE", None, 9, True),
+            },
+        )
 
     def test_oracle_projects_timezone_columns(self):
-        projection = jdbc.compatibility_projection(
-            self.spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", '"s"."t"'
-        )
+        projection = jdbc.compatibility_projection(ORACLE, self.keys())
         self.assertEqual(projection, [
             'extract_source."plain_col"',
             'SYS_EXTRACT_UTC(extract_source."tz_col") AS "tz_col"',
@@ -176,10 +175,7 @@ class TestCompatibilityProjection(unittest.TestCase):
 
     def test_native_read_returns_none(self):
         mssql = registry.by_conn_type("mssql")
-        projection = jdbc.compatibility_projection(
-            self.spark._jvm, mssql, "jdbc:sqlserver://h", "u", "p", "[s].[t]"
-        )
-        self.assertIsNone(projection)
+        self.assertIsNone(jdbc.compatibility_projection(mssql, self.keys()))
 
 
 class TestFirstRow(unittest.TestCase):

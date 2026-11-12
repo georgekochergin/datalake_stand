@@ -46,24 +46,6 @@ def connection(jvm, jdbc_url, user, password):
         jdbc_connection.close()
 
 
-def column_metadata(jdbc_connection, sql) -> list[tuple]:
-    """Return (label, raw type name, precision, scale) per column of a query."""
-    jdbc_statement = jdbc_connection.createStatement()
-    try:
-        result = jdbc_statement.executeQuery(sql)
-        try:
-            metadata = result.getMetaData()
-            return [
-                (metadata.getColumnLabel(index), metadata.getColumnTypeName(index),
-                 metadata.getPrecision(index), metadata.getScale(index))
-                for index in range(1, metadata.getColumnCount() + 1)
-            ]
-        finally:
-            result.close()
-    finally:
-        jdbc_statement.close()
-
-
 def first_row(jdbc_connection, sql) -> list[str]:
     """Execute a query and return its first row rendered as strings."""
     jdbc_statement = jdbc_connection.createStatement()
@@ -83,26 +65,45 @@ def _row_size(result) -> int:
     return result.getMetaData().getColumnCount()
 
 
-def compatibility_projection(jvm, dialect, jdbc_url, user, password, table_sql) -> list[str] | None:
+def column_position_kind(dialect, info: ColumnMeta) -> str | None:
+    """Canonical kind of a catalog column, or None when the dialect rejects it.
+
+    Drivers decorate catalog type names with engine specifics (MSSQL appends
+    "identity" to integer types), so a rejected full name is retried by its
+    first token; the dialect contract itself stays strict.
+    """
+    try:
+        return dialect.position_kind(info.type_name, info.precision, info.scale)
+    except (ValueError, NotImplementedError):
+        pass
+    base = info.type_name.split()[0] if info.type_name else ""
+    if base != info.type_name:
+        try:
+            return dialect.position_kind(base, info.precision, info.scale)
+        except (ValueError, NotImplementedError):
+            return None
+    return None
+
+
+def compatibility_projection(dialect, keys: KeyMetadata) -> list[str] | None:
     """Build projected select items when the dialect rewrites special columns.
 
+    Column facts come from the JDBC catalog (getColumns), the same source as
+    the partitioning choice, so no SQL is executed against the source.
     Returns None when the dialect reads every column natively, leaving the
     plain extract_source.* select untouched.
     """
-    with connection(jvm, jdbc_url, user, password) as jdbc_connection:
-        columns = column_metadata(jdbc_connection, f"SELECT * FROM {table_sql} WHERE 1=0")
     projected = []
     rewrote = False
-    for label, type_name, _, _ in columns:
-        reference = dialect.quote_identifier(str(label))
-        expression = dialect.column_projection(
-            normalize_type_name(type_name), f"extract_source.{reference}"
-        )
+    for info in keys.columns.values():
+        alias = dialect.quote_identifier(info.name)
+        reference = f"extract_source.{alias}"
+        expression = dialect.column_projection(info.type_name, reference)
         if expression is None:
-            projected.append(f"extract_source.{reference}")
+            projected.append(reference)
         else:
             rewrote = True
-            projected.append(f"{expression} AS {reference}")
+            projected.append(f"{expression} AS {alias}")
     return projected if rewrote else None
 
 
