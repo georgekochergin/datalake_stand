@@ -45,14 +45,9 @@ class RdbmsDialect:
         """Render a lossless source-side temporal string for the position column."""
         return column
 
-    def metadata_candidates(self, parts: list[tuple[str, bool]]) -> tuple:
-        """Return JDBC metadata lookup locations for the dialect's object addressing."""
-        original = tuple(name for name, _ in parts)
-        folded = tuple(name if quoted else name.upper() for name, quoted in parts)
-        return tuple(
-            MetadataLocation(None, schema, table)
-            for schema, table in dict.fromkeys((original, folded))
-        )
+    def metadata_location(self, parts: list[tuple[str, bool]]) -> MetadataLocation:
+        """Return the exact JDBC metadata lookup location for schema.table parts."""
+        return MetadataLocation(None, parts[0][0], parts[1][0])
 
     def column_projection(self, type_name: str, reference: str) -> str | None:
         """Return a source-side read expression for special types, else None."""

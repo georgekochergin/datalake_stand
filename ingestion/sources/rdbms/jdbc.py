@@ -118,14 +118,14 @@ def key_metadata(jvm, dialect, jdbc_url, user, password, source_table) -> KeyMet
         parts = parse_source_table(source_table)
         with connection(jvm, jdbc_url, user, password) as jdbc_connection:
             metadata = jdbc_connection.getMetaData()
-            for location in dialect.metadata_candidates(parts):
-                columns = _column_metadata(metadata, location)
-                if columns:
-                    return KeyMetadata(
-                        primary_key=_primary_key(metadata, location),
-                        unique_columns=_unique_single_columns(metadata, location),
-                        columns=columns,
-                    )
+            location = dialect.metadata_location(parts)
+            columns = _column_metadata(metadata, location)
+            if columns:
+                return KeyMetadata(
+                    primary_key=_primary_key(metadata, location),
+                    unique_columns=_unique_single_columns(metadata, location),
+                    columns=columns,
+                )
     except Exception as exc:
         _LOGGER.warning(
             "JDBC metadata unavailable for %s; falling back to an unpartitioned read: %s",

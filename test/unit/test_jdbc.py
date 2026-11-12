@@ -25,22 +25,19 @@ def fake_jvm():
 class TestKeyMetadata(unittest.TestCase):
     """Quote-aware metadata resolution and observable fallback."""
 
-    def test_only_unquoted_fragments_fold(self):
+    def test_exact_fqn_location_queried_once(self):
         spark, connection = fake_jvm()
         metadata = connection.getMetaData.return_value
         located = {"id": jdbc.ColumnMeta("id", "INTEGER", 10, 0, True)}
-        with patch.object(jdbc, "_column_metadata", side_effect=[{}, located]) as columns, patch.object(
+        with patch.object(jdbc, "_column_metadata", return_value=located) as columns, patch.object(
             jdbc, "_primary_key", return_value=("id",)
         ) as primary, patch.object(jdbc, "_unique_single_columns", return_value=()):
             result = jdbc.key_metadata(
                 spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", 'schema."Mixed.Table"'
             )
         self.assertEqual(result, jdbc.KeyMetadata(("id",), (), located))
-        self.assertEqual(columns.call_args_list[0].args,
-                         (metadata, MetadataLocation(None, "schema", "Mixed.Table")))
-        self.assertEqual(columns.call_args_list[1].args,
-                         (metadata, MetadataLocation(None, "SCHEMA", "Mixed.Table")))
-        primary.assert_called_once_with(metadata, MetadataLocation(None, "SCHEMA", "Mixed.Table"))
+        columns.assert_called_once_with(metadata, MetadataLocation(None, "schema", "Mixed.Table"))
+        primary.assert_called_once_with(metadata, MetadataLocation(None, "schema", "Mixed.Table"))
         connection.close.assert_called_once()
 
     def test_fully_quoted_names_never_fold(self):
@@ -78,9 +75,9 @@ class TestKeyMetadata(unittest.TestCase):
 class CatalogDialect(RdbmsDialect):
     """Stub engine addressing objects through a JDBC catalog instead of a schema."""
 
-    def metadata_candidates(self, parts):
+    def metadata_location(self, parts):
         """One exact location: the database is the catalog, no schema level."""
-        return (MetadataLocation(parts[0][0], None, parts[1][0]),)
+        return MetadataLocation(parts[0][0], None, parts[1][0])
 
 
 class ScriptedResult:

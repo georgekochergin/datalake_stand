@@ -233,24 +233,22 @@ class TestColumnProjection(unittest.TestCase):
             self.assertIsNone(ORACLE.column_projection(type_name, 'extract_source."ts"'))
 
 
-class TestMetadataCandidates(unittest.TestCase):
-    """JDBC metadata lookup variants fold only unquoted fragments."""
+class TestMetadataLocation(unittest.TestCase):
+    """JDBC metadata lookup uses FQN components exactly, without case folding."""
 
-    def test_only_unquoted_fragments_fold(self):
-        expected = (MetadataLocation(None, "schema", "Mixed.Table"),
-                    MetadataLocation(None, "SCHEMA", "Mixed.Table"))
-        for dialect in registry.all_dialects():
-            self.assertEqual(
-                dialect.metadata_candidates([("schema", False), ("Mixed.Table", True)]),
-                expected,
-            )
-
-    def test_fully_quoted_names_never_fold(self):
-        for dialect in registry.all_dialects():
-            self.assertEqual(
-                dialect.metadata_candidates([("Schema", True), ("Table", True)]),
-                (MetadataLocation(None, "Schema", "Table"),),
-            )
+    def test_exact_location_from_fqn_parts(self):
+        cases = (
+            ([("schema", False), ("Mixed.Table", True)],
+             MetadataLocation(None, "schema", "Mixed.Table")),
+            ([("Schema", True), ("Table", True)],
+             MetadataLocation(None, "Schema", "Table")),
+            ([("RETAIL_BANK", False), ("TRANSACTIONS", False)],
+             MetadataLocation(None, "RETAIL_BANK", "TRANSACTIONS")),
+        )
+        for parts, expected in cases:
+            with self.subTest(parts=parts):
+                for dialect in registry.all_dialects():
+                    self.assertEqual(dialect.metadata_location(parts), expected)
 
 
 
