@@ -88,6 +88,9 @@ services:
   test-runner:
     volumes: !override
       - ./test/.workspace:/workspace:ro
+      - sydafa_state:/state:ro
+    environment:
+      - SYDAFA_CONTAINER_PREFIX=${SYDAFA_CONTAINER_PREFIX:-sydafa-dlh-test}
     depends_on: !override
       sydafa:
         condition: service_healthy
