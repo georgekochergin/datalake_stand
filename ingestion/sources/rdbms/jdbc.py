@@ -108,12 +108,12 @@ def compatibility_projection(dialect, keys: KeyMetadata) -> list[str] | None:
 
 
 def key_metadata(jvm, dialect, jdbc_url, user, password, source_table) -> KeyMetadata:
-    """Best-effort key metadata for the partitioning heuristic.
+    """Catalog column facts with best-effort keys for the partitioning heuristic.
 
-    A located table without keys still returns its columns: the heuristic
-    can partition by a plain date or timestamp column. Unavailable metadata
-    degrades to a warning and an empty result: the loader then falls back
-    to an unpartitioned read.
+    Columns are the required part: when they are unavailable the caller
+    fails fast. Primary-key and index lookups degrade independently, so a
+    driver or account that cannot serve them keeps the columns and the
+    heuristic loses only its key-based steps.
     """
     try:
         parts = parse_source_table(source_table)
@@ -121,23 +121,34 @@ def key_metadata(jvm, dialect, jdbc_url, user, password, source_table) -> KeyMet
             metadata = jdbc_connection.getMetaData()
             location = dialect.metadata_location(parts)
             columns = _column_metadata(metadata, location)
-            if columns:
-                return KeyMetadata(
-                    primary_key=_primary_key(metadata, location),
-                    unique_columns=_unique_single_columns(metadata, location),
-                    columns=columns,
+            if not columns:
+                _LOGGER.warning(
+                    "No JDBC table metadata found for %s; falling back to an unpartitioned read",
+                    source_table,
                 )
+                return KeyMetadata((), (), {})
+            primary_key = _degraded_metadata(
+                "primary key", lambda: _primary_key(metadata, location))
+            unique_columns = _degraded_metadata(
+                "unique indexes", lambda: _unique_single_columns(metadata, location))
+            return KeyMetadata(primary_key, unique_columns, columns)
     except Exception as exc:
         _LOGGER.warning(
             "JDBC metadata unavailable for %s; falling back to an unpartitioned read: %s",
             source_table, exc,
         )
         return KeyMetadata((), (), {})
-    _LOGGER.warning(
-        "No JDBC table metadata found for %s; falling back to an unpartitioned read",
-        source_table,
-    )
-    return KeyMetadata((), (), {})
+
+
+def _degraded_metadata(label: str, lookup):
+    """Run one optional catalog lookup, degrading to empty on failure."""
+    try:
+        return lookup()
+    except Exception as exc:
+        _LOGGER.warning(
+            "JDBC %s metadata unavailable; partitioning degraded: %s", label, exc,
+        )
+        return ()
 
 
 def _primary_key(metadata, location) -> tuple[str, ...]:
@@ -188,12 +199,40 @@ def _optional_int(result, label) -> int | None:
     return None if result.wasNull() else value
 
 
+def _exact_pattern(metadata, name: str) -> str:
+    """Render an exact identifier as a JDBC metadata pattern.
+
+    getColumns treats `_` and `%` in its schema and table arguments as
+    wildcards; every metacharacter is escaped with the driver's own escape
+    reported by getSearchStringEscape.
+    """
+    escape = metadata.getSearchStringEscape()
+    if not isinstance(escape, str) or not escape:
+        return name
+    return (
+        name.replace(escape, escape + escape)
+        .replace("_", escape + "_")
+        .replace("%", escape + "%")
+    )
+
+
 def _column_metadata(metadata, location) -> dict[str, ColumnMeta]:
     """Map lowercased column names to type facts for one table location."""
     result: dict[str, ColumnMeta] = {}
-    columns = metadata.getColumns(location.catalog, location.schema, location.table, None)
+    columns = metadata.getColumns(
+        location.catalog,
+        location.schema if location.schema is None else _exact_pattern(metadata, location.schema),
+        location.table if location.table is None else _exact_pattern(metadata, location.table),
+        None,
+    )
     try:
         while columns.next():
+            row_schema = columns.getString("TABLE_SCHEM")
+            row_table = columns.getString("TABLE_NAME")
+            if (row_schema is not None and row_schema != location.schema) or (
+                row_table is not None and row_table != location.table
+            ):
+                continue
             name = columns.getString("COLUMN_NAME")
             type_name = columns.getString("TYPE_NAME")
             if name is None or type_name is None:

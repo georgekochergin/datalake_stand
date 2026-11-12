@@ -292,5 +292,84 @@ class TestColumnMetadata(unittest.TestCase):
         self.assertEqual(result, {})
 
 
+class TestCatalogPatternFiltering(unittest.TestCase):
+    """Exact FQN components must not leak sibling objects through JDBC patterns."""
+
+    def columns(self, rows, schema="retail_bank", table="transactions"):
+        metadata = MagicMock()
+        metadata.getSearchStringEscape.return_value = "\\"
+        metadata.getColumns.return_value = ScriptedResult(rows)
+        result = jdbc._column_metadata(metadata, MetadataLocation(None, schema, table))
+        return metadata, result
+
+    def test_underscores_escaped_in_pattern(self):
+        metadata, _ = self.columns([{"COLUMN_NAME": "id", "TYPE_NAME": "bigint"}])
+        self.assertEqual(
+            metadata.getColumns.call_args.args,
+            (None, "retail\\_bank", "transactions", None),
+        )
+
+    def test_percent_and_escape_char_escaped_in_pattern(self):
+        metadata, _ = self.columns(
+            [{"COLUMN_NAME": "id", "TYPE_NAME": "bigint"}],
+            schema="50%_bank", table="tr\\ans",
+        )
+        self.assertEqual(
+            metadata.getColumns.call_args.args,
+            (None, "50\\%\\_bank", "tr\\\\ans", None),
+        )
+
+    def test_foreign_object_rows_filtered(self):
+        _, result = self.columns([
+            {"TABLE_SCHEM": "retail_bank", "TABLE_NAME": "transactions",
+             "COLUMN_NAME": "id", "TYPE_NAME": "NUMBER", "COLUMN_SIZE": 19,
+             "DECIMAL_DIGITS": 0, "IS_NULLABLE": "NO"},
+            {"TABLE_SCHEM": "retailXbank", "TABLE_NAME": "transactions",
+             "COLUMN_NAME": "tz_col", "TYPE_NAME": "TIMESTAMP(9) WITH TIME ZONE"},
+            {"TABLE_SCHEM": "retail_bank", "TABLE_NAME": "transactionsX",
+             "COLUMN_NAME": "stray", "TYPE_NAME": "NUMBER"},
+        ])
+        self.assertEqual(list(result), ["id"])
+
+    def test_same_named_foreign_column_does_not_overwrite(self):
+        _, result = self.columns([
+            {"TABLE_SCHEM": "retail_bank", "TABLE_NAME": "transactions",
+             "COLUMN_NAME": "pos", "TYPE_NAME": "NUMBER", "COLUMN_SIZE": 19,
+             "DECIMAL_DIGITS": 0, "IS_NULLABLE": "NO"},
+            {"TABLE_SCHEM": "retailXbank", "TABLE_NAME": "transactions",
+             "COLUMN_NAME": "pos", "TYPE_NAME": "FLOAT"},
+        ])
+        self.assertEqual(result["pos"].type_name, "NUMBER")
+
+
+class TestDegradedKeyMetadata(unittest.TestCase):
+    """Column facts survive key or index lookup failures."""
+
+    def located(self):
+        return {"id": jdbc.ColumnMeta("id", "INTEGER", 10, 0, True)}
+
+    def test_primary_key_failure_keeps_columns(self):
+        spark, _ = fake_jvm()
+        with patch.object(jdbc, "_column_metadata", return_value=self.located()), patch.object(
+            jdbc, "_primary_key", side_effect=RuntimeError("pk views denied")
+        ), patch.object(jdbc, "_unique_single_columns", return_value=()), self.assertLogs(
+            jdbc.__name__, level="WARNING"
+        ) as logs:
+            result = jdbc.key_metadata(spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", "s.t")
+        self.assertEqual(result, jdbc.KeyMetadata((), (), self.located()))
+        self.assertIn("primary key", logs.output[0])
+
+    def test_index_failure_keeps_columns_and_primary_key(self):
+        spark, _ = fake_jvm()
+        with patch.object(jdbc, "_column_metadata", return_value=self.located()), patch.object(
+            jdbc, "_primary_key", return_value=("id",)
+        ), patch.object(
+            jdbc, "_unique_single_columns", side_effect=RuntimeError("index views denied")
+        ), self.assertLogs(jdbc.__name__, level="WARNING") as logs:
+            result = jdbc.key_metadata(spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", "s.t")
+        self.assertEqual(result, jdbc.KeyMetadata(("id",), (), self.located()))
+        self.assertIn("unique indexes", logs.output[0])
+
+
 if __name__ == "__main__":
     unittest.main()
