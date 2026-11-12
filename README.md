@@ -116,7 +116,7 @@ S3-хранилища silo.
 | Spark [executors](docs/glossary.md#term-executor) | Python 3.10, Spark 3.5.5, Iceberg 1.8.1 |
 | JDBC-драйверы | MSSQL `12.10.0.jre11`, Oracle `23.8.0.25.04` |
 | Генератор и [unit-тесты](docs/glossary.md#term-unit) на хосте | Python 3.11+, зависимости из `ingestion/generator/requirements.txt` |
-| Тестовый контейнер | Python 3.12, PyYAML 6.0.3 |
+| Тестовый контейнер | Python 3.12, PyYAML 6.0.3, pymssql 2.4.3, oracledb 26.0.1 |
 
 На стенде [driver](docs/glossary.md#term-driver) работает в `airflow-scheduler`, [executors](docs/glossary.md#term-executor) — в `spark-worker`.
 Текущие JDBC/DataFrame-загрузки не запускают Python-процессы на [executors](docs/glossary.md#term-executor).
@@ -418,10 +418,10 @@ SELECT * FROM "trading_core"."transactions";
 | Проверка | Команда | Что проверяет |
 |---|---|---|
 | [Unit](docs/glossary.md#term-unit) | `python3 -m unittest discover -s test/unit` | Чистые функции и контракты без основного стенда |
-| Полный [e2e](docs/glossary.md#term-e2e) | `./test/test.sh` | Отдельный тестовый стек и загрузки через реальные сервисы |
+| Полный [e2e](docs/glossary.md#term-e2e) | `./test/test.sh` | Отдельный тестовый стек: загрузки, снимки, восстановление и эволюция схемы источников через реальные сервисы |
 
 Полный прогон использует проект `dlh-test`, собственные тома,
-`test/.workspace/` и префикс источников `sydafa-test-`. Порты на хост не публикуются.
+`test/.workspace/` и префикс источников `sydafa-dlh-test`. Порты на хост не публикуются.
 Основной стенд `dlh-poc` этим прогоном не проверяется и не очищается.
 Успех — `FAIL=0` и код завершения 0.
 
