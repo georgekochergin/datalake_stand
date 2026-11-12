@@ -257,6 +257,7 @@ Airflow может завершить задачу и начать [retry](gloss
   - Не использовать `on_execute_callback` как обязательный барьер: его ошибка не запрещает выполнение задачи в проверенной версии Airflow.
 - Найти все активные приложения записи с тем же ключом target, включая остатки прежних [retry](glossary.md#term-retry), [Clear](glossary.md#term-clear) и других запусков DAG.
   - Получить состояние через `GET <master_webui>/json/`. Сохранить application IDs и список workers из `workers[].webuiaddress` до отправки остановки.
+  - `<master_webui>` строить из того же Connection оператора, что и submit: хост соединения и порт UI из ключа `webui_port` в extra. Один Connection описывает весь кластер. Отдельная настройка или константа в коде не допускаются.
 - Для каждого приложения вызвать остановку через Spark master: `POST /app/kill/` с `id=<application_id>` и `terminate=true`.
   - Это UI endpoint Standalone, не REST submission API для cluster-mode `driver-...`.
   - Проверить доступность endpoint, `spark.ui.killEnabled` и UI ACL. HTTP-ответ после redirect не подтверждает исполнение команды.
