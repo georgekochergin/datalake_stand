@@ -31,6 +31,10 @@
 
 ### Подключить Kafka как источник данных для datalake через sydafa
 
+#### Задача Jira
+
+[DATARCH-2254](https://jira.bcs.ru/browse/DATARCH-2254)
+
 #### Контекст
 
 Нужно расширить набор источников datalake данными из Kafka.
@@ -66,6 +70,11 @@ sydafa, затем подключить этот источник к datalake_st
   сценарий. Реализацию выполнять отдельно по спек-циклу.
 
 ### Создать демонстрационную витрину остатков из raw и рукописный DAG обновления
+
+#### Задача Jira
+
+- [DATARCH-2255](https://jira.bcs.ru/browse/DATARCH-2255) — Trino SQL витрины.
+- [DATARCH-2256](https://jira.bcs.ru/browse/DATARCH-2256) — рукописный DAG обновления.
 
 #### Контекст
 
@@ -162,6 +171,10 @@ sydafa, затем подключить этот источник к datalake_st
 - Здесь добавляется только задача бэклога, без реализации SQL и DAG.
 
 ### Добавить обслуживание raw-таблиц и TTL партиций
+
+#### Задача Jira
+
+[DATARCH-2257](https://jira.bcs.ru/browse/DATARCH-2257)
 
 #### Контекст
 
@@ -297,6 +310,10 @@ sydafa, затем подключить этот источник к datalake_st
 
 ### Сделать генерацию act_snap опциональной и добавить безопасную фильтрацию источника
 
+#### Задача Jira
+
+[DATARCH-2258](https://jira.bcs.ru/browse/DATARCH-2258)
+
 #### Контекст
 
 Ветка `act_snap` создаёт отдельный DAG для вспомогательной
@@ -426,6 +443,11 @@ sydafa, затем подключить этот источник к datalake_st
   по спек-циклу.
 
 ### Проверять смену инкрементального контракта и режимов загрузки в e2e
+
+#### Задача Jira
+
+[DATARCH-2253](https://jira.bcs.ru/browse/DATARCH-2253) — общая задача усиления
+и оптимизации e2e-тестирования, также включает ускорение прогона.
 
 #### Контекст
 
@@ -576,7 +598,7 @@ JDBC, схемы Iceberg, конфигурации DAG и ручной мигр�
 
 #### Задача Jira
 
-DATARCH-2241
+[DATARCH-2241](https://jira.bcs.ru/browse/DATARCH-2241)
 
 #### Контекст
 
@@ -656,7 +678,7 @@ DATARCH-2241
 
 #### Задача Jira
 
-DATARCH-2242
+[DATARCH-2242](https://jira.bcs.ru/browse/DATARCH-2242)
 
 #### Контекст
 
@@ -745,7 +767,7 @@ spark:
 
 #### Задача Jira
 
-DATARCH-2245
+[DATARCH-2245](https://jira.bcs.ru/browse/DATARCH-2245)
 
 #### Контекст
 
@@ -874,7 +896,7 @@ Airflow может завершить задачу и начать [retry](gloss
 
 #### Задача Jira
 
-DATARCH-2243
+[DATARCH-2243](https://jira.bcs.ru/browse/DATARCH-2243)
 
 #### Контекст
 
@@ -994,7 +1016,7 @@ SQL также встроен в Python, но используется по-ра
 
 #### Задача Jira
 
-DATARCH-2247
+[DATARCH-2247](https://jira.bcs.ru/browse/DATARCH-2247)
 
 #### Контекст
 
@@ -1170,6 +1192,12 @@ entities:
 
 ### Ускорить e2e-тестирование до 7 минут параллельными стеками
 
+#### Задача Jira
+
+[DATARCH-2253](https://jira.bcs.ru/browse/DATARCH-2253) — общая задача усиления
+и оптимизации e2e-тестирования, также включает смену инкрементального контракта
+и режимов загрузки.
+
 #### Контекст
 
 Полный [e2e](glossary.md#term-e2e)-прогон `./test/test.sh` поднимает один
@@ -1308,7 +1336,7 @@ entities:
 
 #### Задача Jira
 
-DATARCH-2244
+[DATARCH-2244](https://jira.bcs.ru/browse/DATARCH-2244)
 
 #### Контекст
 
@@ -1390,6 +1418,10 @@ Airflow → контейнер загрузки: spark-submit + driver
 
 ### Автоматически формировать теги DAG и исключать дубликаты
 
+#### Задача Jira
+
+[DATARCH-2259](https://jira.bcs.ru/browse/DATARCH-2259)
+
 #### Контекст
 
 `ingestion/generator/generate_dags.py::generate_dag_source` передаёт в DAG только `pipeline.tags`. Например, `ingestion/conf/pipelines/bank/main.yaml` вручную задаёт `ingestion`, `bank`, `main`.
@@ -1444,6 +1476,10 @@ Airflow → контейнер загрузки: spark-submit + driver
   - Здесь добавляется только задача бэклога, реализация выполняется отдельно по спек-циклу.
 
 ### Разделить пулы Airflow для загрузок и служебных задач
+
+#### Задача Jira
+
+[DATARCH-2261](https://jira.bcs.ru/browse/DATARCH-2261)
 
 #### Контекст
 
@@ -1541,6 +1577,10 @@ Airflow [pools](glossary.md#term-pool) ограничивают допуск з�
   - [Unit](glossary.md#term-unit) и полный изолированный [e2e](glossary.md#term-e2e) проходят.
 
 ### Выбирать JDBC-колонку по метрикам с управляемым повторным анализом
+
+#### Задача Jira
+
+[DATARCH-2260](https://jira.bcs.ru/browse/DATARCH-2260)
 
 #### Контекст
 
