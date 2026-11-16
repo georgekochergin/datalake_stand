@@ -2,6 +2,7 @@
 
 import json
 import logging
+from enum import Enum
 from functools import partial
 
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
@@ -19,6 +20,15 @@ MASTER_HTTP_CONN_ID = "spark_main_master_http"
 LOG = logging.getLogger(__name__)
 
 
+class SparkGuardStatus(Enum):
+    """Describe the per-execution admission check for task diagnostics."""
+
+    CHECKING = "checking"
+    ADMITTED = "admitted"
+    REFUSED = "refused"
+    UNAVAILABLE = "unavailable"
+
+
 def log_spark_task_event(context):
     """Log guard diagnostics without master requests or exception text."""
     task = context.get("task") or getattr(context.get("ti"), "task", None)
@@ -28,7 +38,7 @@ def log_spark_task_event(context):
         getattr(context.get("ti"), "state", None),
         getattr(task, "target_table", None),
         getattr(task, "_guard_application_ids", None),
-        getattr(task, "_guard_result", "unavailable"),
+        getattr(task, "_guard_result", SparkGuardStatus.UNAVAILABLE).value,
         type(error).__name__ if error is not None else None,
     )
 
@@ -36,7 +46,7 @@ def log_spark_task_event(context):
 def run_spark_guard(operator):
     """Resolve Airflow configuration and record each execution's guard outcome."""
     operator._guard_application_ids = []
-    operator._guard_result = "checking"
+    operator._guard_result = SparkGuardStatus.CHECKING
     try:
         BaseHook.get_connection(SUBMIT_CONN_ID)
         master = BaseHook.get_connection(MASTER_HTTP_CONN_ID)
@@ -45,9 +55,9 @@ def run_spark_guard(operator):
             master_url, operator.target_table,
         )
     except Exception:
-        operator._guard_result = "refused"
+        operator._guard_result = SparkGuardStatus.REFUSED
         raise
-    operator._guard_result = "admitted"
+    operator._guard_result = SparkGuardStatus.ADMITTED
 
 
 def resolve_source_connection(connection) -> tuple:

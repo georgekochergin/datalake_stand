@@ -180,6 +180,7 @@ class TestGuardOperatorWiring(unittest.TestCase):
         module.spark_guard.guard_spark_submit.assert_called_once_with(
             "http://spark-master:8080", "raw.bank.s__t",
         )
+        self.assertIs(operator._guard_result, module.raw_rdbms.SparkGuardStatus.ADMITTED)
         self.assertEqual(
             [call.args[0] for call in module.BaseHook.get_connection.call_args_list],
             ["spark_main_submit", "spark_main_master_http"],
@@ -198,7 +199,7 @@ class TestGuardOperatorWiring(unittest.TestCase):
                         operator.execute({})
                 self.assertEqual(guard.call_count, 2)
                 self.assertEqual(operator.submissions, [])
-                self.assertEqual(operator._guard_result, "refused")
+                self.assertIs(operator._guard_result, module.raw_rdbms.SparkGuardStatus.REFUSED)
             self.assertIn(module.raw_rdbms.log_spark_task_event, operator.on_failure_callback)
             self.assertIn(module.raw_rdbms.log_spark_task_event, operator.on_retry_callback)
 
