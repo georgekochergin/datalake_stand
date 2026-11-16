@@ -51,6 +51,22 @@ class TestGenerateDagSource(unittest.TestCase):
         self.assertIn("on_success_callback=dagrun_success_callback", self.source)
         self.assertIn("on_failure_callback=dagrun_failure_callback", self.source)
 
+    def test_retry_defaults_in_both_templates(self):
+        import ast
+
+        for source in (self.source, generate_snapshot_dag_source(BANK, PIPELINE, PIPELINE.entities[1])):
+            calls = [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call)]
+            dag = next(node for node in calls if isinstance(node.func, ast.Name) and node.func.id == "DAG")
+            defaults = next(keyword.value for keyword in dag.keywords if keyword.arg == "default_args")
+            values = dict(zip((key.value for key in defaults.keys), defaults.values))
+            self.assertEqual(ast.literal_eval(values["retries"]), 2)
+            self.assertEqual(values["retry_delay"].func.id, "timedelta")
+            self.assertEqual(ast.literal_eval(values["retry_delay"].keywords[0].value), 5)
+            self.assertEqual(next(keyword.value.value for keyword in dag.keywords if keyword.arg == "max_active_runs"), 1)
+            for call in calls:
+                if call is not dag:
+                    self.assertFalse({"retries", "retry_delay"} & {keyword.arg for keyword in call.keywords})
+
     def test_pre_pipeline_tasks(self):
         self.assertIn('source="bank"', self.source)
         self.assertIn("ttl_minutes=15", self.source)

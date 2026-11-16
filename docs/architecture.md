@@ -335,6 +335,38 @@ DAG ingest__rdbms__<source_id>__<pipeline>
   - Полный срез и снимок не получают реквизиты pg-meta: их приложения к реестру не обращаются.
   - [Пул](glossary.md#term-pool) применяется Airflow и Spark-job не передаётся.
 
+Перед каждым `execute()` отправки, включая [retry](glossary.md#term-retry) и [Clear](glossary.md#term-clear) только `load`, все три оператора вызывают отдельный модуль `ingestion/spark/guard.py`. Он получает адрес master и target и не зависит от Airflow. Получение Connections и диагностические callbacks остаются в `ingestion/operators/raw_rdbms.py`. Это не предшествующая задача DAG: она не выполнилась бы повторно при повторе только загрузки.
+
+```text
+Попытка load
+├── GET master /json/: activeapps с точным name == target_table
+├── POST /app/kill/: один раз на каждый исходный application ID
+├── GET master /json/: ожидание подтверждения
+│   ├── ID отсутствует в activeapps и есть в completedapps как KILLED/FINISHED
+│   └── Ошибка, новый ID той же таблицы или timeout → отказ без submit
+└── Подтверждено или исходно нет приложений → SparkSubmitOperator
+```
+
+- Имя Spark-приложения дословно равно `--target-table`, без префикса и суффикса попытки. Основная таблица и [актуальный снимок](glossary.md#term-snapshot) имеют разные имена.
+- Отправка использует `spark_main_submit`, проверка master — `spark_main_master_http`. Адреса задаются двумя Connections одного кластера без extra-связей и fallback.
+- Бюджет guard — 120 секунд по monotonic clock, HTTP timeout — до пяти секунд и остатка бюджета, интервал опроса — две секунды.
+  - HTTP-ответ читается целиком без ограничения размера. Бюджет проверяется после чтения. Socket timeout ограничивает ожидание данных, но медленно поступающий ответ может превысить бюджет до возврата из чтения. После превышения submit запрещён.
+- HTTP 200 или redirect от UI не подтверждает остановку. При отключённом `spark.ui.killEnabled` команда может не выполниться. UI ACL должны разрешать остановку. Guard проверяет результат по состоянию.
+- Workers не опрашиваются. Подтверждается завершение приложения у master, а не физическое исчезновение всех [executors](glossary.md#term-executor). Штатные механизмы Spark завершают их асинхронно.
+- Обычный Python-код [driver](glossary.md#term-driver) может продолжить финализацию pg-meta. Остановка не отменяет commit и не даёт exactly-once. Сохраняются существующие at-least-once и [CAS](glossary.md#term-cas) гарантии.
+- Единственный владелец target и неизменяемое `max_active_runs=1` обязательны. Guard не является распределённой блокировкой.
+
+Все задачи обоих генерируемых шаблонов наследуют `default_args` с `retries=2` и `retry_delay=timedelta(minutes=5)`: максимум три попытки. Повтор `load` использует прежний `process_id`, повтор самого генератора номера выделяет новый.
+
+| Callback | Действие |
+|---|---|
+| DAG success/failure | Событие END/FAILED запуска в pg-meta |
+| `log_task_failed` | Существующее событие FAILED задачи в pg-meta |
+| Load retry/failure | Только диагностика: состояние, target, доступные IDs, результат guard и тип причины без реквизитов |
+| `on_execute_callback` | Не используется как барьер: Airflow может подавить его исключение |
+
+Диагностические callbacks — функции уровня модуля, добавляются к существующим обработчикам. Они не обращаются к master и не останавливают приложения: поздний callback не должен затронуть новую загрузку. Доставка callbacks после SIGKILL не гарантирована.
+
 ### Ограничение числа загрузок
 
 Все load-таски всех ingest-DAG-ов делят [пул](glossary.md#term-pool) `ingest_loads` на

@@ -210,10 +210,13 @@ services:
         airflow connections get broker_source >/dev/null 2>&1 ||
           airflow connections add broker_source \
             --conn-uri 'oracle://sydafa:sydafa@${SYDAFA_CONTAINER_PREFIX:-sydafa}-src-oracle-broker:1521/sydafa'
-        airflow connections get spark_default >/dev/null 2>&1 ||
-          airflow connections add spark_default \
+        airflow connections get spark_main_submit >/dev/null 2>&1 ||
+          airflow connections add spark_main_submit \
             --conn-type spark --conn-host 'spark://spark-master' --conn-port 7077 \
             --conn-extra '{"spark_binary": "spark-submit"}'
+        airflow connections get spark_main_master_http >/dev/null 2>&1 ||
+          airflow connections add spark_main_master_http \
+            --conn-type http --conn-schema http --conn-host spark-master --conn-port 8080
         airflow connections get trino_default >/dev/null 2>&1 ||
           airflow connections add trino_default \
             --conn-type trino --conn-host trino --conn-port 8443 --conn-schema raw \

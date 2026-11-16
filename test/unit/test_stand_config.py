@@ -115,6 +115,9 @@ cleanup() {
             (workspace / "ingestion" / "spark").mkdir(parents=True)
             (workspace / "ingestion/spark/e2e_schema_evolution.py").touch()
             (workspace / "ingestion/spark/e2e_temporal_extraction.py").touch()
+            (workspace / "ingestion/spark/e2e_guard_idle.py").touch()
+            (workspace / "airflow/plugins").mkdir(parents=True)
+            (workspace / "airflow/plugins/e2e_check_spark_guard.py").touch()
             (workspace / "test" / "unit").mkdir(parents=True)
             (workspace / "test/unit/test_meta.py").touch()
             log = workspace / "calls"
@@ -205,7 +208,7 @@ run_runtime_checks() {
         script = compose["services"]["airflow-init"]["command"][2]
         self.assertNotIn("python -", script)
         self.assertNotIn("|| true", script)
-        for conn_id in ("bank_source", "broker_source", "spark_default", "trino_default", "sydafa_default", "ingestion_meta"):
+        for conn_id in ("bank_source", "broker_source", "spark_main_submit", "spark_main_master_http", "trino_default", "sydafa_default", "ingestion_meta"):
             self.assertIn(f"airflow connections get {conn_id} >/dev/null 2>&1 ||", script)
             self.assertIn(f"airflow connections add {conn_id}", script)
 
