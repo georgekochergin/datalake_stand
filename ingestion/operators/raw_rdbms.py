@@ -19,13 +19,6 @@ MASTER_HTTP_CONN_ID = "spark_main_master_http"
 LOG = logging.getLogger(__name__)
 
 
-def _master_url():
-    """Resolve the two configured Connections before the provider can fall back."""
-    BaseHook.get_connection(SUBMIT_CONN_ID)
-    master = BaseHook.get_connection(MASTER_HTTP_CONN_ID)
-    return f"{master.schema}://{master.host}:{master.port}"
-
-
 def log_spark_task_event(context):
     """Log guard diagnostics without master requests or exception text."""
     task = context.get("task") or getattr(context.get("ti"), "task", None)
@@ -45,8 +38,11 @@ def run_spark_guard(operator):
     operator._guard_application_ids = []
     operator._guard_result = "checking"
     try:
+        BaseHook.get_connection(SUBMIT_CONN_ID)
+        master = BaseHook.get_connection(MASTER_HTTP_CONN_ID)
+        master_url = f"{master.schema}://{master.host}:{master.port}"
         operator._guard_application_ids = spark_guard.guard_spark_submit(
-            _master_url(), operator.target_table,
+            master_url, operator.target_table,
         )
     except Exception:
         operator._guard_result = "refused"

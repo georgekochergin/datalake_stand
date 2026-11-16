@@ -31,7 +31,8 @@ def require(condition, message):
 
 def snapshot():
     """Read only the test network master used by the configured HTTP Connection."""
-    with urlopen(raw_rdbms._master_url() + "/json/", timeout=5) as response:
+    master = BaseHook.get_connection(raw_rdbms.MASTER_HTTP_CONN_ID)
+    with urlopen(f"{master.schema}://{master.host}:{master.port}/json/", timeout=5) as response:
         return json.load(response)
 
 
@@ -119,7 +120,8 @@ def main():
                         raise AssertionError("unavailable master permitted submit")
                     require(submit.call_count == 0, cls.__name__ + " unavailable master prohibits submit")
         finally:
-            spark_guard.guard_spark_submit(raw_rdbms._master_url(), other_target)
+            master = BaseHook.get_connection(raw_rdbms.MASTER_HTTP_CONN_ID)
+            spark_guard.guard_spark_submit(f"{master.schema}://{master.host}:{master.port}", other_target)
             other_stream.close()
     print("PASS Spark guard runtime checks; FAIL=0", flush=True)
 

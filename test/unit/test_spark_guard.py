@@ -175,7 +175,11 @@ class TestGuardOperatorWiring(unittest.TestCase):
         module.BaseHook.get_connection.return_value = types.SimpleNamespace(
             schema="http", host="spark-master", port=8080,
         )
-        self.assertEqual(module.raw_rdbms._master_url(), "http://spark-master:8080")
+        operator = module.IngestFullOperator(task_id="load", source_id="bank", airflow_conn_id="source", fqn="s.t", target_table="raw.bank.s__t")
+        module.raw_rdbms.run_spark_guard(operator)
+        module.spark_guard.guard_spark_submit.assert_called_once_with(
+            "http://spark-master:8080", "raw.bank.s__t",
+        )
         self.assertEqual(
             [call.args[0] for call in module.BaseHook.get_connection.call_args_list],
             ["spark_main_submit", "spark_main_master_http"],
