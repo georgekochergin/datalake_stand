@@ -158,16 +158,11 @@ class TestGuardOperatorWiring(unittest.TestCase):
 
     def test_missing_connection_refuses_before_guard_or_submit(self):
         module = load_operators()
-        for missing in ("spark_main_submit", "spark_main_master_http"):
-            operator = module.IngestFullOperator(task_id="load", source_id="bank", airflow_conn_id="source", fqn="s.t", target_table="raw.bank.s__t")
-            def get_connection(key):
-                if key == missing:
-                    raise LookupError("missing connection")
-                return types.SimpleNamespace(schema="http", host="spark-master", port=8080)
-            module.BaseHook.get_connection.side_effect = get_connection
-            with self.assertRaises(LookupError):
-                operator.execute({})
-            self.assertEqual(operator.submissions, [])
+        operator = module.IngestFullOperator(task_id="load", source_id="bank", airflow_conn_id="source", fqn="s.t", target_table="raw.bank.s__t")
+        module.BaseHook.get_connection.side_effect = LookupError("missing master HTTP connection")
+        with self.assertRaises(LookupError):
+            operator.execute({})
+        self.assertEqual(operator.submissions, [])
         module.spark_guard.guard_spark_submit.assert_not_called()
 
     def test_connection_fields_form_url_without_custom_validation(self):
@@ -183,7 +178,7 @@ class TestGuardOperatorWiring(unittest.TestCase):
         self.assertIs(operator._guard_result, module.raw_rdbms.SparkGuardStatus.ADMITTED)
         self.assertEqual(
             [call.args[0] for call in module.BaseHook.get_connection.call_args_list],
-            ["spark_main_submit", "spark_main_master_http"],
+            ["spark_main_master_http"],
         )
 
     def test_all_three_operators_refuse_and_repeat_guard(self):

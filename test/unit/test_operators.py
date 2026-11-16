@@ -462,7 +462,7 @@ class TestIngestActSnapOperator(unittest.TestCase):
         self.assertNotIn("--lookback-size", operator.application_args)
         self.assertNotIn("--incremental-column", operator.application_args)
         requested = [c.args[0] for c in self.module.BaseHook.get_connection.call_args_list]
-        self.assertEqual(requested, ["spark_main_submit", "spark_main_master_http", "source"])
+        self.assertEqual(requested, ["spark_main_master_http", "source"])
 
     def test_no_marker_protocol(self):
         operator = self.operator()

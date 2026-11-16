@@ -48,7 +48,6 @@ def run_spark_guard(operator):
     operator._guard_application_ids = []
     operator._guard_result = SparkGuardStatus.CHECKING
     try:
-        BaseHook.get_connection(SUBMIT_CONN_ID)
         master = BaseHook.get_connection(MASTER_HTTP_CONN_ID)
         master_url = f"{master.schema}://{master.host}:{master.port}"
         operator._guard_application_ids = spark_guard.guard_spark_submit(
