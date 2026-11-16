@@ -15,6 +15,7 @@ from uuid import uuid4
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.sdk import BaseHook
+from sydafa_airflow.operators import SydafaActivateOperator
 
 from ingestion import meta
 from ingestion.operators import IngestActSnapOperator, IngestFullOperator, IngestIncrementalOperator
@@ -90,6 +91,10 @@ def main():
         other_id, _, other_stream = orphan(other_target, directory)
         try:
             for cls, fqn, target, extra in cases:
+                SydafaActivateOperator(
+                    task_id="activate_guard_source", conn_id="sydafa_default",
+                    source="bank", ttl_minutes=15,
+                ).execute({})
                 application_id, _, stream = orphan(target, directory)
                 run_id = "e2e_guard_" + uuid4().hex
                 process_id = meta.allocate_process_id(dag_id="e2e_guard", run_id=run_id, execution_date=None, db_connect=connect)

@@ -355,6 +355,7 @@ DAG ingest__rdbms__<source_id>__<pipeline>
 - Workers не опрашиваются. Подтверждается завершение приложения у master, а не физическое исчезновение всех [executors](glossary.md#term-executor). Штатные механизмы Spark завершают их асинхронно.
 - Обычный Python-код [driver](glossary.md#term-driver) может продолжить финализацию pg-meta. Остановка не отменяет commit и не даёт exactly-once. Сохраняются существующие at-least-once и [CAS](glossary.md#term-cas) гарантии.
 - Единственный владелец target и неизменяемое `max_active_runs=1` обязательны. Guard не является распределённой блокировкой.
+  - Неожиданный новый ID обнаруживается только в `activeapps`. Приложение, зарегистрированное и завершившееся между опросами, неотличимо от истории `completedapps`.
 
 Все задачи обоих генерируемых шаблонов наследуют `default_args` с `retries=2` и `retry_delay=timedelta(minutes=5)`: максимум три попытки. Повтор `load` использует прежний `process_id`, повтор самого генератора номера выделяет новый.
 

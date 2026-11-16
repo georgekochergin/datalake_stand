@@ -7,7 +7,7 @@ from pyspark.sql import SparkSession
 
 spark = SparkSession.builder.appName(sys.argv[1]).getOrCreate()
 try:
-    deadline = time.monotonic() + 180
+    deadline = time.monotonic() + 600
     while time.monotonic() < deadline and not spark.sparkContext._jsc.sc().isStopped():
         time.sleep(0.2)
 finally:

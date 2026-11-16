@@ -108,7 +108,7 @@ class TestSparkGuard(unittest.TestCase):
             with patch.object(guard, "HTTPConnection") as connection:
                 connection.return_value.getresponse.return_value = response
                 if body == b"not json":
-                    with self.assertRaises(guard.SparkGuardError):
+                    with self.assertRaisesRegex(guard.SparkGuardError, "Invalid Spark master JSON"):
                         guard._get_master_state("http://master", guard.time.monotonic() + 2)
                 else:
                     self.assertEqual(guard._get_master_state("http://master", guard.time.monotonic() + 2), {})

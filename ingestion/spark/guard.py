@@ -55,7 +55,11 @@ def _get_master_state(master, deadline):
     with _request("GET", master + "/json/", deadline) as response:
         if response.status != 200:
             raise SparkGuardError("Spark master state request failed; submit prohibited")
-        return json.loads(response.read())
+        body = response.read()
+    try:
+        return json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        raise SparkGuardError("Invalid Spark master JSON; submit prohibited") from None
 
 
 def _kill_application(master, application_id, deadline):
