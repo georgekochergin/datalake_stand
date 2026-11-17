@@ -342,6 +342,13 @@ DAG ingest__rdbms__<source_id>__<pipeline>
 
 Все задачи обоих генерируемых шаблонов наследуют `default_args` с `retries=2` и `retry_delay=timedelta(minutes=5)`: максимум три попытки. Повтор `load` использует прежний `process_id`, повтор самого генератора номера выделяет новый.
 
+Начало и окончание запуска DAG записываются в `ingestion.airflow_dagruns_log` разными механизмами:
+
+- **START — внутри задачи `generate_process_id`, не в callback.** Её `GenerateProcessIdOperator.execute()` вызывает `meta.allocate_process_id()`: вставляет START с новым номером из последовательности и возвращает `process_id` для XCom. Это происходит до активации источника и загрузок, а не в момент нажатия Trigger или постановки DAG в очередь.
+  - Если START не удалось записать, задача завершается ошибкой и downstream-задачи не запускаются.
+  - Повтор самой `generate_process_id` создаёт новый номер и новый START. Повтор только `load` не создаёт START запуска DAG повторно.
+- **END/FAILED — в callbacks завершения DAG.** `dagrun_success_callback` или `dagrun_failure_callback` находит выделенный номер по `dag_id` и `run_id` и записывает итог. Если номер ещё не был выделен, callback не создаёт запись завершения.
+
 | Callback | Действие |
 |---|---|
 | DAG success/failure | Событие END/FAILED запуска в pg-meta |
