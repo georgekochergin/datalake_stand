@@ -1,0 +1,117 @@
+services:
+  sydafa:
+    environment:
+      - SYDAFA_MAX_TTL_MINUTES=30
+      - SYDAFA_TTL_MINUTES=15
+      - SYDAFA_CONTAINER_PREFIX=${SYDAFA_CONTAINER_PREFIX:-sydafa-dlh-test}
+    volumes: !override
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./test/${TEST_WS_DIR:-.workspace}/conf/sydafa/sources.json:/app/config/sources.json:ro
+      - sydafa_state:/state
+      - sydafa_bank_data:/source-volumes/bank
+      - sydafa_broker_data:/source-volumes/broker
+    ports: !override []
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').getcode() == 200 else 1)"]
+      interval: 2s
+      start_interval: 1s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  pg-meta:
+    healthcheck:
+      interval: 2s
+    volumes: !override
+      - pg_meta_data:/var/lib/postgresql/data
+      - ./test/${TEST_WS_DIR:-.workspace}/conf/pg-meta/init:/docker-entrypoint-initdb.d:ro
+    ports: !override []
+
+  nessie:
+    ports: !override []
+
+  silo:
+    healthcheck:
+      interval: 2s
+    ports: !override []
+
+  spark-master:
+    image: dlh-test-spark:latest
+    volumes: !override
+      - ./test/${TEST_WS_DIR:-.workspace}/ingestion/spark:/opt/spark-jobs:ro
+    ports: !override []
+
+  spark-worker:
+    image: dlh-test-spark:latest
+    volumes: !override
+      - ./test/${TEST_WS_DIR:-.workspace}/ingestion/spark:/opt/spark-jobs:ro
+    ports: !override []
+
+  trino-init:
+    volumes: !override
+      - ./test/${TEST_WS_DIR:-.workspace}/conf/trino/init-auth.sh:/init-auth.sh:ro
+      - trino_auth:/auth
+
+  trino:
+    volumes: !override
+      - ./test/${TEST_WS_DIR:-.workspace}/conf/trino/catalog:/etc/trino/catalog:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/conf/trino/config.properties:/etc/trino/config.properties:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/conf/trino/password-authenticator.properties:/etc/trino/password-authenticator.properties:ro
+      - trino_auth:/auth:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/conf/trino/keystore.p12:/etc/trino/keystore.p12:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/trino:/opt/trino-sql:ro
+    ports: !override []
+
+  airflow-init:
+    image: dlh-test-airflow:latest
+    volumes: !override
+      - ./test/${TEST_WS_DIR:-.workspace}/airflow/dags:/opt/airflow/dags
+      - ./test/${TEST_WS_DIR:-.workspace}/airflow/plugins:/opt/airflow/plugins:ro
+
+  airflow-scheduler:
+    image: dlh-test-airflow:latest
+    volumes: !override
+      - ./test/${TEST_WS_DIR:-.workspace}/airflow/dags:/opt/airflow/dags
+      - ./test/${TEST_WS_DIR:-.workspace}/airflow/plugins:/opt/airflow/plugins:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/ingestion:/opt/python/ingestion:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/ingestion/spark:/opt/spark-jobs:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/trino:/opt/airflow/sql:ro
+      - ./test/${TEST_WS_DIR:-.workspace}:/workspace:ro
+      - airflow_logs:/opt/airflow/logs
+
+  airflow-dag-processor:
+    image: dlh-test-airflow:latest
+    volumes: !override
+      - ./test/${TEST_WS_DIR:-.workspace}/airflow/dags:/opt/airflow/dags
+      - ./test/${TEST_WS_DIR:-.workspace}/airflow/plugins:/opt/airflow/plugins:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/ingestion:/opt/python/ingestion:ro
+      - airflow_logs:/opt/airflow/logs
+
+  airflow-webserver:
+    image: dlh-test-airflow:latest
+    volumes: !override
+      - ./test/${TEST_WS_DIR:-.workspace}/airflow/dags:/opt/airflow/dags
+      - ./test/${TEST_WS_DIR:-.workspace}/airflow/plugins:/opt/airflow/plugins:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/ingestion:/opt/python/ingestion:ro
+      - airflow_logs:/opt/airflow/logs
+    ports: !override []
+
+  test-runner:
+    image: dlh-test-runner:latest
+    volumes: !override
+      - ./test/${TEST_WS_DIR:-.workspace}:/workspace:ro
+      - sydafa_state:/state:ro
+    environment:
+      - SYDAFA_CONTAINER_PREFIX=${SYDAFA_CONTAINER_PREFIX:-sydafa-dlh-test}
+      - E2E_SOURCE=${E2E_SOURCE:-bank}
+    depends_on: !override
+      sydafa:
+        condition: service_healthy
+
+  airflow-postgres:
+    healthcheck:
+      interval: 2s
+
+  pg-catalog:
+    healthcheck:
+      interval: 2s

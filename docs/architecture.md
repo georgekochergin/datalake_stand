@@ -361,7 +361,7 @@ DAG ingest__rdbms__<source_id>__<pipeline>
 ### Ограничение числа загрузок
 
 Все load-таски всех ingest-DAG-ов делят [пул](glossary.md#term-pool) `ingest_loads` на
-4 [слота](glossary.md#term-slot) (создаётся сервисом `airflow-init`).
+6 [слотов](glossary.md#term-slot) (создаётся сервисом `airflow-init`).
 Вес каждой загрузки задаётся параметром `airflow.pool.slots`.
 
 [Пул](glossary.md#term-pool) ограничивает количество одновременно работающих
@@ -1088,7 +1088,7 @@ Oracle), для остальных типов — по самой колонке
 
 Таски `load` разных [сущностей](glossary.md#term-entity) внутри
 DAG-а и разных DAG-ов исполняются параллельно. Их количество сдерживает [пул](glossary.md#term-pool)
-Airflow `ingest_loads` (4 [слота](glossary.md#term-slot), см. раздел 3). Это допуск к [исполнению](glossary.md#term-execution), а не
+Airflow `ingest_loads` (6 [слотов](glossary.md#term-slot), см. раздел 3). Это допуск к [исполнению](glossary.md#term-execution), а не
 выделение ресурсов.
 
 Отключение JDBC-параллелизма (одна партиция

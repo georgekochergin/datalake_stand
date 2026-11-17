@@ -7,6 +7,7 @@ import signal
 import subprocess
 import tempfile
 import time
+import yaml
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.request import urlopen
@@ -80,27 +81,32 @@ def main():
     connection = BaseHook.get_connection(raw_rdbms.MASTER_HTTP_CONN_ID)
     require(connection.host == "spark-master", "HTTP Connection addresses isolated compose master")
     connect = PostgresHook(postgres_conn_id="ingestion_meta").get_conn
-    config = {"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 0, "unit": None}}
+    source = os.environ["E2E_SOURCE"]
+    sources = json.loads(Path("/workspace/conf/sydafa/sources.json").read_text())["sources"]
+    prefix = next(iter(sources[source]["schema"]["tables"])).split(".")[0]
+    pipeline = yaml.safe_load(Path(f"/workspace/ingestion/conf/pipelines/{source}/main.yaml").read_text())
+    entity = next(item for item in pipeline["entities"] if item["fqn"] == f"{prefix}.transactions")
+    config = {"contract": entity["incremental"]["contract"], "lookback": {"size": 0, "unit": None}}
     cases = (
-        (IngestFullOperator, "retail_bank.accounts", "raw.bank.retail_bank__accounts", {}),
-        (IngestIncrementalOperator, "retail_bank.transactions", "raw.bank.retail_bank__transactions", {"incremental_config": config}),
-        (IngestActSnapOperator, "retail_bank.transactions", "raw.bank.retail_bank__transactions__act_snap", {}),
+        (IngestFullOperator, f"{prefix}.accounts", f"raw.{source}.{prefix}__accounts", {}),
+        (IngestIncrementalOperator, f"{prefix}.transactions", f"raw.{source}.{prefix}__transactions", {"incremental_config": config}),
+        (IngestActSnapOperator, f"{prefix}.transactions", f"raw.{source}.{prefix}__transactions__act_snap", {}),
     )
     with tempfile.TemporaryDirectory(prefix="e2e-spark-guard-") as directory:
-        other_target = "raw.bank.e2e_guard_other"
+        other_target = f"raw.{source}.e2e_guard_other"
         other_id, _, other_stream = orphan(other_target, directory)
         try:
             for cls, fqn, target, extra in cases:
                 SydafaActivateOperator(
                     task_id="activate_guard_source", conn_id="sydafa_default",
-                    source="bank", ttl_minutes=15,
+                    source=source, ttl_minutes=15,
                 ).execute({})
                 application_id, _, stream = orphan(target, directory)
                 run_id = "e2e_guard_" + uuid4().hex
                 process_id = meta.allocate_process_id(dag_id="e2e_guard", run_id=run_id, execution_date=None, db_connect=connect)
                 ti = SimpleNamespace(xcom_pull=lambda **kwargs: process_id)
                 context = {"ti": ti, "dag_run": SimpleNamespace(dag_id="e2e_guard", run_id=run_id)}
-                operator = cls(task_id="guard_load", source_id="bank", airflow_conn_id="bank_source", fqn=fqn, target_table=target, jdbc_partitioning=False, conf={"spark.cores.max": "1", "spark.executor.cores": "1", "spark.executor.memory": "512m"}, **extra)
+                operator = cls(task_id="guard_load", source_id=source, airflow_conn_id=f"{source}_source", fqn=fqn, target_table=target, jdbc_partitioning=False, conf={"spark.cores.max": "1", "spark.executor.cores": "1", "spark.executor.memory": "512m"}, **extra)
                 try:
                     operator.execute(context)
                     require(application_id in operator._guard_application_ids, cls.__name__ + " cleaned original application before real JDBC submit")
@@ -110,7 +116,7 @@ def main():
                     require(any(app["id"] == other_id for app in state["activeapps"]), "other target was not stopped")
                 finally:
                     stream.close()
-                operator = cls(task_id="refused_load", source_id="bank", airflow_conn_id="bank_source", fqn=fqn, target_table=target, **extra)
+                operator = cls(task_id="refused_load", source_id=source, airflow_conn_id=f"{source}_source", fqn=fqn, target_table=target, **extra)
                 actual_get = BaseHook.get_connection
                 def unavailable(key):
                     if key == raw_rdbms.MASTER_HTTP_CONN_ID:

@@ -17,9 +17,9 @@ RUNTIME_ROOTS = [
     REPO_ROOT / "airflow" / "plugins",
 ]
 RUNTIME_FILES = [
-    REPO_ROOT / "test" / "temporal_extraction.py",
-    REPO_ROOT / "test" / "schema_evolution.py",
-    REPO_ROOT / "test" / "check_extraction.py",
+    REPO_ROOT / "test" / "e2e" / "python" / "temporal_extraction.py",
+    REPO_ROOT / "test" / "e2e" / "python" / "schema_evolution.py",
+    REPO_ROOT / "test" / "e2e" / "python" / "check_extraction.py",
 ]
 
 

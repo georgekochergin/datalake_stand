@@ -4,10 +4,10 @@
 - Стенд КХД/DLH: Trino, Spark, Nessie, Airflow, SILO, Postgres. Источники — `sydafa`.
 - Каркас: `ingestion/` (весь код процесса загрузки в git: `conf/` — YAML-манифесты, `generator/` — генератор DAG-ов, `operators.py`, `meta.py` — pg-meta, `iceberg.py`, `sources/` — диалекты СУБД и JDBC, `spark/` — Spark-приложения, в контейнерах `/opt/python/ingestion` + `PYTHONPATH=/opt/python` и `/opt/spark-jobs`), `airflow/` `trino/` (пользовательский код в git через allowlist `.gitignore`), `conf/` (как запущен стенд), `test/` (демо + e2e), `docs/` (документация: архитектура, сценарий демонстрации, бэклог, настройка graphify и Spec Kit).
 
-- Конфигурация источников sydafa: через `sources.json` (`conf/sydafa/sources.json` на живом стенде, `test/sydafa/sources.json` в тестах).
+- Конфигурация источников sydafa: через `conf/sydafa/sources.json`; тестовый контур фильтрует его копию в `test/.workspace-<source>/`.
 - Читатель источников: `sydafa`/`sydafa` (только SELECT). Админ снаружи недоступен.
 - Внутренние DNS-имена СУБД (риг именует контейнеры `sydafa-src-<тип>-<source_id>`): `sydafa-src-mssql-bank:1433`, `sydafa-src-oracle-broker:1521`.
-- Демо-DAG-и: `test/dags/`, подключаются `test/docker-compose.override.yaml`.
+- Тесты: `test/pytest/` — pytest без поднятия стека, `test/e2e/` — стековые сценарии, Docker-артефакты и помощники. Команды и расширение — скилл `full-testing`.
 - Инспекция БД: `POST /sources/{source}/activate` → объект `connection` в ответе; внешний порт хоста задается в манифесте `sources.json` (`external_port`).
 - Интеграция с sydafa: пакет `sydafa-airflow` (`SydafaActivateOperator`) для явного пробуждения СУБД перед чтением.
 
@@ -18,7 +18,7 @@
 | Действие | Как выполнять |
 |---|---|
 | Создание, изменение и ревью документации, в том числе вместе с кодом | скилл `documentation` (`.agents/skills/documentation/SKILL.md`) |
-| Разработка, изменение и диагностика тестов | скилл `e2e-testing` (`.agents/skills/e2e-testing/SKILL.md`) |
+| Разработка, изменение и диагностика тестов | скилл `full-testing` (`.agents/skills/full-testing/SKILL.md`) |
 | Создание и оформление Pull Request | скилл `pull-request` (`.agents/skills/pull-request/SKILL.md`) |
 | Любое изменение бэклога | только через скилл `backlog` (`.agents/skills/backlog/SKILL.md`) |
 | Функциональная доработка | спек-цикл Spec Kit (раздел «Спецификации изменений» ниже) |
@@ -31,7 +31,7 @@
 - Функциональные доработки ведутся спек-циклом Spec Kit: constitution → specify → clarify → plan → tasks → analyze → implement → converge. Конституция проекта — `.specify/memory/constitution.md`, артефакты цикла — `specs/<NNN-имя>/` (в git наравне с кодом).
 - Цикл выполняется в opencode (команды `/speckit.<имя>`, например `/speckit.specify`) или интерактивно в ZCode (скиллы `$speckit-<имя>`); headless-CLI ZCode не поддерживается. Настройка opencode (уже настроенный агент не требует изменений; подключение провайдера — например Z.ai по токену) и порядок проверки ZCode — `docs/agents/speckit.md` (разделы 3 и 12). Текущая фича — машинно-локальный указатель `.specify/feature.json`; состояние цикла хранится в файлах репозитория и переносится между машинами переменной `SPECIFY_FEATURE_DIRECTORY`.
 - Все артефакты спек-цикла пиши на русском языке.
-- Спек-цикл не отменяет остальные правила: анализ кода — по графу, тестирование — скилл `e2e-testing`, финализация — скилл `pull-request`. Установка, инструкция для разработчика и ограничение zcode — `docs/agents/speckit.md`.
+- Спек-цикл не отменяет остальные правила: анализ кода — по графу, тестирование — скилл `full-testing`, финализация — скилл `pull-request`. Установка, инструкция для разработчика и ограничение zcode — `docs/agents/speckit.md`.
 
 ## Контроль веток и Pull Request (Git Workflow)
 - Новые рабочие ветки — с префиксом `<github-login>/`, где логин активного аккаунта GitHub CLI определяется через `gh api user --jq .login` после проверки `gh auth status`. Не использовать фиксированный префикс `kodik/`, имя пользователя ОС или `git user.name`. Не коммитить в `main`. Обязателен Pull Request.
@@ -48,4 +48,5 @@
 - Допускаются исключительно структурированные docstring (`"""..."""` или `'''...'''`) для модулей, классов и функций.
 
 ## Testing
-- Для разработки, изменения и запуска тестов, а также диагностики их ошибок обязательно используй скилл `e2e-testing` (`.agents/skills/e2e-testing/SKILL.md`). Требования к покрытию, изоляции тестового контура, командам запуска и критериям успешности определены в скилле и здесь не дублируются.
+- Для разработки, изменения и запуска тестов, а также диагностики их ошибок обязательно используй скилл `full-testing` (`.agents/skills/full-testing/SKILL.md`). Требования к покрытию, изоляции тестового контура, командам запуска и критериям успешности определены в скилле и здесь не дублируются.
+- Все новые тесты документируются в скилле `full-testing`. После изменений проверяй длительность e2e. При превышении семи минут требуется оптимизация по правилам скилла.
