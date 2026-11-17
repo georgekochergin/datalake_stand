@@ -187,7 +187,7 @@ def generate_snapshot_dag_source(
     lines = [
         f'"""Generated snapshot DAG for pipeline "{pipeline.source_id}" entity {entity.fqn} — '
         'regenerate via python3 -m ingestion.generator.generate_dags, do not edit."""',
-        "from datetime import datetime",
+        "from datetime import datetime, timedelta",
         "",
         "from airflow import DAG",
         "from airflow.providers.standard.operators.python import PythonOperator",
@@ -210,6 +210,7 @@ def generate_snapshot_dag_source(
         "    start_date=datetime(2026, 1, 1),",
         f"    schedule={entity.act_snap.schedule!r},",
         "    catchup=False,",
+        '    default_args={"retries": 2, "retry_delay": timedelta(minutes=5)},',
         f"    max_active_runs={MAX_ACTIVE_RUNS},",
         f"    tags={tags!r},",
         "    on_success_callback=dagrun_success_callback,",
@@ -242,7 +243,7 @@ def generate_dag_source(
     lines = [
         f'"""Generated DAG for pipeline "{pipeline.source_id}" — regenerate via '
         'python3 -m ingestion.generator.generate_dags, do not edit."""',
-        "from datetime import datetime",
+        "from datetime import datetime, timedelta",
         "",
         "from airflow import DAG",
         "from airflow.providers.standard.operators.python import PythonOperator",
@@ -265,6 +266,7 @@ def generate_dag_source(
         "    start_date=datetime(2026, 1, 1),",
         f"    schedule={pipeline.schedule!r},",
         f"    catchup={pipeline.catchup!r},",
+        '    default_args={"retries": 2, "retry_delay": timedelta(minutes=5)},',
         f"    max_active_runs={MAX_ACTIVE_RUNS},",
         f"    tags={list(pipeline.tags)!r},",
         "    on_success_callback=dagrun_success_callback,",

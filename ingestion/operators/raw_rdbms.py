@@ -1,6 +1,8 @@
 """Submit operators for raw-layer loads over JDBC RDBMS sources."""
 
 import json
+import logging
+from enum import Enum
 from functools import partial
 
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
@@ -8,9 +10,53 @@ from airflow.sdk import BaseHook
 from psycopg2.extensions import make_dsn
 
 from .process import _pull_process_id, log_task_failed
+from ingestion.spark import guard as spark_guard
 from ingestion.sources.rdbms import registry as rdbms_registry
 from ingestion.sources.rdbms.contracts import ConnectionSpec
 from ingestion.sources.rdbms.incremental_config import validate as validate_incremental_config
+
+SUBMIT_CONN_ID = "spark_main_submit"
+MASTER_HTTP_CONN_ID = "spark_main_master_http"
+LOG = logging.getLogger(__name__)
+
+
+class SparkGuardStatus(Enum):
+    """Describe the per-execution admission check for task diagnostics."""
+
+    CHECKING = "checking"
+    ADMITTED = "admitted"
+    REFUSED = "refused"
+    UNAVAILABLE = "unavailable"
+
+
+def log_spark_task_event(context):
+    """Log guard diagnostics without master requests or exception text."""
+    task = context.get("task") or getattr(context.get("ti"), "task", None)
+    error = context.get("exception")
+    LOG.info(
+        "Spark task event state=%s target=%s application_ids=%s guard=%s reason_type=%s",
+        getattr(context.get("ti"), "state", None),
+        getattr(task, "target_table", None),
+        getattr(task, "_guard_application_ids", None),
+        getattr(task, "_guard_result", SparkGuardStatus.UNAVAILABLE).value,
+        type(error).__name__ if error is not None else None,
+    )
+
+
+def run_spark_guard(operator):
+    """Resolve Airflow configuration and record each execution's guard outcome."""
+    operator._guard_application_ids = []
+    operator._guard_result = SparkGuardStatus.CHECKING
+    try:
+        master = BaseHook.get_connection(MASTER_HTTP_CONN_ID)
+        master_url = f"{master.schema}://{master.host}:{master.port}"
+        operator._guard_application_ids = spark_guard.guard_spark_submit(
+            master_url, operator.target_table,
+        )
+    except Exception:
+        operator._guard_result = SparkGuardStatus.REFUSED
+        raise
+    operator._guard_result = SparkGuardStatus.ADMITTED
 
 
 def resolve_source_connection(connection) -> tuple:
@@ -104,6 +150,10 @@ def _apply_entity_fields(
             datalake_table=target_table,
             pg_conn_id=pg_conn_id,
         )
+    for field in ("on_retry_callback", "on_failure_callback"):
+        existing = getattr(operator, field, None)
+        callbacks = list(existing) if isinstance(existing, list) else ([existing] if existing else [])
+        setattr(operator, field, [*callbacks, log_spark_task_event])
 
 
 class IngestActSnapOperator(SparkSubmitOperator):
@@ -128,7 +178,7 @@ class IngestActSnapOperator(SparkSubmitOperator):
         _strict_submit_options(source_type, jdbc_partitioning, num_partitions)
         super().__init__(
             application="/opt/spark-jobs/raw/rdbms/incremental/load_act_snap.py",
-            conn_id="spark_default",
+            conn_id=SUBMIT_CONN_ID,
             deploy_mode="client",
             **kwargs,
         )
@@ -138,6 +188,7 @@ class IngestActSnapOperator(SparkSubmitOperator):
         )
 
     def execute(self, context):
+        run_spark_guard(self)
         _, self.application_args = _submit_args(self, context)
         super().execute(context)
 
@@ -165,7 +216,7 @@ class IngestFullOperator(SparkSubmitOperator):
         _strict_submit_options(source_type, jdbc_partitioning, num_partitions)
         super().__init__(
             application="/opt/spark-jobs/raw/rdbms/full/load_entity.py",
-            conn_id="spark_default",
+            conn_id=SUBMIT_CONN_ID,
             deploy_mode="client",
             **kwargs,
         )
@@ -175,6 +226,7 @@ class IngestFullOperator(SparkSubmitOperator):
         )
 
     def execute(self, context):
+        run_spark_guard(self)
         _, args = _submit_args(self, context)
         dag_run = context["dag_run"]
         args += ["--source-id", self.source_id, "--dag-id", dag_run.dag_id,
@@ -208,7 +260,7 @@ class IngestIncrementalOperator(SparkSubmitOperator):
         validate_incremental_config(incremental_config)
         super().__init__(
             application="/opt/spark-jobs/raw/rdbms/incremental/load_entity.py",
-            conn_id="spark_default",
+            conn_id=SUBMIT_CONN_ID,
             deploy_mode="client",
             **kwargs,
         )
@@ -220,6 +272,7 @@ class IngestIncrementalOperator(SparkSubmitOperator):
         self.pg_conn_id = pg_conn_id
 
     def execute(self, context):
+        run_spark_guard(self)
         _, args = _submit_args(self, context)
         dag_run = context["dag_run"]
         args += ["--source-id", self.source_id, "--dag-id", dag_run.dag_id,

@@ -1043,7 +1043,7 @@ def main() -> None:
 
     for conn_id, conn_type in (("bank_source", "mssql"), ("broker_source", "oracle"),
                                ("sydafa_default", "http"), ("ingestion_meta", "postgres"),
-                               ("spark_default", "spark"), ("trino_default", "trino")):
+                               ("spark_main_submit", "spark"), ("spark_main_master_http", "http"), ("trino_default", "trino")):
         code, raw = http(
             "GET", AIRFLOW + "/api/v2/connections/" + conn_id,
             headers={"Authorization": "Bearer " + token},
@@ -1062,11 +1062,16 @@ def main() -> None:
                 check("Connection ingestion_meta port", connection.get("port"), 5432)
                 check("Connection ingestion_meta database", connection.get("schema"), "meta")
                 check("Connection ingestion_meta user", connection.get("login"), AIRFLOW_USER)
-            elif conn_id == "spark_default":
-                check("Connection spark_default host", connection.get("host"), "spark://spark-master")
-                check("Connection spark_default port", connection.get("port"), 7077)
+            elif conn_id == "spark_main_submit":
+                check("Connection spark_main_submit host", connection.get("host"), "spark://spark-master")
+                check("Connection spark_main_submit port", connection.get("port"), 7077)
                 extra = json.loads(connection.get("extra") or "{}")
-                check("Connection spark_default binary", extra.get("spark_binary"), "spark-submit")
+                check("Connection spark_main_submit binary", extra.get("spark_binary"), "spark-submit")
+            elif conn_id == "spark_main_master_http":
+                check("Connection spark_main_master_http host", connection.get("host"), "spark-master")
+                check("Connection spark_main_master_http port", connection.get("port"), 8080)
+                check("Connection spark_main_master_http scheme", connection.get("schema"), "http")
+                check("Connection spark_main_master_http extra", json.loads(connection.get("extra") or "{}"), {})
             elif conn_id == "trino_default":
                 check("Connection trino_default host", connection.get("host"), "trino")
                 check("Connection trino_default port", connection.get("port"), 8443)

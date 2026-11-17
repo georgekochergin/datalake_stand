@@ -12,7 +12,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 CONNECTIONS = (
-    "bank_source", "broker_source", "spark_default", "trino_default",
+    "bank_source", "broker_source", "spark_main_submit", "spark_main_master_http", "trino_default",
     "sydafa_default", "ingestion_meta",
 )
 

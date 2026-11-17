@@ -59,6 +59,7 @@ def load_operators():
     modules["airflow.providers.apache.spark.operators.spark_submit"].SparkSubmitOperator = FakeOperator
     modules["psycopg2.extensions"].make_dsn = fake_make_dsn
     modules["ingestion"] = types.ModuleType("ingestion")
+    modules["ingestion"].__path__ = list(ingestion.__path__)
     modules["ingestion"].meta = MagicMock(spec=load_meta_api())
     modules["ingestion"].sources = ingestion.sources
     modules["ingestion"].spark = ingestion.spark
@@ -73,6 +74,11 @@ def load_operators():
         spec.loader.exec_module(module)
     module.BaseHook = modules["airflow.sdk"].BaseHook
     module.meta = modules["ingestion"].meta
+    guard_double = types.ModuleType("_operator_test_guard")
+    guard_double.__dict__.update(module.raw_rdbms.spark_guard.__dict__)
+    guard_double.guard_spark_submit = MagicMock(return_value=[])
+    module.raw_rdbms.spark_guard = guard_double
+    module.spark_guard = guard_double
     return module
 
 
@@ -456,7 +462,7 @@ class TestIngestActSnapOperator(unittest.TestCase):
         self.assertNotIn("--lookback-size", operator.application_args)
         self.assertNotIn("--incremental-column", operator.application_args)
         requested = [c.args[0] for c in self.module.BaseHook.get_connection.call_args_list]
-        self.assertEqual(requested, ["source"])
+        self.assertEqual(requested, ["spark_main_master_http", "source"])
 
     def test_no_marker_protocol(self):
         operator = self.operator()

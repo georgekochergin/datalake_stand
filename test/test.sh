@@ -58,12 +58,13 @@ fi
 
 # ==================== ШАГ 2 (verify): Запуск на работающем стенде ====================
 run_runtime_checks() {
-  if [ ! -f "$TEST_WS/ingestion/spark/e2e_schema_evolution.py" ] || [ ! -f "$TEST_WS/ingestion/spark/e2e_temporal_extraction.py" ] || [ ! -f "$TEST_WS/test/unit/test_meta.py" ]; then
+  if [ ! -f "$TEST_WS/ingestion/spark/e2e_schema_evolution.py" ] || [ ! -f "$TEST_WS/ingestion/spark/e2e_temporal_extraction.py" ] || [ ! -f "$TEST_WS/test/unit/test_meta.py" ] || [ ! -f "$TEST_WS/airflow/plugins/e2e_check_spark_guard.py" ] || [ ! -f "$TEST_WS/ingestion/spark/e2e_guard_idle.py" ]; then
     echo "FAIL: Отсутствуют workspace-артефакты runtime-проверок (Spark e2e apps, unit-тесты pg-meta); сначала выполните полный запуск."
     return 1
   fi
   "${COMPOSE[@]}" run --rm --no-deps test-runner python -u /app/run_flow.py
   "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler python /opt/airflow/plugins/e2e_check_extraction.py
+  "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler python /opt/airflow/plugins/e2e_check_spark_guard.py
   # PostgresTests (test/unit/test_meta.py) против реального pg-meta: psycopg2 уже
   # в образе Airflow, креды берутся из окружения сервиса; каждая проверка создаёт
   # и удаляет собственную одноразовую БД, не трогая базу meta.
@@ -143,6 +144,8 @@ path.write_text(json.dumps(manifest, indent=2))
 PY
 cp -R "$PROJECT_ROOT/airflow/." "$TEST_WS/airflow/"
 cp "$PROJECT_ROOT/test/check_extraction.py" "$TEST_WS/airflow/plugins/e2e_check_extraction.py"
+cp "$PROJECT_ROOT/test/check_spark_guard.py" "$TEST_WS/airflow/plugins/e2e_check_spark_guard.py"
+cp "$PROJECT_ROOT/test/spark_guard_idle.py" "$TEST_WS/ingestion/spark/e2e_guard_idle.py"
 cp "$PROJECT_ROOT/test/schema_evolution.py" "$TEST_WS/ingestion/spark/e2e_schema_evolution.py"
 cp "$PROJECT_ROOT/test/temporal_extraction.py" "$TEST_WS/ingestion/spark/e2e_temporal_extraction.py"
 mkdir -p "$TEST_WS/test/unit"
