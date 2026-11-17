@@ -1355,10 +1355,11 @@ Airflow → контейнер загрузки: spark-submit + driver
 
 Airflow [pools](glossary.md#term-pool) ограничивают допуск задач, но не выделяют CPU и память.
 Генератор `ingestion/generator/generate_dags.py` создаёт для каждой таблицы
-цепочку `log_start → load → log_end → publish_asset`.
+цепочку `load → publish_asset`. Журналирование START/END/FAILED выполняют
+callbacks задачи `load`, отдельных задач журналирования нет.
 
 - `airflow.pool.name` и `airflow.pool.slots` применяются только к `load`.
-- Остальным задачам генератор сейчас не назначает отдельный служебный [пул](glossary.md#term-pool).
+- Задаче `publish_asset` генератор сейчас не назначает отдельный служебный [пул](glossary.md#term-pool).
 
 #### Проблема
 
@@ -1366,9 +1367,9 @@ Airflow [pools](glossary.md#term-pool) ограничивают допуск з�
 
 Пример целевого поведения:
 
-- [Сущность](glossary.md#term-entity) без настройки [пула](glossary.md#term-pool) отправляет `load` в общий [пул](glossary.md#term-pool) загрузок, а `log_start`, `log_end`, `publish_asset` — в отдельный служебный [пул](glossary.md#term-pool).
+- [Сущность](glossary.md#term-entity) без настройки [пула](glossary.md#term-pool) отправляет `load` в общий [пул](glossary.md#term-pool) загрузок, а `publish_asset` — в отдельный служебный [пул](glossary.md#term-pool).
 - Если для [сущности](glossary.md#term-entity) указан пользовательский [пул](glossary.md#term-pool), только `load` переходит в него.
-- Служебные задачи остаются в служебном [пуле](glossary.md#term-pool).
+- Задача `publish_asset` остаётся в служебном [пуле](glossary.md#term-pool).
 
 [Runtime-кейс](glossary.md#term-runtime) в рамках оформления задачи не проверялся.
 
@@ -1380,21 +1381,21 @@ Airflow [pools](glossary.md#term-pool) ограничивают допуск з�
 Настроить два штатных [пула](glossary.md#term-pool) фреймворка и автоматически назначать их в генераторе DAG-ов:
 
 - Использовать `ingest_loads` как [пул](glossary.md#term-pool) по умолчанию для всех `load`, если [сущность](glossary.md#term-entity) не указала собственный `airflow.pool.name`.
-- Создать отдельный [пул](glossary.md#term-pool) `ingest_service` для `log_start`, `log_end`, `publish_asset`:
-  - Каждая такая задача занимает один [слот](glossary.md#term-slot).
+- Создать отдельный [пул](glossary.md#term-pool) `ingest_service` для `publish_asset`:
+  - Каждая задача публикации занимает один [слот](glossary.md#term-slot).
   - Число [слотов](glossary.md#term-slot) обоих [пулов](glossary.md#term-pool) определить при реализации с учётом лимитов стенда, не выдавая [пул](glossary.md#term-pool) за изоляцию вычислительных ресурсов.
 - Сохранить область действия явных настроек:
   - `airflow.pool.name` переопределяет только [пул](glossary.md#term-pool) `load`.
   - `airflow.pool.slots` задаёт только вес `load`.
   - Эти настройки не наследуются служебными задачами и не меняют их [пул](glossary.md#term-pool) или вес.
 - Обеспечить идемпотентное создание штатных [пулов](glossary.md#term-pool) при инициализации Airflow в основном и тестовом контурах. Пользовательские [пулы](glossary.md#term-pool) не создавать автоматически: они должны существовать до запуска соответствующей загрузки.
-- Сохранить зависимости задач и публикацию Asset только после успешного `log_end`. Назначение [пулов](glossary.md#term-pool) для `generate_process_id` и `activate_source` не входит в эту задачу.
+- Сохранить зависимость `load → publish_asset` и публикацию [Asset](glossary.md#term-asset) только после успешного `load`. Ошибка журналирования в callbacks не должна блокировать публикацию. Назначение [пулов](glossary.md#term-pool) для `generate_process_id` и `activate_source` не входит в эту задачу.
 - Не использовать разделение [пулов](glossary.md#term-pool) как блокировку одновременной записи одной target-таблицы: это отдельный механизм взаимного исключения.
 
 Проверки и критерии готовности:
 
 - [Unit](glossary.md#term-unit):
-  - Без переопределения `load` получает `ingest_loads`, все три служебные задачи — `ingest_service`.
+  - Без переопределения `load` получает `ingest_loads`, задача `publish_asset` — `ingest_service`.
   - Пользовательский [пул](glossary.md#term-pool) и число [слотов](glossary.md#term-slot) изменяют только `load`.
 - Проверены создание обоих штатных [пулов](glossary.md#term-pool) и повторная инициализация без ошибок.
   - Документация описывает назначение, размеры [пулов](glossary.md#term-pool) и границы переопределения.

@@ -410,7 +410,7 @@ def airflow_wait_run(token: str, dag_id: str, run_id: str, timeout: int = 300, n
 
 
 def airflow_check_asset_publication(token: str, dag_id: str, run_id: str) -> None:
-    """Verify each entity publishes only after its END logging task succeeds."""
+    """Verify each entity publishes after loading without separate logging tasks."""
     url = "%s/api/v2/dags/%s/dagRuns/%s/taskInstances?limit=100" % (AIRFLOW, dag_id, run_id)
     code, raw = http("GET", url, None, {"Authorization": "Bearer " + token})
     if not check(dag_id + ": publication task instances available", code, 200):
@@ -418,18 +418,20 @@ def airflow_check_asset_publication(token: str, dag_id: str, run_id: str) -> Non
     payload = json.loads(raw)
     instances = {item["task_id"]: item for item in payload["task_instances"]}
     check(dag_id + ": all task instances retrieved", len(instances), payload["total_entries"])
-    end_tasks = [task_id for task_id in instances if task_id.endswith(".log_end")]
+    loads = [task_id for task_id in instances if task_id.endswith(".load")]
     publishers = [task_id for task_id in instances if task_id.endswith(".publish_asset")]
-    check(dag_id + ": one publisher per entity", len(publishers), len(end_tasks))
-    check(dag_id + ": entity logging tasks present", bool(end_tasks), True)
-    for task_id in end_tasks:
+    check(dag_id + ": one publisher per entity", len(publishers), len(loads))
+    check(dag_id + ": load tasks present", bool(loads), True)
+    check(dag_id + ": no separate logging tasks",
+          any(task_id.endswith((".log_start", ".log_end")) for task_id in instances), False)
+    for task_id in loads:
         end = instances[task_id]
-        publisher = instances.get(task_id.removesuffix("log_end") + "publish_asset", {})
-        check(task_id + ": END logging succeeded", end["state"], "success")
+        publisher = instances.get(task_id.removesuffix("load") + "publish_asset", {})
+        check(task_id + ": loading succeeded", end["state"], "success")
         check(task_id + ": separate publication succeeded", publisher.get("state"), "success")
         end_date = end.get("end_date")
         start_date = publisher.get("start_date")
-        check(task_id + ": publication follows END logging",
+        check(task_id + ": publication follows loading",
               bool(end_date and start_date and start_date >= end_date), True)
 
 

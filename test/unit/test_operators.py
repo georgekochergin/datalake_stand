@@ -288,54 +288,114 @@ class TestIngestOperator(unittest.TestCase):
 
 
 
-class TestTableLogOperator(unittest.TestCase):
-    """Lifecycle logging does not own watermark reads or persistence."""
+class TestTaskLifecycleCallbacks(unittest.TestCase):
+    """Lifecycle callbacks never make logging a prerequisite for loading."""
 
     def setUp(self):
         self.module = load_operators()
         self.events = []
         self.module.meta.log_task.side_effect = lambda **kwargs: self.events.append(kwargs["status"])
 
-    def operator(self, **kwargs):
-        return self.module.TableLogOperator(
-            task_id="log", source_id="bank", entity_fqn="s.t", datalake_table="raw.bank.s__t",
-            process_id="42", **kwargs,
+    def context(self, value=42):
+        context = {"ti": MagicMock()}
+        context["ti"].xcom_pull.return_value = value
+        return context
+
+    def event(self, status, context=None):
+        self.module.log_task_event(
+            context or self.context(), "bank", "s.t", "raw.bank.s__t", status,
         )
 
-    def test_end_only_logs_lifecycle(self):
-        self.operator(status="END").execute({})
-        self.assertEqual(self.events, ["END"])
+    def test_start_retry_and_end_only_log_lifecycle(self):
+        for status in ("START", "START", "END", "FAILED"):
+            self.event(status)
+        self.assertEqual(self.events, ["START", "START", "END", "FAILED"])
         kwargs = self.module.meta.log_task.call_args.kwargs
         self.assertEqual({key: value for key, value in kwargs.items() if key != "db_connect"}, {
             "process_id": 42, "source_id": "bank", "entity_fqn": "s.t",
-            "datalake_table": "raw.bank.s__t", "status": "END",
+            "datalake_table": "raw.bank.s__t", "status": "FAILED",
         })
-        self.assertEqual([entry[0] for entry in self.module.meta.mock_calls], ["log_task"])
+        self.assertEqual([entry[0] for entry in self.module.meta.mock_calls], ["log_task"] * 4)
 
-    def test_logging_interface_has_no_extraction_parameters(self):
-        import inspect
+    def test_log_failure_is_reported_without_secrets_or_propagation(self):
+        self.module.meta.log_task.side_effect = RuntimeError("password=private")
+        for status in ("START", "END", "FAILED"):
+            with self.subTest(status=status), self.assertLogs(self.module.process.LOG, "WARNING") as logs:
+                self.event(status)
+            self.assertIn("RuntimeError", logs.output[0])
+            self.assertIn(status, logs.output[0])
+            self.assertNotIn("private", str(logs.output))
 
-        parameters = inspect.signature(self.module.TableLogOperator.__init__).parameters
-        self.assertNotIn("incremental_column", parameters)
-        self.assertNotIn("trino_conn_id", parameters)
-
-    def test_log_failure_is_propagated(self):
-        self.module.meta.log_task.side_effect = RuntimeError("log failed")
-        with self.assertRaisesRegex(RuntimeError, "log failed"):
-            self.operator(status="END").execute({})
-
-    def test_start_and_end_only_log_lifecycle(self):
-        self.operator(status="START").execute({})
-        self.operator(status="END").execute({})
-        self.assertEqual([entry[0] for entry in self.module.meta.mock_calls], ["log_task", "log_task"])
-        self.assertEqual(self.events, ["START", "END"])
-
-    def test_invalid_pid_fails_cleanly(self):
-        operator = self.operator(status="END")
-        operator.process_id = None
-        with self.assertRaisesRegex(ValueError, "process_id"):
-            operator.execute({})
+    def test_missing_invalid_or_unavailable_pid_does_not_fail_callback(self):
+        for value in (None, True, 0, "None"):
+            with self.subTest(value=value), self.assertLogs(self.module.process.LOG, "WARNING"):
+                self.event("START", self.context(value))
+        context = self.context()
+        context["ti"].xcom_pull.side_effect = RuntimeError("unavailable")
+        with self.assertLogs(self.module.process.LOG, "WARNING"):
+            self.event("START", context)
         self.assertFalse(self.events)
+
+    def test_callbacks_are_composed_for_all_load_modes(self):
+        for name in ("IngestFullOperator", "IngestIncrementalOperator", "IngestActSnapOperator"):
+            for as_list in (False, True):
+                existing = MagicMock()
+                callbacks = [existing] if as_list else existing
+                kwargs = {"incremental_config": {
+                    "contract": {"source_column": "_batch_id", "position_type": "bigint"},
+                    "lookback": {"size": 0, "unit": None},
+                }} if name == "IngestIncrementalOperator" else {}
+                operator = getattr(self.module, name)(
+                    task_id="load", source_id="bank", airflow_conn_id="source", fqn="s.t",
+                    target_table="raw.bank.s__t", on_execute_callback=callbacks,
+                    on_success_callback=callbacks, on_failure_callback=callbacks, **kwargs,
+                )
+                for field, status in (("on_execute_callback", "START"), ("on_success_callback", "END"), ("on_failure_callback", "FAILED")):
+                    with self.subTest(operator=name, field=field, as_list=as_list):
+                        installed = getattr(operator, field)
+                        self.assertIs(installed[0], existing)
+                        installed[1](self.context())
+                        self.assertEqual(self.events[-1], status)
+
+    def test_failed_start_logging_does_not_prevent_spark_submission(self):
+        operator = self.module.IngestFullOperator(
+            task_id="load", source_id="bank", airflow_conn_id="source", fqn="s.t",
+            target_table="raw.bank.s__t",
+        )
+        self.module.BaseHook.get_connection.return_value = types.SimpleNamespace(
+            conn_type="mssql", host="host", port=None, schema="db", login="reader", password="secret",
+        )
+        self.module.meta.log_task.side_effect = RuntimeError("unavailable")
+        context = self.context()
+        context["dag_run"] = types.SimpleNamespace(dag_id="dag", run_id="run")
+        with self.assertLogs(self.module.process.LOG, "WARNING"):
+            for callback in operator.on_execute_callback:
+                callback(context)
+        operator.execute(context)
+        self.assertEqual(len(operator.submissions), 1)
+
+    def test_incremental_callbacks_use_custom_metadata_connection(self):
+        operator = self.module.IngestIncrementalOperator(
+            task_id="load", source_id="bank", airflow_conn_id="source", fqn="s.t",
+            target_table="raw.bank.s__t", pg_conn_id="custom_meta",
+            incremental_config={
+                "contract": {"source_column": "_batch_id", "position_type": "bigint"},
+                "lookback": {"size": 0, "unit": None},
+            },
+        )
+        for field in ("on_execute_callback", "on_success_callback", "on_failure_callback"):
+            with self.subTest(field=field):
+                getattr(operator, field)[0](self.context())
+                connect = self.module.meta.log_task.call_args.kwargs["db_connect"]
+                self.assertEqual(connect.args, ("custom_meta",))
+
+    def test_connection_failure_is_caught_during_event_write(self):
+        self.module.meta.log_task.side_effect = lambda **kwargs: kwargs["db_connect"]()
+        with patch.object(self.module.process, "_meta_connect", side_effect=OSError("password=private")):
+            with self.assertLogs(self.module.process.LOG, "WARNING") as logs:
+                self.event("END")
+        self.assertIn("OSError", str(logs.output))
+        self.assertNotIn("private", str(logs.output))
 
 
 class TestDagrunCallbacks(unittest.TestCase):
@@ -377,7 +437,7 @@ class TestTaskFailure(unittest.TestCase):
         return context
 
     def test_failure_logs_task_event(self):
-        self.module.log_task_failed(self.context(42), "bank", "s.t", "raw.bank.s__t")
+        self.module.log_task_event(self.context(42), "bank", "s.t", "raw.bank.s__t", "FAILED")
         kwargs = self.module.meta.log_task.call_args.kwargs
         self.assertEqual({key: value for key, value in kwargs.items() if key != "db_connect"}, {
             "process_id": 42, "source_id": "bank", "entity_fqn": "s.t",
@@ -386,7 +446,8 @@ class TestTaskFailure(unittest.TestCase):
         self.assertTrue(callable(kwargs["db_connect"]))
 
     def test_failure_without_process_id_is_silent(self):
-        self.module.log_task_failed(self.context(None), "bank", "s.t", "raw.bank.s__t")
+        with self.assertLogs(self.module.process.LOG, "WARNING"):
+            self.module.log_task_event(self.context(None), "bank", "s.t", "raw.bank.s__t", "FAILED")
         self.module.meta.log_task.assert_not_called()
 
 

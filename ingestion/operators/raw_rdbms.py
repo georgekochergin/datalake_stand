@@ -9,7 +9,7 @@ from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOpe
 from airflow.sdk import BaseHook
 from psycopg2.extensions import make_dsn
 
-from .process import _pull_process_id, log_task_failed
+from .process import _pull_process_id, log_task_event
 from ingestion.spark import guard as spark_guard
 from ingestion.sources.rdbms import registry as rdbms_registry
 from ingestion.sources.rdbms.contracts import ConnectionSpec
@@ -134,7 +134,7 @@ def _apply_entity_fields(
     num_partitions: int,
     pg_conn_id: str = "ingestion_meta",
 ) -> None:
-    """Assign the submit fields shared by every ingest operator and install its failure callback."""
+    """Assign submit fields and append best-effort lifecycle callbacks."""
     operator.source_id = source_id
     operator.airflow_conn_id = airflow_conn_id
     operator.fqn = fqn
@@ -142,14 +142,22 @@ def _apply_entity_fields(
     operator.source_type = source_type
     operator.jdbc_partitioning = jdbc_partitioning
     operator.num_partitions = num_partitions
-    if operator.on_failure_callback is None:
-        operator.on_failure_callback = partial(
-            log_task_failed,
+    for field, status in (
+        ("on_execute_callback", "START"),
+        ("on_success_callback", "END"),
+        ("on_failure_callback", "FAILED"),
+    ):
+        existing = getattr(operator, field, None)
+        callbacks = list(existing) if isinstance(existing, list) else ([existing] if existing else [])
+        callback = partial(
+            log_task_event,
             source_id=source_id,
             entity_fqn=fqn,
             datalake_table=target_table,
             pg_conn_id=pg_conn_id,
+            status=status,
         )
+        setattr(operator, field, [*callbacks, callback])
     for field in ("on_retry_callback", "on_failure_callback"):
         existing = getattr(operator, field, None)
         callbacks = list(existing) if isinstance(existing, list) else ([existing] if existing else [])
@@ -198,8 +206,7 @@ class IngestFullOperator(SparkSubmitOperator):
 
     The full loader never touches the incremental registry, so the driver
     receives no pg-meta credentials: lifecycle logging (START/END/FAILED)
-    stays on the Airflow side through TableLogOperator and the failure
-    callback.
+    stays on the Airflow side through best-effort task callbacks.
     """
 
     def __init__(

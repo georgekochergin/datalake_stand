@@ -183,6 +183,40 @@ def main():
     connection = PostgresHook(postgres_conn_id="ingestion_meta").get_conn()
     try:
         with connection.cursor() as cursor:
+            events = records(
+                cursor,
+                "SELECT t.*, d.run_id FROM ingestion.airflow_tasks_log t "
+                "JOIN ingestion.airflow_dagruns_log d ON d.process_id = t.process_id "
+                "AND d.status = 'START' WHERE d.run_id LIKE 'e2e-%' ORDER BY t.id",
+            )
+            require(bool(events), "load callbacks recorded lifecycle events")
+            lifecycle = defaultdict(list)
+            initial_loads = defaultdict(list)
+            for event in events:
+                lifecycle[event["process_id"], event["datalake_table"]].append(event["status"])
+                if event["run_id"].startswith(("e2e-ingest1-", "e2e-snap1-")):
+                    initial_loads[event["process_id"], event["datalake_table"]].append(event["status"])
+            for statuses in lifecycle.values():
+                require(statuses[0] == "START", "load lifecycle starts with START")
+                require(all(status in {"START", "END", "FAILED"} for status in statuses),
+                        "load callbacks use lifecycle statuses")
+            require(any("END" in statuses for statuses in lifecycle.values()),
+                    "successful load callbacks recorded END")
+            require(any("FAILED" in statuses for statuses in lifecycle.values()),
+                    "failed load callbacks recorded FAILED")
+            expected_targets = {
+                "raw.bank.retail_bank__clients", "raw.bank.retail_bank__deals",
+                "raw.bank.retail_bank__transactions", "raw.bank.retail_bank__accounts",
+                "raw.broker.trading_core__clients", "raw.broker.trading_core__deals",
+                "raw.broker.trading_core__transactions", "raw.broker.trading_core__accounts",
+                "raw.bank.retail_bank__transactions__act_snap",
+                "raw.broker.trading_core__transactions__act_snap",
+            }
+            require({target for _, target in initial_loads} == expected_targets,
+                    "full, incremental and snapshot loads recorded lifecycle events")
+            require(all(statuses[0] == "START" and statuses[-1] == "END"
+                        for statuses in initial_loads.values()),
+                    "initial successful loads recorded START and END")
             states = records(cursor, "SELECT * FROM ingestion.incremental_state WHERE source_id IN ('bank', 'broker')")
             batches = records(
                 cursor,
