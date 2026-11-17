@@ -6,7 +6,7 @@ services:
       - SYDAFA_CONTAINER_PREFIX=${SYDAFA_CONTAINER_PREFIX:-sydafa-dlh-test}
     volumes: !override
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./test/.workspace/conf/sydafa/sources.json:/app/config/sources.json:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/conf/sydafa/sources.json:/app/config/sources.json:ro
       - sydafa_state:/state
       - sydafa_bank_data:/source-volumes/bank
       - sydafa_broker_data:/source-volumes/broker
@@ -21,7 +21,7 @@ services:
   pg-meta:
     volumes: !override
       - pg_meta_data:/var/lib/postgresql/data
-      - ./test/.workspace/conf/pg-meta/init:/docker-entrypoint-initdb.d:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/conf/pg-meta/init:/docker-entrypoint-initdb.d:ro
     ports: !override []
 
   nessie:
@@ -31,66 +31,73 @@ services:
     ports: !override []
 
   spark-master:
+    image: dlh-test-spark:latest
     volumes: !override
-      - ./test/.workspace/ingestion/spark:/opt/spark-jobs:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/ingestion/spark:/opt/spark-jobs:ro
     ports: !override []
 
   spark-worker:
+    image: dlh-test-spark:latest
     volumes: !override
-      - ./test/.workspace/ingestion/spark:/opt/spark-jobs:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/ingestion/spark:/opt/spark-jobs:ro
     ports: !override []
 
   trino-init:
     volumes: !override
-      - ./test/.workspace/conf/trino/init-auth.sh:/init-auth.sh:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/conf/trino/init-auth.sh:/init-auth.sh:ro
       - trino_auth:/auth
 
   trino:
     volumes: !override
-      - ./test/.workspace/conf/trino/catalog:/etc/trino/catalog:ro
-      - ./test/.workspace/conf/trino/config.properties:/etc/trino/config.properties:ro
-      - ./test/.workspace/conf/trino/password-authenticator.properties:/etc/trino/password-authenticator.properties:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/conf/trino/catalog:/etc/trino/catalog:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/conf/trino/config.properties:/etc/trino/config.properties:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/conf/trino/password-authenticator.properties:/etc/trino/password-authenticator.properties:ro
       - trino_auth:/auth:ro
-      - ./test/.workspace/conf/trino/keystore.p12:/etc/trino/keystore.p12:ro
-      - ./test/.workspace/trino:/opt/trino-sql:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/conf/trino/keystore.p12:/etc/trino/keystore.p12:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/trino:/opt/trino-sql:ro
     ports: !override []
 
   airflow-init:
+    image: dlh-test-airflow:latest
     volumes: !override
-      - ./test/.workspace/airflow/dags:/opt/airflow/dags
-      - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/airflow/dags:/opt/airflow/dags
+      - ./test/${TEST_WS_DIR:-.workspace}/airflow/plugins:/opt/airflow/plugins:ro
 
   airflow-scheduler:
+    image: dlh-test-airflow:latest
     volumes: !override
-      - ./test/.workspace/airflow/dags:/opt/airflow/dags
-      - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
-      - ./test/.workspace/ingestion:/opt/python/ingestion:ro
-      - ./test/.workspace/ingestion/spark:/opt/spark-jobs:ro
-      - ./test/.workspace/trino:/opt/airflow/sql:ro
-      - ./test/.workspace:/workspace:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/airflow/dags:/opt/airflow/dags
+      - ./test/${TEST_WS_DIR:-.workspace}/airflow/plugins:/opt/airflow/plugins:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/ingestion:/opt/python/ingestion:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/ingestion/spark:/opt/spark-jobs:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/trino:/opt/airflow/sql:ro
+      - ./test/${TEST_WS_DIR:-.workspace}:/workspace:ro
       - airflow_logs:/opt/airflow/logs
 
   airflow-dag-processor:
+    image: dlh-test-airflow:latest
     volumes: !override
-      - ./test/.workspace/airflow/dags:/opt/airflow/dags
-      - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
-      - ./test/.workspace/ingestion:/opt/python/ingestion:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/airflow/dags:/opt/airflow/dags
+      - ./test/${TEST_WS_DIR:-.workspace}/airflow/plugins:/opt/airflow/plugins:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/ingestion:/opt/python/ingestion:ro
       - airflow_logs:/opt/airflow/logs
 
   airflow-webserver:
+    image: dlh-test-airflow:latest
     volumes: !override
-      - ./test/.workspace/airflow/dags:/opt/airflow/dags
-      - ./test/.workspace/airflow/plugins:/opt/airflow/plugins:ro
-      - ./test/.workspace/ingestion:/opt/python/ingestion:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/airflow/dags:/opt/airflow/dags
+      - ./test/${TEST_WS_DIR:-.workspace}/airflow/plugins:/opt/airflow/plugins:ro
+      - ./test/${TEST_WS_DIR:-.workspace}/ingestion:/opt/python/ingestion:ro
       - airflow_logs:/opt/airflow/logs
     ports: !override []
 
   test-runner:
     volumes: !override
-      - ./test/.workspace:/workspace:ro
+      - ./test/${TEST_WS_DIR:-.workspace}:/workspace:ro
       - sydafa_state:/state:ro
     environment:
       - SYDAFA_CONTAINER_PREFIX=${SYDAFA_CONTAINER_PREFIX:-sydafa-dlh-test}
+      - E2E_SOURCE=${E2E_SOURCE:-bank}
     depends_on: !override
       sydafa:
         condition: service_healthy

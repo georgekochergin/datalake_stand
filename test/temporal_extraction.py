@@ -4,7 +4,7 @@
 import importlib.util
 import os
 import re
-from argparse import Namespace
+from argparse import ArgumentParser, Namespace
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -548,6 +548,8 @@ def check_partitioning(spark, source_jdbc):
          None),
     )
     for source, table, column, zone_type, zone_sql, zone_scale in fixtures:
+        if source not in source_jdbc:
+            continue
         jdbc_url, user, password = source_jdbc[source]
         dialect = dialects.by_jdbc_url(jdbc_url)
         args = Namespace(jdbc_url=jdbc_url, jdbc_user=user,
@@ -613,6 +615,8 @@ def check_partitioned_load_path(spark, source_jdbc):
                       "broker": jdbc_partitioning.STEP_TIMESTAMP_DAY}
     for source, table, column in (("bank", "retail_bank.transactions", "posting_date"),
                                    ("broker", "trading_core.transactions", "posting_date")):
+        if source not in source_jdbc:
+            continue
         jdbc_url, user, password = source_jdbc[source]
         dialect = dialects.by_jdbc_url(jdbc_url)
         target = f"raw.e2e_contract.{source}_day_partition_path"
@@ -649,6 +653,9 @@ def check_partitioned_load_path(spark, source_jdbc):
 
 def main():
     """Run inside airflow-scheduler with Spark defaults and loaded source data."""
+    parser = ArgumentParser()
+    parser.add_argument("--source", choices=("bank", "broker"), required=True)
+    selected = parser.parse_args().source
     from airflow.hooks.base import BaseHook
     from airflow.models.connection import Connection
     from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -668,13 +675,14 @@ def main():
             source: resolve_source_connection(
                 session.query(Connection).filter_by(conn_id=f"{source}_source").one()
             )
-            for source in ("bank", "broker")
+            for source in (selected,)
         }
     token = "e2e-temporal-" + uuid4().hex
     spark = SparkSession.builder.appName("e2e-temporal-extraction").getOrCreate()
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     try:
-        check_post_append_retry(spark, hook, source_jdbc["bank"], token)
+        if selected == "bank":
+            check_post_append_retry(spark, hook, source_jdbc["bank"], token)
         for source, jdbc in source_jdbc.items():
             check_snapshot_recovery(spark, hook, source, jdbc, token)
         check_partitioning(spark, source_jdbc)
@@ -683,6 +691,8 @@ def main():
             ("bank", "retail_bank.transactions", "date"),
             ("broker", "trading_core.transactions", "timestamp_local(0)"),
         ):
+            if source not in source_jdbc:
+                continue
             jdbc = source_jdbc[source]
             exercise(spark, hook, source, jdbc, table, f"{source}_temporal", "posting_date", kind, token)
             for name, query, fixture_kind, upper, column in precision_fixtures(source):

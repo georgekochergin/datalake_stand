@@ -36,7 +36,7 @@ class StandConfigTests(unittest.TestCase):
 
     def test_cleanup_scopes_sources_and_volumes(self):
         script = (ROOT / "test/test.sh").read_text()
-        cleanup = script.split("cleanup() {", 1)[1].split("\ntrap cleanup", 1)[0]
+        cleanup = script.split("cleanup() {", 1)[1].split("\nrun_stack()", 1)[0]
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / "docker.log"
             harness = r'''
@@ -97,13 +97,14 @@ cleanup() {
         self.assertIn("COMPOSE_PROJECT_NAME", result.stdout)
 
     def test_workspace_source_ports_are_disabled(self):
-        script = (ROOT / "test/test.sh").read_text()
-        preparation = script.split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        import sys
+        sys.path.insert(0, str(ROOT / "test"))
+        from e2e_scale import prepare_workspace
+
         with tempfile.TemporaryDirectory() as directory:
-            manifest = Path(directory) / "sources.json"
-            shutil.copyfile(ROOT / "conf/sydafa/sources.json", manifest)
-            with patch("sys.argv", ["prepare", str(manifest)]):
-                exec(compile(preparation, "workspace-preparation", "exec"), {})
+            workspace = Path(directory) / "workspace"
+            prepare_workspace(ROOT, workspace, "bank")
+            manifest = workspace / "conf/sydafa/sources.json"
             for source in json.loads(manifest.read_text())["sources"].values():
                 self.assertNotIn("external_port", source)
 
