@@ -8,25 +8,48 @@ if [[ ! "${COMPOSE_PROJECT_NAME:-dlh-test}" =~ ^dlh-test(-[a-z0-9]+)*$ ]]; then
   exit 1
 fi
 MODE=full
-SOURCE=""
+SOURCES=()
+sources_given=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --verify) MODE=verify; shift ;;
-    --source)
-      [ $# -ge 2 ] || { echo 'FAIL: --source требует bank или broker'; exit 1; }
-      SOURCE="$2"; shift 2 ;;
+    --sources)
+      [ "$sources_given" = 0 ] || { echo 'FAIL: --sources указан повторно'; exit 1; }
+      sources_given=1
+      shift
+      while [ $# -gt 0 ] && [[ "$1" != -* ]]; do
+        SOURCES+=("$1")
+        shift
+      done
+      [ "${#SOURCES[@]}" -gt 0 ] || { echo 'FAIL: --sources требует список источников'; exit 1; } ;;
     --help|-h)
-      echo "Использование: $0 | $0 --verify --source bank|broker"
+      echo "Использование: $0 [--sources <имя> [<имя>]] | $0 --verify --sources <имя>"
       echo 'Сначала: python3 -m pytest'
       exit 0 ;;
     *) echo "FAIL: Неизвестный аргумент: $1"; exit 1 ;;
   esac
 done
-if { [ "$MODE" = verify ] && [[ ! "$SOURCE" =~ ^(bank|broker)$ ]]; } ||
-   { [ "$MODE" = full ] && [ -n "$SOURCE" ]; }; then
-  echo 'FAIL: --source bank|broker используется только вместе с --verify.'
-  exit 1
-fi
+selected=$(python3 - "$MODE" ${SOURCES[@]+"${SOURCES[@]}"} <<'PY'
+import re
+import sys
+import yaml
+
+with open("ingestion/conf/sources.yaml") as stream:
+    configured = yaml.safe_load(stream)
+selected = sys.argv[2:] or list(configured)
+if not 1 <= len(selected) <= 2:
+    sys.exit("FAIL: Допустимо максимум два источника; перечислите их через --sources.")
+if len(set(selected)) != len(selected):
+    sys.exit("FAIL: Дубликаты источников запрещены.")
+if any(source not in configured or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", source) for source in selected):
+    sys.exit("FAIL: Неизвестное или небезопасное имя источника из sources.yaml.")
+if sys.argv[1] == "verify" and (len(sys.argv[2:]) != 1):
+    sys.exit("FAIL: --verify требует ровно один источник через --sources.")
+print("\n".join(selected))
+PY
+) || exit 1
+SOURCES=()
+while IFS= read -r source; do SOURCES+=("$source"); done <<< "$selected"
 
 configure_stack() {
   export E2E_SOURCE="$1"
@@ -43,19 +66,19 @@ run_temporal_checks() {
 
 run_post_checks() (
   temporal_pid=""
+  schema_pid=""
   rc=0
   run_temporal_checks &
   temporal_pid=$!
-  trap 'kill -TERM "$temporal_pid" 2>/dev/null || true; wait "$temporal_pid" 2>/dev/null || true' EXIT
+  "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler spark-submit --master spark://spark-master:7077 --deploy-mode client --conf spark.cores.max=2 /opt/spark-jobs/e2e_schema_evolution.py &
+  schema_pid=$!
+  trap 'kill -TERM "$temporal_pid" "$schema_pid" 2>/dev/null || true; wait "$temporal_pid" 2>/dev/null || true; wait "$schema_pid" 2>/dev/null || true' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM HUP
-  if [ "$E2E_SOURCE" = bank ]; then
-    "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler python /opt/airflow/plugins/e2e_check_spark_guard.py
-  else
-    "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler bash -c 'EXTRACTION_TEST_DSN="host=pg-meta port=5432 dbname=meta user=$STAND_USER password=$STAND_PASSWORD" python /opt/airflow/plugins/e2e_check_meta.py -v'
-    "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler spark-submit --master spark://spark-master:7077 --deploy-mode client --conf spark.cores.max=2 /opt/spark-jobs/e2e_schema_evolution.py
-  fi
+  "${COMPOSE[@]}" exec -T -e E2E_SOURCE="$E2E_SOURCE" -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler python /opt/airflow/plugins/e2e_check_spark_guard.py
+  "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler bash -c 'EXTRACTION_TEST_DSN="host=pg-meta port=5432 dbname=meta user=$STAND_USER password=$STAND_PASSWORD" python /opt/airflow/plugins/e2e_check_meta.py -v'
   wait "$temporal_pid" || rc=$?
+  wait "$schema_pid" || rc=$?
   trap - EXIT
   return "$rc"
 )
@@ -71,10 +94,10 @@ run_runtime_checks() {
 }
 
 if [ "$MODE" = verify ]; then
-  configure_stack "$SOURCE"
+   configure_stack "${SOURCES[0]}"
   started=$SECONDS
   run_runtime_checks
-  echo "E2E_VERIFY_SECONDS=$((SECONDS - started)) source=$SOURCE"
+   echo "E2E_VERIFY_SECONDS=$((SECONDS - started)) source=$E2E_SOURCE"
   exit 0
 fi
 
@@ -113,6 +136,7 @@ run_stack() (
   trap 'exit 130' INT
   trap 'exit 143' TERM HUP
   started=$SECONDS
+  echo "E2E_PHASE=prepare_start source=$E2E_SOURCE elapsed=0"
   python3 - "$PROJECT_ROOT" "$TEST_WS" "$E2E_SOURCE" <<'PY'
 import sys
 sys.path.insert(0, "test/e2e/python")
@@ -120,28 +144,33 @@ from e2e_scale import prepare_workspace
 
 prepare_workspace(*sys.argv[1:])
 PY
+  echo "E2E_PHASE=prepare_done source=$E2E_SOURCE elapsed=$((SECONDS - started))"
   "${COMPOSE[@]}" up -d --no-build --pull never
+  echo "E2E_PHASE=compose_up_done source=$E2E_SOURCE elapsed=$((SECONDS - started))"
+  echo "E2E_PHASE=runtime_start source=$E2E_SOURCE elapsed=$((SECONDS - started))"
   run_runtime_checks
+  echo "E2E_PHASE=runtime_done source=$E2E_SOURCE elapsed=$((SECONDS - started))"
   "${COMPOSE[@]}" down --remove-orphans --volumes
   if [ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME")" ] ||
      [ -n "$(docker network ls -q --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME")" ]; then
     echo 'FAIL: После Compose down остались контейнеры или сеть проекта.'
     exit 1
   fi
-  for volume in "$SYDAFA_CONTAINER_PREFIX-data-mssql-bank" "$SYDAFA_CONTAINER_PREFIX-data-oracle-broker"; do
-    if docker volume inspect "$volume" >/dev/null 2>&1; then
+  while IFS= read -r volume; do
+    if [[ "$volume" = "$SYDAFA_CONTAINER_PREFIX"-data-* ]]; then
       echo "FAIL: После Compose down остался том $volume."
       exit 1
     fi
-  done
+  done < <(docker volume ls -q)
   cleanup
   trap - EXIT
   echo "PASS Compose cleanup; FAIL=0; E2E_STACK_SECONDS=$((SECONDS - started)) source=$E2E_SOURCE"
 )
 
 memory=$(docker info --format '{{.MemTotal}}')
-if [[ ! "$memory" =~ ^[0-9]+$ ]] || [ "$memory" -lt 21474836480 ]; then
-  echo 'FAIL: Для двух стеков требуется минимум 20 GiB памяти Docker VM (рекомендуется 24 GiB).'
+required_gib=$((10 * ${#SOURCES[@]}))
+if [[ ! "$memory" =~ ^[0-9]+$ ]] || [ "$memory" -lt "$((required_gib * 1073741824))" ]; then
+   echo "FAIL: Для выбранных стеков требуется минимум $required_gib GiB памяти Docker VM (10 GiB на стек)."
   exit 1
 fi
 started=$SECONDS
@@ -155,7 +184,7 @@ finish() {
   for pid in ${PIDS[@]+"${PIDS[@]}"}; do kill -TERM "$pid" 2>/dev/null || true; done
   for pid in ${PIDS[@]+"${PIDS[@]}"}; do wait "$pid" 2>/dev/null || true; done
   if [ "$OWNED" = 1 ]; then
-    for source in bank broker; do
+    for source in "${SOURCES[@]}"; do
       configure_stack "$source"
       cleanup
     done
@@ -164,7 +193,7 @@ finish() {
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
-for source in bank broker; do
+for source in "${SOURCES[@]}"; do
   configure_stack "$source"
   if [ -d "$TEST_WS" ] || [ -n "$("${COMPOSE[@]}" ps -aq)" ]; then
     echo "FAIL: Контур $COMPOSE_PROJECT_NAME уже существует; не запускайте два прогона одновременно."
@@ -178,21 +207,21 @@ SYDAFA_IMG="${SYDAFA_IMAGE:-ghcr.io/georgekochergin/sydafa:latest}"
 if ! docker image inspect "$SYDAFA_IMG" >/dev/null 2>&1; then
   docker pull --platform linux/amd64 "$SYDAFA_IMG"
 fi
-configure_stack bank
+configure_stack "${SOURCES[0]}"
 if [ "${TEST_SKIP_BUILD:-0}" != 1 ]; then
   "${COMPOSE[@]}" --profile test build
 fi
-for source in bank broker; do
+for source in "${SOURCES[@]}"; do
   run_stack "$source" >"$LOG_DIR/$source.log" 2>&1 &
   PIDS+=("$!")
 done
 rc=0
 index=0
-for source in bank broker; do
+for source in "${SOURCES[@]}"; do
   stack_rc=0
   wait "${PIDS[$index]}" || stack_rc=$?
   echo "==> $source: exit=$stack_rc; log=$LOG_DIR/$source.log"
-  grep -E 'PASS=[0-9]+ FAIL=[0-9]+|FAIL=0|E2E_STACK_SECONDS=' "$LOG_DIR/$source.log" || true
+  grep -E 'PASS=[0-9]+ FAIL=[0-9]+|FAIL=0|E2E_STACK_SECONDS=|E2E_PHASE=' "$LOG_DIR/$source.log" || true
   if [ "$stack_rc" -ne 0 ]; then
     tail -n 60 "$LOG_DIR/$source.log"
     rc=1

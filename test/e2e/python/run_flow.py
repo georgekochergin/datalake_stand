@@ -86,6 +86,8 @@ RAW_INCREMENTAL_TABLES = [
     "raw.broker.trading_core__transactions",
 ]
 
+ENTITY_PREFIXES = {"bank": "retail_bank", "broker": "trading_core"}
+
 EVOLUTION_SOURCES = {
     "bank": {
         "engine": "mssql",
@@ -1123,7 +1125,7 @@ def main() -> None:
             check(table + ": single load timestamp", timestamps, 1)
             check(table + ": exact storage prefix without UUID", bad_paths, 0)
         for source in SOURCES:
-            prefix = "retail_bank" if source == "bank" else "trading_core"
+            prefix = ENTITY_PREFIXES[source]
             for pipeline, tables in (("main", ("deals", "transactions")), ("refs", ("clients", "accounts"))):
                 ids = {max_pids[f"raw.{source}.{prefix}__{table}"] for table in tables}
                 check(f"{source}/{pipeline} shares process_id", len(ids), 1)
@@ -1228,9 +1230,6 @@ def main() -> None:
     except Exception as e:
         check("snapshot tables query (run 1)", str(e), "ok")
 
-    if "broker" not in SOURCES:
-        run_source_schema_evolution(token, stamp)
-        return
     print("\n==> Шаг 8: Повторный снимок — атомарная перезапись, а не накопление...")
     dag_id = SNAPSHOT_DAGS[0]
     table = next(iter(ACT_SNAPSHOT_TABLES))

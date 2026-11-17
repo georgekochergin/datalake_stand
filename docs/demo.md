@@ -277,7 +277,7 @@ WHERE username = 'SYDAFA' AND program LIKE 'JDBC%';
 
 **[Пул](glossary.md#term-pool) Airflow**: Admin → [Pools](glossary.md#term-pool) → `ingest_loads`:
 
-- Ёмкость — 4 [слота](glossary.md#term-slot).
+- Ёмкость — 6 [слотов](glossary.md#term-slot).
 - `transactions` занимает 2 [слота](glossary.md#term-slot), остальные загрузки — по 1.
 - Во время загрузок колонки Running/Queued [Slots](glossary.md#term-slot) оживают.
 - На главной странице есть виджет [Pool](glossary.md#term-pool) [Slots](glossary.md#term-slot).
@@ -287,7 +287,7 @@ WHERE username = 'SYDAFA' AND program LIKE 'JDBC%';
 - [Манифест](glossary.md#term-manifest) описывает, какие таблицы загружать и с какими настройками.
 - Чтобы добавить [полный срез](glossary.md#term-full) таблицы, достаточно записи с её `fqn`.
 - [Пул](glossary.md#term-pool) `ingest_loads` ограничивает число одновременно допущенных загрузок.
-  В нём 4 [слота](glossary.md#term-slot): transactions занимает 2, остальные загрузки — по 1.
+  В нём 6 [слотов](glossary.md#term-slot): transactions занимает 2, остальные загрузки — по 1.
 
 ## Шаг 4. Результат в Trino (DBeaver) и артефакты в pg-meta
 

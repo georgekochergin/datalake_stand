@@ -229,7 +229,7 @@ services:
           airflow connections add ingestion_meta \
             --conn-type postgres --conn-host pg-meta --conn-port 5432 --conn-schema meta \
             --conn-login "$${STAND_USER}" --conn-password "$${STAND_PASSWORD}"
-        airflow pools set ingest_loads 4 'Raw-layer ingestion load tasks (shared across ingest DAGs)'
+        airflow pools set ingest_loads 6 'Raw-layer ingestion load tasks (shared across ingest DAGs)'
     environment: &airflow-env
       <<: *spark-env
       PYTHONPATH: /opt/python

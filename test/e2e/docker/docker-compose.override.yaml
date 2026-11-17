@@ -107,8 +107,6 @@ services:
     depends_on: !override
       sydafa:
         condition: service_healthy
-      airflow-webserver:
-        condition: service_started
 
   airflow-postgres:
     healthcheck:

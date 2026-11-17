@@ -8,7 +8,6 @@ import shutil
 
 import yaml
 
-SOURCES = ("bank", "broker")
 APPEND_ROWS = {"clients": 10, "accounts": 10, "deals": 100, "transactions": 100}
 MAX_ROWS = 100
 
@@ -46,9 +45,11 @@ def disable_retries(text):
 
 def prepare_workspace(root, destination, source):
     """Copy current files and retain exactly one source in disposable configuration."""
-    if source not in SOURCES:
-        raise ValueError(f"Unknown e2e source: {source}")
     root, destination = Path(root), Path(destination)
+    configured = yaml.safe_load((root / "ingestion/conf/sources.yaml").read_text())
+    manifest = json.loads((root / "conf/sydafa/sources.json").read_text())
+    if source not in configured or source not in manifest["sources"]:
+        raise ValueError(f"Unknown e2e source: {source}")
     for name in ("conf", "airflow", "ingestion", "trino"):
         if (root / name).exists():
             shutil.copytree(root / name, destination / name,
