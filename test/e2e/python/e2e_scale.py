@@ -82,6 +82,5 @@ def prepare_workspace(root, destination, source):
         "temporal_extraction.py": "ingestion/spark/e2e_temporal_extraction.py",
     }
     for original, target in copies.items():
-        shutil.copy2(root / "test" / original, destination / target)
-    shutil.copytree(root / "test/unit", destination / "test/unit",
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copy2(root / "test/e2e/python" / original, destination / target)
+    shutil.copy2(root / "test/e2e/python/check_meta.py", destination / "airflow/plugins/e2e_check_meta.py")

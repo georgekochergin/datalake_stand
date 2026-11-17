@@ -305,10 +305,10 @@ services:
         condition: service_completed_successfully
     networks: [dlh-poc]
 
-  # ---------- Полный тестовый флоу (запускается через test/test.sh) ----------
+  # ---------- Полный тестовый флоу (запускается через test/e2e/shell/test.sh) ----------
 
   test-runner:
-    build: ./test
+    build: {context: ./test/e2e, dockerfile: docker/Dockerfile}
     image: dlh-poc-test-runner
     pull_policy: build
     profiles: ["test"]

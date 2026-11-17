@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Python-проверки запускаются отдельно перед этим параллельным e2e.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../../.."
 PROJECT_ROOT="$(pwd)"
 if [[ ! "${COMPOSE_PROJECT_NAME:-dlh-test}" =~ ^dlh-test(-[a-z0-9]+)*$ ]]; then
   echo "FAIL: COMPOSE_PROJECT_NAME должен быть dlh-test или dlh-test-<суффикс>."
@@ -17,7 +17,7 @@ while [ $# -gt 0 ]; do
       SOURCE="$2"; shift 2 ;;
     --help|-h)
       echo "Использование: $0 | $0 --verify --source bank|broker"
-      echo 'Сначала: python3 -m unittest discover -s test/unit'
+      echo 'Сначала: python3 -m pytest'
       exit 0 ;;
     *) echo "FAIL: Неизвестный аргумент: $1"; exit 1 ;;
   esac
@@ -34,24 +34,40 @@ configure_stack() {
   export SYDAFA_CONTAINER_PREFIX="sydafa-$COMPOSE_PROJECT_NAME"
   export TEST_WS_DIR=".workspace-$1"
   TEST_WS="$PROJECT_ROOT/test/$TEST_WS_DIR"
-  COMPOSE=(docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yaml -f test/docker-compose.override.yaml)
+  COMPOSE=(docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yaml -f test/e2e/docker/docker-compose.override.yaml)
 }
 
+run_temporal_checks() {
+  "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler spark-submit --master spark://spark-master:7077 --deploy-mode client --conf spark.cores.max=2 /opt/spark-jobs/e2e_temporal_extraction.py --source "$E2E_SOURCE"
+}
+
+run_post_checks() (
+  temporal_pid=""
+  rc=0
+  run_temporal_checks &
+  temporal_pid=$!
+  trap 'kill -TERM "$temporal_pid" 2>/dev/null || true; wait "$temporal_pid" 2>/dev/null || true' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM HUP
+  if [ "$E2E_SOURCE" = bank ]; then
+    "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler python /opt/airflow/plugins/e2e_check_spark_guard.py
+  else
+    "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler bash -c 'EXTRACTION_TEST_DSN="host=pg-meta port=5432 dbname=meta user=$STAND_USER password=$STAND_PASSWORD" python /opt/airflow/plugins/e2e_check_meta.py -v'
+    "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler spark-submit --master spark://spark-master:7077 --deploy-mode client --conf spark.cores.max=2 /opt/spark-jobs/e2e_schema_evolution.py
+  fi
+  wait "$temporal_pid" || rc=$?
+  trap - EXIT
+  return "$rc"
+)
+
 run_runtime_checks() {
-  if [ ! -f "$TEST_WS/ingestion/spark/e2e_schema_evolution.py" ] || [ ! -f "$TEST_WS/ingestion/spark/e2e_temporal_extraction.py" ] || [ ! -f "$TEST_WS/test/unit/test_meta.py" ] || [ ! -f "$TEST_WS/airflow/plugins/e2e_check_spark_guard.py" ] || [ ! -f "$TEST_WS/ingestion/spark/e2e_guard_idle.py" ]; then
+  if [ ! -f "$TEST_WS/ingestion/spark/e2e_schema_evolution.py" ] || [ ! -f "$TEST_WS/ingestion/spark/e2e_temporal_extraction.py" ] || [ ! -f "$TEST_WS/airflow/plugins/e2e_check_meta.py" ] || [ ! -f "$TEST_WS/airflow/plugins/e2e_check_spark_guard.py" ] || [ ! -f "$TEST_WS/ingestion/spark/e2e_guard_idle.py" ]; then
     echo 'FAIL: Отсутствуют workspace-артефакты; сначала выполните полный запуск.'
     return 1
   fi
   "${COMPOSE[@]}" run --rm --no-deps test-runner python -u /app/run_flow.py
   "${COMPOSE[@]}" exec -T -e E2E_SOURCE="$E2E_SOURCE" -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler python /opt/airflow/plugins/e2e_check_extraction.py
-  if [ "$E2E_SOURCE" = bank ]; then
-    "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler python /opt/airflow/plugins/e2e_check_spark_guard.py
-  fi
-  if [ "$E2E_SOURCE" = broker ]; then
-    "${COMPOSE[@]}" exec -T airflow-scheduler bash -c 'EXTRACTION_TEST_DSN="host=pg-meta port=5432 dbname=meta user=$STAND_USER password=$STAND_PASSWORD" python /workspace/test/unit/test_meta.py -v'
-    "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler spark-submit --master spark://spark-master:7077 --deploy-mode client /opt/spark-jobs/e2e_schema_evolution.py
-  fi
-  "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler spark-submit --master spark://spark-master:7077 --deploy-mode client /opt/spark-jobs/e2e_temporal_extraction.py --source "$E2E_SOURCE"
+  run_post_checks
 }
 
 if [ "$MODE" = verify ]; then
@@ -99,7 +115,7 @@ run_stack() (
   started=$SECONDS
   python3 - "$PROJECT_ROOT" "$TEST_WS" "$E2E_SOURCE" <<'PY'
 import sys
-sys.path.insert(0, "test")
+sys.path.insert(0, "test/e2e/python")
 from e2e_scale import prepare_workspace
 
 prepare_workspace(*sys.argv[1:])

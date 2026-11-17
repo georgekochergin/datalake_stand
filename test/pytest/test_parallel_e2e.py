@@ -17,7 +17,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "test"))
+sys.path.insert(0, str(ROOT / "test/e2e/python"))
 from e2e_scale import APPEND_ROWS, disable_retries, prepare_workspace, scale_migration
 from ingestion.generator.generate_dags import generate_all
 from ingestion.generator.manifest import load_sources
@@ -25,6 +25,17 @@ from ingestion.generator.manifest import load_sources
 
 class ParallelE2ETests(unittest.TestCase):
     """Preserve production defaults while preparing bounded test-only copies."""
+
+    def test_test_tree_separates_host_and_runtime_checks(self):
+        config = (ROOT / "pytest.ini").read_text()
+        self.assertIn("testpaths = test/pytest", config)
+        runtime = ROOT / "test/e2e/python"
+        self.assertTrue((runtime / "check_meta.py").is_file())
+        self.assertFalse(any(runtime.glob("test_*.py")))
+        self.assertNotIn("EXTRACTION_TEST_DSN", (ROOT / "test/pytest/test_meta.py").read_text())
+        flow = (runtime / "run_flow.py").read_text()
+        self.assertNotIn("DROP TABLE", flow)
+        self.assertNotIn("rejects injected column", flow)
 
     def test_scale_invariants_and_input_unchanged(self):
         for source in ("bank", "broker"):
@@ -92,20 +103,20 @@ class ParallelE2ETests(unittest.TestCase):
 
     def test_existing_manifest_contracts_run_as_unit(self):
         with patch.dict(os.environ, {"E2E_SOURCE": "all", "WORKSPACE_DIR": str(ROOT)}), patch.dict(sys.modules):
-            sys.path.insert(0, str(ROOT / "test"))
+            sys.path.insert(0, str(ROOT / "test/e2e/python"))
             try:
-                spec = importlib.util.spec_from_file_location("e2e_static_contracts", ROOT / "test/run_flow.py")
+                spec = importlib.util.spec_from_file_location("e2e_static_contracts", ROOT / "test/e2e/python/run_flow.py")
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
                 module.validate_manifests_and_dags()
                 self.assertEqual(module.FAIL, 0)
             finally:
-                sys.path.remove(str(ROOT / "test"))
+                sys.path.remove(str(ROOT / "test/e2e/python"))
 
     def test_source_runtime_inventory(self):
         for selected in ("bank", "broker"):
             with patch.dict(os.environ, {"E2E_SOURCE": selected}):
-                spec = importlib.util.spec_from_file_location("isolated_flow", ROOT / "test/run_flow.py")
+                spec = importlib.util.spec_from_file_location("isolated_flow", ROOT / "test/e2e/python/run_flow.py")
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
                 self.assertEqual(module.SOURCES, (selected,))
@@ -160,7 +171,7 @@ class ParallelE2ETests(unittest.TestCase):
                            "E2E_SOURCE": source}
             result = subprocess.run(
                 ["docker", "compose", "-p", f"dlh-test-{source}", "-f", "docker-compose.yaml",
-                 "-f", "test/docker-compose.override.yaml", "--profile", "test", "config", "--format", "json"],
+                 "-f", "test/e2e/docker/docker-compose.override.yaml", "--profile", "test", "config", "--format", "json"],
                 cwd=ROOT, env=environment, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, "Compose config failed")
             services = json.loads(result.stdout)["services"]
@@ -179,7 +190,7 @@ class ParallelE2ETests(unittest.TestCase):
             log = Path(directory) / "calls"
             executable.write_text('#!/bin/bash\necho "$*" >> "$DOCKER_CALLS"\nif [ "$1" = info ]; then echo 16748032000; else exit 99; fi\n')
             executable.chmod(0o755)
-            result = subprocess.run(["bash", str(ROOT / "test/test.sh")],
+            result = subprocess.run(["bash", str(ROOT / "test/e2e/shell/test.sh")],
                                     env={**os.environ, "PATH": directory + ":" + os.environ["PATH"],
                                          "DOCKER_CALLS": str(log), "COMPOSE_PROJECT_NAME": "dlh-test"},
                                     capture_output=True, text=True)
@@ -187,12 +198,47 @@ class ParallelE2ETests(unittest.TestCase):
             self.assertIn("20 GiB", result.stdout)
             self.assertEqual(len(log.read_text().splitlines()), 1)
 
+    def test_parallel_post_checks_join_temporal_and_propagate_each_failure(self):
+        script = (ROOT / "test/e2e/shell/test.sh").read_text()
+        functions = script.split("run_temporal_checks() {", 1)[1].split("run_runtime_checks() {", 1)[0]
+        for source in ("bank", "broker"):
+            for failure in ("none", "temporal", "foreground"):
+                with self.subTest(source=source, failure=failure), tempfile.TemporaryDirectory() as directory:
+                    harness = r'''
+set -euo pipefail
+compose() {
+  case "$*" in
+    *e2e_temporal_extraction.py*)
+      touch "$SANDBOX/temporal-started"
+      for attempt in {1..100}; do
+        [ -f "$SANDBOX/foreground-started" ] && break
+        sleep 0.01
+      done
+      [ -f "$SANDBOX/foreground-started" ] || return 99
+      [ "$FAILURE" != temporal ] || return 7
+      touch "$SANDBOX/temporal-finished" ;;
+    *)
+      touch "$SANDBOX/foreground-started"
+      [ "$FAILURE" != foreground ] || return 8 ;;
+  esac
+}
+COMPOSE=(compose)
+run_temporal_checks() {
+''' + functions + "\nrun_post_checks\n"
+                    result = subprocess.run(["bash", "-c", harness],
+                                            env={**os.environ, "SANDBOX": directory,
+                                                 "E2E_SOURCE": source, "FAILURE": failure},
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, {"none": 0, "temporal": 7, "foreground": 8}[failure], result.stderr)
+                    if failure == "none":
+                        self.assertTrue((Path(directory) / "temporal-finished").exists())
+
     def test_parallel_orchestrator_builds_once_and_propagates_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "test").mkdir()
-            shutil_script = ROOT / "test/test.sh"
-            (root / "test/test.sh").write_bytes(shutil_script.read_bytes())
+            (root / "test/e2e/shell").mkdir(parents=True)
+            shutil_script = ROOT / "test/e2e/shell/test.sh"
+            (root / "test/e2e/shell/test.sh").write_bytes(shutil_script.read_bytes())
             (root / "bin").mkdir()
             log = root / "calls"
             docker = root / "bin/docker"
@@ -210,8 +256,8 @@ exit 0
             python = root / "bin/python3"
             python.write_text('''#!/usr/bin/env bash
 if [ "$1" = - ]; then
-  mkdir -p "$3/ingestion/spark" "$3/test/unit" "$3/airflow/plugins"
-  touch "$3/ingestion/spark/e2e_schema_evolution.py" "$3/ingestion/spark/e2e_temporal_extraction.py" "$3/ingestion/spark/e2e_guard_idle.py" "$3/test/unit/test_meta.py" "$3/airflow/plugins/e2e_check_spark_guard.py"
+  mkdir -p "$3/ingestion/spark" "$3/airflow/plugins"
+  touch "$3/ingestion/spark/e2e_schema_evolution.py" "$3/ingestion/spark/e2e_temporal_extraction.py" "$3/ingestion/spark/e2e_guard_idle.py" "$3/airflow/plugins/e2e_check_meta.py" "$3/airflow/plugins/e2e_check_spark_guard.py"
 fi
 exit 0
 ''')
@@ -220,12 +266,12 @@ exit 0
                 script = shutil_script.read_text()
                 if slow:
                     script = script.replace("elapsed=$((SECONDS - started))", "elapsed=421")
-                (root / "test/test.sh").write_text(script)
+                (root / "test/e2e/shell/test.sh").write_text(script)
                 log.write_text("")
                 environment = {**os.environ, "PATH": str(root / "bin") + ":" + os.environ["PATH"],
                                "DOCKER_CALLS": str(log), "FAIL_BANK": fail, "TEST_SKIP_BUILD": "0",
                                "COMPOSE_PROJECT_NAME": "dlh-test", "TEST_FAILURE_LOG_DIR": str(root / "results")}
-                result = subprocess.run(["bash", str(root / "test/test.sh")], env=environment,
+                result = subprocess.run(["bash", str(root / "test/e2e/shell/test.sh")], env=environment,
                                         capture_output=True, text=True)
                 self.assertEqual(result.returncode, int(fail == "1" or slow), result.stdout + result.stderr)
                 calls = log.read_text().splitlines()

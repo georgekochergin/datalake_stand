@@ -4,10 +4,10 @@
 - Стенд КХД/DLH: Trino, Spark, Nessie, Airflow, SILO, Postgres. Источники — `sydafa`.
 - Каркас: `ingestion/` (весь код процесса загрузки в git: `conf/` — YAML-манифесты, `generator/` — генератор DAG-ов, `operators.py`, `meta.py` — pg-meta, `iceberg.py`, `sources/` — диалекты СУБД и JDBC, `spark/` — Spark-приложения, в контейнерах `/opt/python/ingestion` + `PYTHONPATH=/opt/python` и `/opt/spark-jobs`), `airflow/` `trino/` (пользовательский код в git через allowlist `.gitignore`), `conf/` (как запущен стенд), `test/` (демо + e2e), `docs/` (документация: архитектура, сценарий демонстрации, бэклог, настройка graphify и Spec Kit).
 
-- Конфигурация источников sydafa: через `sources.json` (`conf/sydafa/sources.json` на живом стенде, `test/sydafa/sources.json` в тестах).
+- Конфигурация источников sydafa: через `conf/sydafa/sources.json`; тестовый контур фильтрует его копию в `test/.workspace-<source>/`.
 - Читатель источников: `sydafa`/`sydafa` (только SELECT). Админ снаружи недоступен.
 - Внутренние DNS-имена СУБД (риг именует контейнеры `sydafa-src-<тип>-<source_id>`): `sydafa-src-mssql-bank:1433`, `sydafa-src-oracle-broker:1521`.
-- Демо-DAG-и: `test/dags/`, подключаются `test/docker-compose.override.yaml`.
+- Тесты: `test/pytest/` — pytest без поднятия стека, `test/e2e/` — стековые сценарии, Docker-артефакты и помощники. Команды и расширение — скилл `full-testing`.
 - Инспекция БД: `POST /sources/{source}/activate` → объект `connection` в ответе; внешний порт хоста задается в манифесте `sources.json` (`external_port`).
 - Интеграция с sydafa: пакет `sydafa-airflow` (`SydafaActivateOperator`) для явного пробуждения СУБД перед чтением.
 

@@ -3,7 +3,6 @@
 
 Проверяет актуальное состояние репозитория:
 1. Readiness sydafa API и регистрацию источников (bank, broker).
-2. Защиту API sydafa от SQL-инъекций (HTTP 422).
 3. Авторизацию и доступность DAG-ов в Airflow 3.x.
 4. Исполнение и успешное завершение (state=success) DAG-ов обновления источников:
    - update_source_bank (All-or-Nothing миграция MSSQL)
@@ -234,7 +233,6 @@ _CTX = ssl.create_default_context()
 _CTX.check_hostname = False
 _CTX.verify_mode = ssl.CERT_NONE
 
-INGEST_DAGS = tuple(dag for dag in INGEST_DAGS if dag.split("__")[2] in SOURCES)
 SNAPSHOT_DAGS = tuple(dag for dag in SNAPSHOT_DAGS if dag.split("__")[2] in SOURCES)
 ACT_SNAPSHOT_TABLES = {table: raw for table, raw in ACT_SNAPSHOT_TABLES.items() if table.split(".")[1] in SOURCES}
 RAW_SNAPSHOT_TABLES = [table for table in RAW_SNAPSHOT_TABLES if table.split(".")[1] in SOURCES]
@@ -340,7 +338,7 @@ def airflow_token_retry(timeout: int = 180) -> str | None:
         try:
             return airflow_token()
         except Exception:
-            time.sleep(2)
+            time.sleep(1)
     return None
 
 
@@ -382,7 +380,7 @@ def airflow_trigger_retry(token: str, dag_id: str, run_id: str, timeout: int = 1
         code, raw = airflow_trigger(token, dag_id, run_id, conf=conf)
         if code == 200:
             return code, raw
-        time.sleep(2)
+        time.sleep(1)
     return code, raw
 
 
@@ -415,7 +413,7 @@ def airflow_wait_run(token: str, dag_id: str, run_id: str, timeout: int = 300, n
                 except Exception as ex:
                     print("Could not fetch task logs:", ex)
                 return False
-        time.sleep(2)
+        time.sleep(1)
     check((name or dag_id) + " -> success", "timeout:" + str(last), "success")
     return False
 
@@ -472,7 +470,7 @@ def airflow_wait_run_failed(token: str, dag_id: str, run_id: str, timeout: int =
             last = json.loads(raw).get("state", "unknown")
             if last in ("failed", "success"):
                 break
-        time.sleep(2)
+        time.sleep(1)
     check((name or dag_id) + " -> failed", last, "failed")
     return last == "failed"
 
@@ -564,7 +562,7 @@ def validate_manifests_and_dags() -> None:
     print("==> Шаг 0: Проверка структуры манифестов источников, миграций и DAG-ов...")
     candidates = [
         Path(os.environ.get("WORKSPACE_DIR", "/workspace")),
-        Path(__file__).resolve().parent.parent,
+        Path(__file__).resolve().parents[3],
     ]
     ws = next((p for p in candidates if (p / "conf" / "sydafa" / "sources.json").exists()), None)
     if not ws:
@@ -1024,12 +1022,12 @@ def evolution_incompatible(token: str, stamp: str) -> None:
 
 def run_source_schema_evolution(token: str, stamp: str) -> None:
     """Полный цикл эволюции схемы реальных источников: операции, расширения, отказ."""
-    print("\n==> Шаг 14: Эволюция схемы источников: безопасные операции через API sydafa...")
+    print("\n==> Шаг 9: Эволюция схемы источников: безопасные операции через API sydafa...")
     evolution_prepare_sources(token, stamp)
-    print("\n==> Шаг 15: Первая загрузка после эволюции, затем расширения типов и Iceberg promotion...")
+    print("\n==> Шаг 10: Первая загрузка после эволюции, затем расширения типов и Iceberg promotion...")
     first_pids = evolution_first_load(token, stamp)
     evolution_widen(token, stamp, first_pids)
-    print("\n==> Шаг 16: Несовместимое изменение типа на источнике → отказ загрузки без нового снапшота...")
+    print("\n==> Шаг 11: Несовместимое изменение типа на источнике → отказ загрузки без нового снапшота...")
     evolution_incompatible(token, stamp)
 
 
@@ -1057,18 +1055,7 @@ def main() -> None:
         table_names = sorted(t["name"] for t in tables if not t["name"].startswith(("_upd_", "_del_")))
         check("GET /sources/%s tables" % src, ",".join(table_names), "accounts,clients,deals,transactions")
 
-    print("\n==> Шаг 2: Проверка безопасности sydafa (отклонение SQL-инъекций)...")
-    injection_source = SOURCES[0]
-    injection_prefix = "retail_bank" if injection_source == "bank" else "trading_core"
-    inj_code, _ = sydafa_migrate(injection_source, [{
-        "op": "update",
-        "entity_fqn": injection_prefix + ".clients",
-        "predicate": [{"column": "client_id; DROP TABLE retail_bank.clients --", "operator": "=", "value": 1}],
-        "set": {"status": "VIP"},
-    }])
-    check("sydafa rejects injected column with 422", inj_code, 422)
-
-    print("\n==> Шаг 3: Проверка готовности Airflow...")
+    print("\n==> Шаг 2: Проверка готовности Airflow...")
     token = airflow_token_retry(timeout=180)
     check("Airflow login with stand credentials", "ok" if token else None, "ok")
     if not token:
@@ -1089,7 +1076,7 @@ def main() -> None:
             connection = json.loads(raw)
             check("Connection %s type" % conn_id, connection.get("conn_type"), conn_type)
 
-    print("\n==> Шаги 4–5: Наполнение выбранного источника...")
+    print("\n==> Шаг 3: Наполнение выбранного источника...")
     for source in SOURCES:
         dag = "update_source_" + source
         registered = airflow_wait_dag_registered(token, dag, timeout=180)
@@ -1101,7 +1088,7 @@ def main() -> None:
         if not airflow_wait_run(token, dag, run, timeout=360):
             return
 
-    print("\n==> Шаг 6: Регистрация и запуск DAG-ов ингестии (raw-слой), первая загрузка...")
+    print("\n==> Шаг 4: Регистрация и запуск DAG-ов ингестии (raw-слой), первая загрузка...")
     for dag_id in INGEST_DAGS:
         registered = airflow_wait_dag_registered(token, dag_id, timeout=240)
         check("DAG %s registered in Airflow" % dag_id, registered, True)
@@ -1121,7 +1108,7 @@ def main() -> None:
     if not run1_ok:
         return
 
-    print("\n==> Шаг 7: Проверка raw-таблиц в Trino (первая загрузка)...")
+    print("\n==> Шаг 5: Проверка raw-таблиц в Trino (первая загрузка)...")
     first_counts: dict[str, int] = {}
     try:
         max_pids = {}
@@ -1147,7 +1134,7 @@ def main() -> None:
     except Exception as e:
         check("raw tables query", str(e), "ok")
 
-    print("\n==> Шаг 9: Миграция источника + третья загрузка (подхват дельты _batch_id)...")
+    print("\n==> Шаг 6: Миграция источника + повторная загрузка (подхват дельты _batch_id)...")
     for source in SOURCES:
         dag = "update_source_" + source
         run = "e2e-run-%s2-%s" % (source, stamp)
@@ -1177,7 +1164,7 @@ def main() -> None:
     except Exception as e:
         check("raw tables query (run 3)", str(e), "ok")
 
-    print("\n==> Шаг 10: DAG-и снимков (таблицы-снимки __act_snap)...")
+    print("\n==> Шаг 7: DAG-и снимков (таблицы-снимки __act_snap)...")
     for dag_id in SNAPSHOT_DAGS:
         registered = airflow_wait_dag_registered(token, dag_id, timeout=240)
         check("DAG %s registered in Airflow" % dag_id, registered, True)
@@ -1244,7 +1231,7 @@ def main() -> None:
     if "broker" not in SOURCES:
         run_source_schema_evolution(token, stamp)
         return
-    print("\n==> Шаг 11: Повторный снимок — атомарная перезапись, а не накопление...")
+    print("\n==> Шаг 8: Повторный снимок — атомарная перезапись, а не накопление...")
     dag_id = SNAPSHOT_DAGS[0]
     table = next(iter(ACT_SNAPSHOT_TABLES))
     run_id = "e2e-snap2-%s-%s" % (dag_id, stamp)

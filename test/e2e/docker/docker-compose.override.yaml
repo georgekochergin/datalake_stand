@@ -13,12 +13,15 @@ services:
     ports: !override []
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').getcode() == 200 else 1)"]
-      interval: 10s
+      interval: 2s
+      start_interval: 1s
       timeout: 5s
       retries: 30
       start_period: 30s
 
   pg-meta:
+    healthcheck:
+      interval: 2s
     volumes: !override
       - pg_meta_data:/var/lib/postgresql/data
       - ./test/${TEST_WS_DIR:-.workspace}/conf/pg-meta/init:/docker-entrypoint-initdb.d:ro
@@ -28,6 +31,8 @@ services:
     ports: !override []
 
   silo:
+    healthcheck:
+      interval: 2s
     ports: !override []
 
   spark-master:
@@ -92,6 +97,7 @@ services:
     ports: !override []
 
   test-runner:
+    image: dlh-test-runner:latest
     volumes: !override
       - ./test/${TEST_WS_DIR:-.workspace}:/workspace:ro
       - sydafa_state:/state:ro
@@ -103,3 +109,11 @@ services:
         condition: service_healthy
       airflow-webserver:
         condition: service_started
+
+  airflow-postgres:
+    healthcheck:
+      interval: 2s
+
+  pg-catalog:
+    healthcheck:
+      interval: 2s

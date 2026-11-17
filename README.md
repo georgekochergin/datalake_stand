@@ -124,7 +124,7 @@ S3-хранилища silo.
 
 Файлы сборки: [Airflow](conf/airflow/Dockerfile),
 [его зависимости](conf/airflow/requirements.txt), [Spark](conf/spark/Dockerfile),
-[test-runner](test/Dockerfile).
+[test-runner](test/e2e/docker/Dockerfile).
 
 #### Почему JDBC-драйверы установлены в обоих образах
 
@@ -402,7 +402,7 @@ SELECT * FROM "trading_core"."transactions";
    Добавьте эти элементы к существующим секциям, не заменяйте их целиком.
    Путь `/source-volumes/crm` находится внутри контейнера.
 3. Добавьте такое же подключение в `services.sydafa.volumes` файла
-   `test/docker-compose.override.yaml`. Его `!override` заменяет весь список томов.
+   `test/e2e/docker/docker-compose.override.yaml`. Его `!override` заменяет весь список томов.
 4. Выполните `docker compose up -d sydafa`. Обычный `restart` не применяет новые тома.
 
 Для очистки через `down -v` Compose должен знать том и его подключение.
@@ -434,8 +434,8 @@ SELECT * FROM "trading_core"."transactions";
 
 | Проверка | Команда | Что проверяет |
 |---|---|---|
-| [Unit](docs/glossary.md#term-unit) | `python3 -m unittest discover -s test/unit` | Чистые функции и контракты без основного стенда |
-| Полный [e2e](docs/glossary.md#term-e2e) | `./test/test.sh` | Два параллельных тестовых стека: загрузки, снимки, восстановление и эволюция схемы источников через реальные сервисы |
+| [Unit](docs/glossary.md#term-unit) и статика | `python3 -m pytest` | Тесты из `test/pytest/` без поднятия стека |
+| Полный [e2e](docs/glossary.md#term-e2e) | `./test/e2e/shell/test.sh` | Два параллельных тестовых стека: загрузки, снимки, восстановление и эволюция схемы источников через реальные сервисы |
 
 Запускайте проверки в порядке таблицы. Полный прогон использует проекты
 `dlh-test-bank` и `dlh-test-broker`, собственные тома и рабочие деревья
@@ -444,8 +444,9 @@ SELECT * FROM "trading_core"."transactions";
 Успех — оба стека без ошибок, код завершения 0 и `E2E_TOTAL_SECONDS` не более
 420 секунд при тёплом кэше образов. Требуется минимум 20 GiB памяти Docker VM.
 
-- `TEST_SKIP_BUILD=1 ./test/test.sh` пропускает сборку. Используйте только с актуальными образами.
-- `./test/test.sh --verify --source bank` повторяет проверки уже работающего
+- Зависимости хостовых тестов: `python3 -m pip install -r test/requirements.txt`.
+- `TEST_SKIP_BUILD=1 ./test/e2e/shell/test.sh` пропускает сборку. Используйте только с актуальными образами.
+- `./test/e2e/shell/test.sh --verify --source bank` повторяет проверки уже работающего
   **тестового** контура с соответствующим рабочим деревом.
   Обычный полный прогон удаляет дерево и стек при завершении.
 - Логи стеков и Airflow сохраняются в `TEST_FAILURE_LOG_DIR` (по умолчанию `test/.results/`).

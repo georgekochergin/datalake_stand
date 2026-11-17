@@ -35,7 +35,7 @@ class StandConfigTests(unittest.TestCase):
             self.assertEqual(execute.call_args.args[0], "/entrypoint")
 
     def test_cleanup_scopes_sources_and_volumes(self):
-        script = (ROOT / "test/test.sh").read_text()
+        script = (ROOT / "test/e2e/shell/test.sh").read_text()
         cleanup = script.split("cleanup() {", 1)[1].split("\nrun_stack()", 1)[0]
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / "docker.log"
@@ -88,7 +88,7 @@ cleanup() {
 
     def test_non_test_project_is_rejected_before_docker(self):
         result = subprocess.run(
-            ["bash", str(ROOT / "test/test.sh"), "--help"],
+            ["bash", str(ROOT / "test/e2e/shell/test.sh"), "--help"],
             env={**os.environ, "COMPOSE_PROJECT_NAME": "dlh-poc"},
             capture_output=True,
             text=True,
@@ -98,7 +98,7 @@ cleanup() {
 
     def test_workspace_source_ports_are_disabled(self):
         import sys
-        sys.path.insert(0, str(ROOT / "test"))
+        sys.path.insert(0, str(ROOT / "test/e2e/python"))
         from e2e_scale import prepare_workspace
 
         with tempfile.TemporaryDirectory() as directory:
@@ -109,7 +109,7 @@ cleanup() {
                 self.assertNotIn("external_port", source)
 
     def test_runtime_failure_stops_before_schema_evolution(self):
-        script = (ROOT / "test/test.sh").read_text()
+        script = (ROOT / "test/e2e/shell/test.sh").read_text()
         helper = script.split("run_runtime_checks() {", 1)[1].split('\nif [ "$MODE"', 1)[0]
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -119,8 +119,7 @@ cleanup() {
             (workspace / "ingestion/spark/e2e_guard_idle.py").touch()
             (workspace / "airflow/plugins").mkdir(parents=True)
             (workspace / "airflow/plugins/e2e_check_spark_guard.py").touch()
-            (workspace / "test" / "unit").mkdir(parents=True)
-            (workspace / "test/unit/test_meta.py").touch()
+            (workspace / "airflow/plugins/e2e_check_meta.py").touch()
             log = workspace / "calls"
             harness = r'''
 set -euo pipefail
@@ -142,7 +141,7 @@ run_runtime_checks() {
     def test_compose_credentials_and_test_dns(self):
         result = subprocess.run(
             ["docker", "compose", "-p", "dlh-test-unit", "-f", "docker-compose.yaml",
-             "-f", "test/docker-compose.override.yaml", "--profile", "test", "config", "--format", "json"],
+             "-f", "test/e2e/docker/docker-compose.override.yaml", "--profile", "test", "config", "--format", "json"],
             cwd=ROOT,
             env={**os.environ, "STAND_USER": "unit-user", "STAND_PASSWORD": "unit-password",
                  "SYDAFA_CONTAINER_PREFIX": "sydafa-dlh-test-unit"},
@@ -186,7 +185,7 @@ run_runtime_checks() {
         compose = yaml.safe_load((ROOT / "docker-compose.yaml").read_text())
         image = "${SYDAFA_IMAGE:-ghcr.io/georgekochergin/sydafa:latest}"
         self.assertEqual(compose["services"]["sydafa"]["image"], image)
-        script = (ROOT / "test/test.sh").read_text()
+        script = (ROOT / "test/e2e/shell/test.sh").read_text()
         self.assertIn(f'SYDAFA_IMG="{image}"', script)
         self.assertIn('docker pull --platform linux/amd64 "$SYDAFA_IMG"', script)
         self.assertNotIn('docker build -t "$SYDAFA_IMG"', script)

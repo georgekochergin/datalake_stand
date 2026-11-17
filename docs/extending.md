@@ -99,9 +99,9 @@ JDBC-соединениями и построением совместимой �
 [скиллу full-testing](../.agents/skills/full-testing/SKILL.md).
 Существующие точки проверки:
 
-- `test/unit/test_dialects.py` — URL, имена, типы и точные SQL-выражения.
-- `test/unit/test_jdbc.py` — адресация JDBC-метаданных и совместимые проекции.
-- `test/unit/test_jdbc_partitioning.py` — выбор колонки и границы параллельного чтения.
+- `test/pytest/test_dialects.py` — URL, имена, типы и точные SQL-выражения.
+- `test/pytest/test_jdbc.py` — адресация JDBC-метаданных и совместимые проекции.
+- `test/pytest/test_jdbc_partitioning.py` — выбор колонки и границы параллельного чтения.
 - Изолированный тестовый контур — реальное чтение и запись из новой СУБД.
 
 Для новой СУБД нужно проверить:
