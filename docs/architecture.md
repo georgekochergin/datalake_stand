@@ -1139,19 +1139,36 @@ incremental:
 
 #### Выбор типа позиции
 
-Таблица выбора `position_type` по типу источника:
+[Канонический тип](glossary.md#term-canonical) выбирается по фактическому типу
+колонки [позиции](glossary.md#term-position) в СУБД. Соответствие приведено отдельной
+таблицей для каждой СУБД.
 
-| Тип источника | Значение `position_type` | Ограничения |
+**MSSQL:**
+
+| Тип колонки | Значение `position_type` | Ограничения |
 |---|---|---|
-| MSSQL SMALLINT / INT / BIGINT | `smallint` / `integer` / `bigint` | Знаковые 16 / 32 / 64 бита.<br>Писать `integer`, не `int` |
-| MSSQL DECIMAL(p,0), NUMERIC(p,0)<br>Oracle NUMBER(p,0) | `decimal(p,0)` | p = 1..38.<br>scale строго 0.<br>Точность берётся из JDBC, не из текущих значений |
-| MSSQL DATE | `date` | Дата без времени |
-| MSSQL SMALLDATETIME / DATETIME | `timestamp_local(0)` / `timestamp_local(3)` | Семантика без часового пояса |
-| MSSQL DATETIME2(p) | `timestamp_local(p)` | p = 0..7 |
-| MSSQL DATETIMEOFFSET(p) | `timestamp_instant(p)` | p = 0..7.<br>Позиция нормализуется в UTC |
-| Oracle DATE | `timestamp_local(0)` | Содержит время, поэтому не `date` |
-| Oracle TIMESTAMP(p) | `timestamp_local(p)` | p = 0..9 |
-| Oracle TIMESTAMP(p) WITH TIME ZONE / WITH LOCAL TIME ZONE | `timestamp_instant(p)` | p = 0..9.<br>UTC |
+| SMALLINT / INT / BIGINT | `smallint` / `integer` / `bigint` | Знаковые 16 / 32 / 64 бита.<br>Писать `integer`, не `int` |
+| DECIMAL(p,0), NUMERIC(p,0) | `decimal(p,0)` | p = 1..38.<br>scale строго 0.<br>Точность берётся из JDBC, не из текущих значений |
+| DATE | `date` | Дата без времени |
+| SMALLDATETIME / DATETIME | `timestamp_local(0)` / `timestamp_local(3)` | Семантика без часового пояса |
+| DATETIME2(p) | `timestamp_local(p)` | p = 0..7 |
+| DATETIMEOFFSET(p) | `timestamp_instant(p)` | p = 0..7.<br>Позиция нормализуется в UTC |
+
+**Oracle:**
+
+| Тип колонки | Значение `position_type` | Ограничения |
+|---|---|---|
+| NUMBER(p,0) | `decimal(p,0)` | p = 1..38.<br>scale строго 0.<br>Точность берётся из JDBC, не из текущих значений |
+| DATE | `timestamp_local(0)` | Содержит время, поэтому не `date` |
+| TIMESTAMP(p) | `timestamp_local(p)` | p = 0..9 |
+| TIMESTAMP(p) WITH TIME ZONE / WITH LOCAL TIME ZONE | `timestamp_instant(p)` | p = 0..9.<br>UTC |
+
+Целочисленная [позиция](glossary.md#term-position) получает разный
+[канонический тип](glossary.md#term-canonical) в зависимости от СУБД:
+
+- в MSSQL у целых чисел собственные типы SMALLINT, INT, BIGINT — им соответствуют виды `smallint`, `integer`, `bigint`.
+- в Oracle отдельного целочисленного типа хранения нет: целое число — это NUMBER(p,0), а ANSI-синонимы SMALLINT, INT и INTEGER хранятся как NUMBER(38,0) и через JDBC читаются как NUMBER. Поэтому целочисленная позиция в Oracle всегда имеет вид `decimal(p,0)`.
+- диапазоны `bigint` (от -2^63 до 2^63-1) и `decimal(19,0)` (±10^19-1) близки, но это разные виды: для колонки Oracle NUMBER(19,0) нельзя указать `bigint`.
 
 Строки, GUID, float, дробные decimal и NUMBER без определённого допустимого
 p/scale не подходят. Метаданные JDBC преобразуются диалектом в фактический
