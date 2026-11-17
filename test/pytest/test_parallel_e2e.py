@@ -26,6 +26,37 @@ from ingestion.generator.manifest import load_sources
 class ParallelE2ETests(unittest.TestCase):
     """Preserve production defaults while preparing bounded test-only copies."""
 
+    def test_early_activation_overlaps_airflow_wait_and_checks_failures(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+
+        tree = ast.parse((ROOT / "test/e2e/python/run_flow.py").read_text())
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                        and node.name == "wake_sources_and_wait_airflow")
+        for status in (200, 503):
+            with self.subTest(status=status):
+                started, airflow = Event(), Event()
+                checks = []
+
+                def activate(path, body):
+                    self.assertEqual(path, "/sources/broker/activate")
+                    self.assertEqual(body, {"ttl_minutes": 15})
+                    started.set()
+                    self.assertTrue(airflow.wait(2))
+                    return status, {}
+
+                def token(timeout):
+                    self.assertTrue(started.wait(2))
+                    airflow.set()
+                    return "token"
+
+                namespace = {"ThreadPoolExecutor": ThreadPoolExecutor, "SOURCES": ("broker",),
+                             "sydafa_post": activate, "airflow_token_retry": token,
+                             "check": lambda *values: checks.append(values)}
+                exec(compile(ast.Module(body=[function], type_ignores=[]), "early_activation", "exec"), namespace)
+                self.assertEqual(namespace["wake_sources_and_wait_airflow"](), "token")
+                self.assertEqual(checks, [("early activation broker", status, 200)])
+
     def test_test_tree_separates_host_and_runtime_checks(self):
         config = (ROOT / "pytest.ini").read_text()
         self.assertIn("testpaths = test/pytest", config)
@@ -269,7 +300,7 @@ class ParallelE2ETests(unittest.TestCase):
         script = (ROOT / "test/e2e/shell/test.sh").read_text()
         functions = script.split("run_temporal_checks() {", 1)[1].split("run_runtime_checks() {", 1)[0]
         for source in ("bank", "broker"):
-            for failure in ("none", "temporal", "schema", "foreground", "meta"):
+            for failure in ("none", "temporal", "schema", "foreground", "meta", "registry"):
                 with self.subTest(source=source, failure=failure), tempfile.TemporaryDirectory() as directory:
                     harness = r'''
 set -euo pipefail
@@ -289,7 +320,22 @@ compose() {
       [ "$FAILURE" != schema ] || return 9
       touch "$SANDBOX/schema-finished" ;;
     *e2e_check_meta.py*)
-      [ "$FAILURE" != meta ] || return 10 ;;
+      touch "$SANDBOX/meta-started"
+      for attempt in {1..100}; do
+        [ -f "$SANDBOX/foreground-started" ] && break
+        sleep 0.01
+      done
+      [ -f "$SANDBOX/foreground-started" ] || return 99
+      [ "$FAILURE" != meta ] || return 10
+      touch "$SANDBOX/meta-finished" ;;
+    *e2e_check_extraction.py*)
+      touch "$SANDBOX/foreground-started"
+      for attempt in {1..100}; do
+        [ -f "$SANDBOX/temporal-started" ] && [ -f "$SANDBOX/schema-started" ] && [ -f "$SANDBOX/meta-started" ] && break
+        sleep 0.01
+      done
+      [ -f "$SANDBOX/temporal-started" ] && [ -f "$SANDBOX/schema-started" ] && [ -f "$SANDBOX/meta-started" ] || return 99
+      [ "$FAILURE" != registry ] || return 11 ;;
     *)
       touch "$SANDBOX/foreground-started"
       [ "$FAILURE" != foreground ] || return 8 ;;
@@ -302,10 +348,11 @@ run_temporal_checks() {
                                             env={**os.environ, "SANDBOX": directory,
                                                  "E2E_SOURCE": source, "FAILURE": failure},
                                             capture_output=True, text=True, timeout=10)
-                    self.assertEqual(result.returncode, {"none": 0, "temporal": 7, "schema": 9, "foreground": 8, "meta": 10}[failure], result.stderr)
+                    self.assertEqual(result.returncode, {"none": 0, "temporal": 7, "schema": 9, "foreground": 8, "meta": 10, "registry": 11}[failure], result.stderr)
                     if failure == "none":
                         self.assertTrue((Path(directory) / "temporal-finished").exists())
                         self.assertTrue((Path(directory) / "schema-finished").exists())
+                        self.assertTrue((Path(directory) / "meta-finished").exists())
 
     def test_parallel_orchestrator_builds_once_and_propagates_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -341,12 +388,14 @@ fi
 exit 0
 ''')
             python.chmod(0o755)
-            for sources, fail, slow in (((), "0", False), (("bank",), "0", False),
-                                        (("broker",), "0", False), (("broker", "bank"), "0", False),
-                                        ((), "1", False), ((), "0", True)):
+            for sources, fail, elapsed in (((), "0", None), (("bank",), "0", None),
+                                           (("broker",), "0", None), (("broker", "bank"), "0", None),
+                                           ((), "1", None), (("bank",), "0", 421),
+                                           ((), "0", 421), ((), "0", 601)):
                 script = shutil_script.read_text()
-                if slow:
-                    script = script.replace("elapsed=$((SECONDS - started))", "elapsed=421")
+                budget = 420 if len(sources) == 1 else 600
+                if elapsed is not None:
+                    script = script.replace("elapsed=$((SECONDS - started))", f"elapsed={elapsed}")
                 (root / "test/e2e/shell/test.sh").write_text(script)
                 log.write_text("")
                 environment = {**os.environ, "PATH": str(root / "bin") + ":" + os.environ["PATH"],
@@ -355,15 +404,17 @@ exit 0
                 arguments = ["--sources", *sources] if sources else []
                 result = subprocess.run(["bash", str(root / "test/e2e/shell/test.sh"), *arguments], env=environment,
                                         capture_output=True, text=True)
-                self.assertEqual(result.returncode, int(fail == "1" or slow), result.stdout + result.stderr)
+                self.assertEqual(result.returncode, int(fail == "1" or (elapsed is not None and elapsed > budget)), result.stdout + result.stderr)
                 calls = log.read_text().splitlines()
                 self.assertEqual(sum("--profile test build" in call for call in calls), 1)
                 self.assertEqual(sum(" up -d --no-build --pull never" in call for call in calls), len(sources) or 2)
                 for excluded in {"bank", "broker"} - set(sources or ("bank", "broker")):
                     self.assertFalse(any(f"-p dlh-test-{excluded} " in call for call in calls))
                 self.assertIn("E2E_TOTAL_SECONDS=", result.stdout)
-                if slow:
-                    self.assertIn("E2E_TOTAL_SECONDS=421", result.stdout)
-                    self.assertIn("Требуется оптимизация теста", result.stdout)
+                self.assertIn(f"E2E_BUDGET_SECONDS={budget}", result.stdout)
+                if elapsed is not None:
+                    self.assertIn(f"E2E_TOTAL_SECONDS={elapsed}", result.stdout)
+                    if elapsed > budget:
+                        self.assertIn("Требуется оптимизация теста", result.stdout)
                 self.assertFalse((root / "test/.workspace-bank").exists())
                 self.assertFalse((root / "test/.workspace-broker").exists())

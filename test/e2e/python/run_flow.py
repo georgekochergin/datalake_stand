@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -299,6 +300,18 @@ def sydafa_request(method: str, path: str, body: Any = None) -> tuple[int, Any]:
 def sydafa_post(path: str, body: Any) -> tuple[int, Any]:
     """Отправляет POST-запрос в API sydafa."""
     return sydafa_request("POST", path, body)
+
+
+def wake_sources_and_wait_airflow() -> str | None:
+    """Overlap cold source activation with Airflow readiness and verify every response."""
+    with ThreadPoolExecutor(max_workers=len(SOURCES)) as activation:
+        waking = [(source, activation.submit(sydafa_post, f"/sources/{source}/activate", {"ttl_minutes": 15}))
+                  for source in SOURCES]
+        token = airflow_token_retry(timeout=180)
+        for source, result in waking:
+            code, _ = result.result()
+            check(f"early activation {source}", code, 200)
+    return token
 
 
 def sydafa_get(path: str) -> tuple[int, Any]:
@@ -1058,7 +1071,7 @@ def main() -> None:
         check("GET /sources/%s tables" % src, ",".join(table_names), "accounts,clients,deals,transactions")
 
     print("\n==> Шаг 2: Проверка готовности Airflow...")
-    token = airflow_token_retry(timeout=180)
+    token = wake_sources_and_wait_airflow()
     check("Airflow login with stand credentials", "ok" if token else None, "ok")
     if not token:
         print("FATAL: Не удалось авторизоваться в Airflow")

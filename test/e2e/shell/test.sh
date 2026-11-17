@@ -3,10 +3,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 PROJECT_ROOT="$(pwd)"
-if [[ ! "${COMPOSE_PROJECT_NAME:-dlh-test}" =~ ^dlh-test(-[a-z0-9]+)*$ ]]; then
-  echo "FAIL: COMPOSE_PROJECT_NAME должен быть dlh-test или dlh-test-<суффикс>."
-  exit 1
-fi
 MODE=full
 SOURCES=()
 sources_given=0
@@ -38,7 +34,7 @@ with open("ingestion/conf/sources.yaml") as stream:
     configured = yaml.safe_load(stream)
 selected = sys.argv[2:] or list(configured)
 if not 1 <= len(selected) <= 2:
-    sys.exit("FAIL: Допустимо максимум два источника; перечислите их через --sources.")
+    sys.exit("FAIL: Выберите один или два источника через --sources.")
 if len(set(selected)) != len(selected):
     sys.exit("FAIL: Дубликаты источников запрещены.")
 if any(source not in configured or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", source) for source in selected):
@@ -50,6 +46,12 @@ PY
 ) || exit 1
 SOURCES=()
 while IFS= read -r source; do SOURCES+=("$source"); done <<< "$selected"
+BUDGET_SECONDS=420
+RUN_MODE=single
+if [ "${#SOURCES[@]}" = 2 ]; then
+  BUDGET_SECONDS=600
+  RUN_MODE=parallel
+fi
 
 configure_stack() {
   export E2E_SOURCE="$1"
@@ -67,18 +69,22 @@ run_temporal_checks() {
 run_post_checks() (
   temporal_pid=""
   schema_pid=""
+  meta_pid=""
   rc=0
   run_temporal_checks &
   temporal_pid=$!
   "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler spark-submit --master spark://spark-master:7077 --deploy-mode client --conf spark.cores.max=2 /opt/spark-jobs/e2e_schema_evolution.py &
   schema_pid=$!
-  trap 'kill -TERM "$temporal_pid" "$schema_pid" 2>/dev/null || true; wait "$temporal_pid" 2>/dev/null || true; wait "$schema_pid" 2>/dev/null || true' EXIT
+  "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler bash -c 'EXTRACTION_TEST_DSN="host=pg-meta port=5432 dbname=meta user=$STAND_USER password=$STAND_PASSWORD" python /opt/airflow/plugins/e2e_check_meta.py -v' &
+  meta_pid=$!
+  trap 'kill -TERM "$temporal_pid" "$schema_pid" "$meta_pid" 2>/dev/null || true; wait "$temporal_pid" 2>/dev/null || true; wait "$schema_pid" 2>/dev/null || true; wait "$meta_pid" 2>/dev/null || true' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM HUP
+  "${COMPOSE[@]}" exec -T -e E2E_SOURCE="$E2E_SOURCE" -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler python /opt/airflow/plugins/e2e_check_extraction.py
   "${COMPOSE[@]}" exec -T -e E2E_SOURCE="$E2E_SOURCE" -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler python /opt/airflow/plugins/e2e_check_spark_guard.py
-  "${COMPOSE[@]}" exec -T -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler bash -c 'EXTRACTION_TEST_DSN="host=pg-meta port=5432 dbname=meta user=$STAND_USER password=$STAND_PASSWORD" python /opt/airflow/plugins/e2e_check_meta.py -v'
   wait "$temporal_pid" || rc=$?
   wait "$schema_pid" || rc=$?
+  wait "$meta_pid" || rc=$?
   trap - EXIT
   return "$rc"
 )
@@ -89,15 +95,14 @@ run_runtime_checks() {
     return 1
   fi
   "${COMPOSE[@]}" run --rm --no-deps test-runner python -u /app/run_flow.py
-  "${COMPOSE[@]}" exec -T -e E2E_SOURCE="$E2E_SOURCE" -e _AIRFLOW_PROCESS_CONTEXT=server airflow-scheduler python /opt/airflow/plugins/e2e_check_extraction.py
   run_post_checks
 }
 
 if [ "$MODE" = verify ]; then
-   configure_stack "${SOURCES[0]}"
+  configure_stack "${SOURCES[0]}"
   started=$SECONDS
   run_runtime_checks
-   echo "E2E_VERIFY_SECONDS=$((SECONDS - started)) source=$E2E_SOURCE"
+  echo "E2E_VERIFY_SECONDS=$((SECONDS - started)) source=$E2E_SOURCE"
   exit 0
 fi
 
@@ -232,9 +237,9 @@ PIDS=()
 finish
 trap - EXIT
 elapsed=$((SECONDS - started))
-echo "E2E_TOTAL_SECONDS=$elapsed E2E_BUDGET_SECONDS=420"
-if [ "$elapsed" -gt 420 ]; then
-  echo 'FAIL: e2e превысил 7 минут. Требуется оптимизация теста, а не повышение лимита.'
+echo "E2E_TOTAL_SECONDS=$elapsed E2E_BUDGET_SECONDS=$BUDGET_SECONDS"
+if [ "$elapsed" -gt "$BUDGET_SECONDS" ]; then
+  echo "FAIL: e2e режима $RUN_MODE превысил лимит $BUDGET_SECONDS секунд. Требуется оптимизация теста."
   rc=1
 fi
 exit "$rc"

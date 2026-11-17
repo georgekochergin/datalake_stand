@@ -86,15 +86,16 @@ cleanup() {
         self.assertIn("iceberg.catalog.type=rest", trino)
         self.assertIn("iceberg.rest-catalog.warehouse=raw", trino)
 
-    def test_non_test_project_is_rejected_before_docker(self):
+    def test_external_project_name_does_not_change_cli_or_test_project(self):
         result = subprocess.run(
             ["bash", str(ROOT / "test/e2e/shell/test.sh"), "--help"],
             env={**os.environ, "COMPOSE_PROJECT_NAME": "dlh-poc"},
             capture_output=True,
             text=True,
         )
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("COMPOSE_PROJECT_NAME", result.stdout)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--sources", result.stdout)
+        self.assertIn('export COMPOSE_PROJECT_NAME="dlh-test-$1"', (ROOT / "test/e2e/shell/test.sh").read_text())
 
     def test_workspace_source_ports_are_disabled(self):
         import sys
