@@ -171,6 +171,10 @@ SELECT * FROM "trading_core"."clients" ORDER BY "client_id" DESC FETCH FIRST 10 
 
 **Что рассказать:** в каждой таблице видна служебная колонка `_batch_id` — номер
 наполнения источника. По ней работает инкрементальная загрузка transactions.
+Тип этой колонки в источниках разный: в bank — BIGINT, в broker — NUMBER(19,0).
+Поэтому в [манифесте](glossary.md#term-manifest) bank заявлен `position_type: bigint`,
+а в [манифесте](glossary.md#term-manifest) broker — `decimal(19,0)`. Правило выбора —
+[раздел «Выбор типа позиции» архитектуры](architecture.md#выбор-типа-позиции).
 Читатель `sydafa` имеет права только на чтение.
 
 ## Шаг 3. Генерация DAG-ов загрузки (имитация CI/CD) и запуск
