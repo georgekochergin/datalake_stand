@@ -1141,27 +1141,28 @@ incremental:
 
 [Канонический тип](glossary.md#term-canonical) выбирается по фактическому типу
 колонки [позиции](glossary.md#term-position) в СУБД. Соответствие приведено отдельной
-таблицей для каждой СУБД.
+таблицей для каждой СУБД. Примеры значений показаны в [каноническом виде](glossary.md#term-canonical) —
+в таком виде позиция хранится в [watermark](glossary.md#term-watermark).
 
 **MSSQL:**
 
-| Тип колонки | Значение `position_type` | Ограничения |
-|---|---|---|
-| SMALLINT / INT / BIGINT | `smallint` / `integer` / `bigint` | Знаковые 16 / 32 / 64 бита.<br>Писать `integer`, не `int` |
-| DECIMAL(p,0), NUMERIC(p,0) | `decimal(p,0)` | p = 1..38.<br>scale строго 0.<br>Точность берётся из JDBC, не из текущих значений |
-| DATE | `date` | Дата без времени |
-| SMALLDATETIME / DATETIME | `timestamp_local(0)` / `timestamp_local(3)` | Семантика без часового пояса |
-| DATETIME2(p) | `timestamp_local(p)` | p = 0..7 |
-| DATETIMEOFFSET(p) | `timestamp_instant(p)` | p = 0..7.<br>Позиция нормализуется в UTC |
+| Тип колонки | Значение `position_type` | Пример значения | Ограничения |
+|---|---|---|---|
+| SMALLINT / INT / BIGINT | `smallint` / `integer` / `bigint` | `12345` | Знаковые 16 / 32 / 64 бита.<br>Писать `integer`, не `int` |
+| DECIMAL(p,0), NUMERIC(p,0) | `decimal(p,0)` | `12345` | p = 1..38.<br>scale строго 0.<br>Точность берётся из JDBC, не из текущих значений |
+| DATE | `date` | `2026-10-26` | Дата без времени |
+| SMALLDATETIME / DATETIME | `timestamp_local(0)` / `timestamp_local(3)` | `2026-10-26T12:00:00` / `2026-10-26T12:00:00.123` | Семантика без часового пояса |
+| DATETIME2(p) | `timestamp_local(p)` | `2026-10-26T12:00:00.1234567` | p = 0..7 |
+| DATETIMEOFFSET(p) | `timestamp_instant(p)` | `2026-10-26T12:00:00.1234567Z` | p = 0..7.<br>Позиция нормализуется в UTC |
 
 **Oracle:**
 
-| Тип колонки | Значение `position_type` | Ограничения |
-|---|---|---|
-| NUMBER(p,0) | `decimal(p,0)` | p = 1..38.<br>scale строго 0.<br>Точность берётся из JDBC, не из текущих значений |
-| DATE | `timestamp_local(0)` | Содержит время, поэтому не `date` |
-| TIMESTAMP(p) | `timestamp_local(p)` | p = 0..9 |
-| TIMESTAMP(p) WITH TIME ZONE / WITH LOCAL TIME ZONE | `timestamp_instant(p)` | p = 0..9.<br>UTC |
+| Тип колонки | Значение `position_type` | Пример значения | Ограничения |
+|---|---|---|---|
+| NUMBER(p,0) | `decimal(p,0)` | `12345` | p = 1..38.<br>scale строго 0.<br>Точность берётся из JDBC, не из текущих значений |
+| DATE | `timestamp_local(0)` | `2026-10-26T12:34:56` | Содержит время, поэтому не `date` |
+| TIMESTAMP(p) | `timestamp_local(p)` | `2026-10-26T12:00:00.123456789` | p = 0..9 |
+| TIMESTAMP(p) WITH TIME ZONE / WITH LOCAL TIME ZONE | `timestamp_instant(p)` | `2026-10-26T12:00:00.123456789Z` | p = 0..9.<br>UTC |
 
 Целочисленная [позиция](glossary.md#term-position) получает разный
 [канонический тип](glossary.md#term-canonical) в зависимости от СУБД:
