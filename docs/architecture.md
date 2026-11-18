@@ -351,6 +351,8 @@ DAG ingest__rdbms__<source_id>__<pipeline>
 Журнал загрузок `ingestion.airflow_tasks_log` необязателен для продолжения работы:
 
 - Все три оператора загрузки добавляют callbacks к существующим обработчикам.
+- После успешной записи события в pg-meta callback пишет в лог задачи `load`
+  сообщение уровня INFO со статусом, целевой таблицей и `process_id`.
 - Ошибки получения `process_id` и записи события перехватываются. В стандартный
   лог Airflow выводятся статус, целевая таблица и тип ошибки без её текста и реквизитов.
 - Нет `process_id` — событие пропускается с предупреждением. Сама загрузка по-прежнему
@@ -368,7 +370,7 @@ DAG ingest__rdbms__<source_id>__<pipeline>
 ### Ограничение числа загрузок
 
 Все load-таски всех ingest-DAG-ов делят [пул](glossary.md#term-pool) `ingest_loads` на
-4 [слота](glossary.md#term-slot) (создаётся сервисом `airflow-init`).
+6 [слотов](glossary.md#term-slot) (создаётся сервисом `airflow-init`).
 Вес каждой загрузки задаётся параметром `airflow.pool.slots`.
 
 [Пул](glossary.md#term-pool) ограничивает количество одновременно работающих
@@ -1093,7 +1095,7 @@ Oracle), для остальных типов — по самой колонке
 
 Таски `load` разных [сущностей](glossary.md#term-entity) внутри
 DAG-а и разных DAG-ов исполняются параллельно. Их количество сдерживает [пул](glossary.md#term-pool)
-Airflow `ingest_loads` (4 [слота](glossary.md#term-slot), см. раздел 3). Это допуск к [исполнению](glossary.md#term-execution), а не
+Airflow `ingest_loads` (6 [слотов](glossary.md#term-slot), см. раздел 3). Это допуск к [исполнению](glossary.md#term-execution), а не
 выделение ресурсов.
 
 Отключение JDBC-параллелизма (одна партиция
@@ -1144,19 +1146,40 @@ incremental:
 
 #### Выбор типа позиции
 
-Таблица выбора `position_type` по типу источника:
+[Канонический тип](glossary.md#term-canonical) выбирается по фактическому типу
+колонки [позиции](glossary.md#term-position) в СУБД. Соответствие приведено отдельной
+таблицей для каждой СУБД. Примеры значений показаны в [каноническом виде](glossary.md#term-canonical) —
+в таком виде позиция хранится в [watermark](glossary.md#term-watermark).
 
-| Тип источника | Значение `position_type` | Ограничения |
-|---|---|---|
-| MSSQL SMALLINT / INT / BIGINT | `smallint` / `integer` / `bigint` | Знаковые 16 / 32 / 64 бита.<br>Писать `integer`, не `int` |
-| MSSQL DECIMAL(p,0), NUMERIC(p,0)<br>Oracle NUMBER(p,0) | `decimal(p,0)` | p = 1..38.<br>scale строго 0.<br>Точность берётся из JDBC, не из текущих значений |
-| MSSQL DATE | `date` | Дата без времени |
-| MSSQL SMALLDATETIME / DATETIME | `timestamp_local(0)` / `timestamp_local(3)` | Семантика без часового пояса |
-| MSSQL DATETIME2(p) | `timestamp_local(p)` | p = 0..7 |
-| MSSQL DATETIMEOFFSET(p) | `timestamp_instant(p)` | p = 0..7.<br>Позиция нормализуется в UTC |
-| Oracle DATE | `timestamp_local(0)` | Содержит время, поэтому не `date` |
-| Oracle TIMESTAMP(p) | `timestamp_local(p)` | p = 0..9 |
-| Oracle TIMESTAMP(p) WITH TIME ZONE / WITH LOCAL TIME ZONE | `timestamp_instant(p)` | p = 0..9.<br>UTC |
+**MSSQL:**
+
+| Тип колонки | Значение `position_type` | Пример значения | Ограничения |
+|---|---|---|---|
+| SMALLINT / INT / BIGINT | `smallint` / `integer` / `bigint` | `12345` | Знаковые 16 / 32 / 64 бита.<br>Писать `integer`, не `int` |
+| DECIMAL(p,0), NUMERIC(p,0) | `decimal(p,0)` | `12345` | p = 1..38.<br>scale строго 0.<br>Точность берётся из JDBC, не из текущих значений |
+| DATE | `date` | `2026-10-26` | Дата без времени |
+| SMALLDATETIME / DATETIME | `timestamp_local(0)` / `timestamp_local(3)` | `2026-10-26T12:00:00` / `2026-10-26T12:00:00.123` | Семантика без часового пояса |
+| DATETIME2(p) | `timestamp_local(p)` | `2026-10-26T12:00:00.1234567` | p = 0..7 |
+| DATETIMEOFFSET(p) | `timestamp_instant(p)` | `2026-10-26T12:00:00.1234567Z` | p = 0..7.<br>Позиция нормализуется в UTC |
+
+**Oracle:**
+
+| Тип колонки | Значение `position_type` | Пример значения | Ограничения |
+|---|---|---|---|
+| NUMBER(p,0) | `decimal(p,0)` | `12345` | p = 1..38.<br>scale строго 0.<br>Точность берётся из JDBC, не из текущих значений |
+| DATE | `timestamp_local(0)` | `2026-10-26T12:34:56` | Содержит время, поэтому не `date` |
+| TIMESTAMP(p) | `timestamp_local(p)` | `2026-10-26T12:00:00.123456789` | p = 0..9 |
+| TIMESTAMP(p) WITH TIME ZONE / WITH LOCAL TIME ZONE | `timestamp_instant(p)` | `2026-10-26T12:00:00.123456789Z` | p = 0..9.<br>UTC |
+
+Целочисленная [позиция](glossary.md#term-position) получает разный
+[канонический тип](glossary.md#term-canonical) в зависимости от СУБД:
+
+- в MSSQL у целых чисел собственные типы SMALLINT, INT, BIGINT — им соответствуют виды `smallint`, `integer`, `bigint`.
+- в Oracle отдельного целочисленного типа хранения нет: целое число — это NUMBER(p,0), а ANSI-синонимы SMALLINT, INT и INTEGER хранятся как NUMBER(38,0) и через JDBC читаются как NUMBER. Поэтому целочисленная позиция в Oracle всегда имеет вид `decimal(p,0)`.
+- диапазоны `bigint` и `decimal(19,0)` близки, но не совпадают: `bigint` — от -2^63 до 2^63-1 (до `9 223 372 036 854 775 807`), `decimal(19,0)` — до `9 999 999 999 999 999 999`, то есть чуть шире.
+- поэтому для колонки Oracle NUMBER(19,0) нельзя указать `bigint`: вид `bigint` описывает меньший диапазон, чем допускает колонка. Значение `9 999 999 999 999 999 999` законно для NUMBER(19,0) и не помещается в `bigint`.
+- запись значений при этом не различается. В `decimal(p,s)` p — общее число значащих цифр, s — число цифр после запятой: `decimal(19,0)` — 19 цифр и ни одной после запятой, то есть целое число по определению. И `bigint`, и `decimal(19,0)` сохраняют в [watermark](glossary.md#term-watermark) целое число без запятой и без дописанных нулей, например `100`. Различие видов — в заявленном типе колонки, не в записи значений.
+- точность входит в вид для контроля изменений типа: расширение колонки Oracle с NUMBER(19,0) до NUMBER(20,0) меняет выведенный вид на `decimal(20,0)`. Несовпадение останавливает загрузку до записи. Дальнейшие шаги — раздел 8.6. Один общий вид «целое» скрыл бы смену типа и значения вне прежних границ.
 
 Строки, GUID, float, дробные decimal и NUMBER без определённого допустимого
 p/scale не подходят. Метаданные JDBC преобразуются диалектом в фактический
@@ -1164,6 +1187,25 @@ p/scale не подходят. Метаданные JDBC преобразуют�
 Несовпадение — ошибка до агрегатов новой [партии](glossary.md#term-batch) и до записи. В сообщении
 есть ожидаемый/фактический тип, JDBC type_name, precision и scale. Никакого
 автоматического cast, расширения типа или сброса [watermark](glossary.md#term-watermark) нет.
+
+#### Слои типов инкрементальной колонки
+
+Колонка [позиции](glossary.md#term-position) проходит несколько слоёв типов.
+Первопричина — фактический тип колонки в источнике. Манифест задаёт контракт
+и не управляет типами хранения. Пример прохождения слоёв тремя типичными
+колонками:
+
+| Слой | `BIGINT` (MSSQL) | `NUMBER(19,0)` (Oracle) | `DATETIME2(7)` (MSSQL) |
+|---|---|---|---|
+| [Канонический вид](glossary.md#term-canonical): манифест и pg-meta | `bigint` | `decimal(19,0)` | `timestamp_local(7)` |
+| Тип Spark при чтении | `LongType` | `DecimalType(19,0)` | `TimestampNTZType` (микросекунды) |
+| Тип колонки в Iceberg | `bigint` | `decimal(19,0)` | `timestamp_ntz` |
+| [Watermark](glossary.md#term-watermark) в pg-meta | текст `100` | текст `100` | текст `2026-10-26T12:00:00.1234567` |
+
+- Диалект выводит [канонический вид](glossary.md#term-canonical) из JDBC-метаданных и сверяет его с `position_type` манифеста. Потребители вида — текст [watermark](glossary.md#term-watermark), сравнение позиций, [lookback](glossary.md#term-lookback) и SQL-литералы границ [окна](glossary.md#term-window).
+- Тип Spark при чтении и тип в Iceberg получаются общим путём типов всех колонок (раздел 10). Манифест на них не влияет: [raw](glossary.md#term-raw)-таблица создаётся по фактически прочитанной схеме (раздел 4).
+- Колонка-позиция играет две роли. Как обычная колонка она записывается в [raw](glossary.md#term-raw) в типе Spark-чтения. Как [позиция](glossary.md#term-position) она участвует в предикатах [окна](glossary.md#term-window) и агрегате максимума, где значения проходят через [канонический вид](glossary.md#term-canonical).
+- Максимум позиции агрегируется по отдельному выражению `__extract_position`: целые читаются значением колонки, timestamp-позиции источник переводит в строку без потерь (точность — «Формат хранения и точность» ниже). После агрегации выражение удаляется из фрейма и в Iceberg не попадает.
 
 #### Передача конфигурации загрузчику
 
@@ -1202,6 +1244,7 @@ p/scale не подходят. Метаданные JDBC преобразуют�
   приписывает ему пояс сервера или Spark.
 - `timestamp_instant`: `2026-10-26T15:00:00+03:00` и
   `2026-10-26T12:00:00Z` — один момент. В pg-meta сохраняется второй вид.
+  Суффикс `Z` означает UTC (то же, что `+00:00`).
 - Oracle `DATE '2026-10-26'` может иметь также часы, минуты и секунды:
   позиция хранится как `timestamp_local(0)`, например `2026-10-26T12:34:56`.
 - MSSQL `datetime2(7)` со значением `2026-10-26T12:00:00.1234567`
@@ -1212,6 +1255,50 @@ p/scale не подходят. Метаданные JDBC преобразуют�
 - Oracle `TIMESTAMP WITH [LOCAL] TIME ZONE` проецируется через
   `SYS_EXTRACT_UTC` ещё в SELECT: Spark JDBC не отображает исходные JDBC-типы
   -101/-102. Это касается и обычных колонок [raw](glossary.md#term-raw), не только позиции.
+
+#### Нормализация instant-позиции в UTC
+
+Выражение `__extract_position` вычисляет источник. Форма для MSSQL-колонки
+`changed_at` типа `DATETIMEOFFSET(7)` при значении
+[позиции](glossary.md#term-position) `2026-10-26T15:00:00.1234567+03:00`:
+
+```sql
+CONVERT(char(19), CAST(SWITCHOFFSET([changed_at], '+00:00') AS datetime2(7)), 126)
++ '.' + LEFT(RIGHT('000000000'
+              + CAST(DATEPART(nanosecond, SWITCHOFFSET([changed_at], '+00:00')) AS varchar(9)), 9), 7)
++ 'Z' AS "__extract_position"
+```
+
+Выражение — конкатенация четырёх слагаемых:
+
+| Слагаемое | Роль | Результат для примера |
+|---|---|---|
+| `SWITCHOFFSET([changed_at], '+00:00')` | пересчёт момента в UTC | `2026-10-26T12:00:00.1234567` |
+| `CONVERT(char(19), CAST(... AS datetime2(7)), 126)` | дата-время строкой, 19 символов | `2026-10-26T12:00:00` |
+| `'.' + LEFT(RIGHT('000000000' + DATEPART(nanosecond, ...), 9), 7)` | дробная часть без потерь | `.1234567` |
+| `'Z'` | литерал зоны | `Z` |
+
+Конкатенация даёт `2026-10-26T12:00:00.1234567Z`. В Oracle то же самое
+выполняет одна маска `TO_CHAR`:
+
+```sql
+TO_CHAR(SYS_EXTRACT_UTC("changed_at"), 'YYYY-MM-DD"T"HH24:MI:SS.FF7"Z"')
+```
+
+Дальше значение идёт в [watermark](glossary.md#term-watermark) без пересчётов:
+
+1. В Spark строка приходит текстом. Загрузчик проверяет её каноническим
+   разбором (`positions.canonical`): значение разбирается по заявленной
+   точности и собирается обратно без изменений.
+2. Готовый литерал записывается в [watermark](glossary.md#term-watermark) pg-meta. При
+   последующих чтениях значение не пересчитывается.
+
+Пересчёт в UTC выполняет источник, а не Spark:
+
+- timestamp-колонка DataFrame ограничена шестью цифрами дробной части —
+  седьмая цифра примера потерялась бы ещё до пересчёта.
+- перевод пояса на стороне Spark зависел бы от часового пояса сессии JVM.
+- Oracle timezone-типы Spark JDBC не отображает вовсе (типы -101/-102).
 
 Слово `timestamp` неоднозначно: **Oracle TIMESTAMP поддерживается**,
 а **MSSQL `timestamp`/`rowversion` не поддерживается** как позиция. В SQL Server
@@ -1400,8 +1487,14 @@ Iceberg-коммит в эту транзакцию не входит.
    диапазон между ними. Это ветка внутри `managed_load()`:
    оператор не отменяется, `spark-submit` и SparkSession уже запущены,
    диагностические JDBC-запросы выполнены, но не выполняется чтение DataFrame
-   [окна](glossary.md#term-window) и запись Iceberg. Для первичного наполнения пустого источника эта
-   оптимизация не действует: нужен пустой DataFrame для создания [raw](glossary.md#term-raw)-таблицы.
+   [окна](glossary.md#term-window) и запись Iceberg. Для пустого на планировании источника эта
+   оптимизация не действует: у пустой таблицы `MAX` возвращает NULL, границы
+   сохраняются как NULL, и равенство границ не выполняется. Такая [партия](glossary.md#term-batch)
+   идёт общим путём: [окно](glossary.md#term-window) читается настоящим JDBC-запросом с добавленным
+   предикатом `1=0`, который возвращает ноль строк, `attempt_count`
+   увеличивается как при обычном [исполнении](glossary.md#term-execution). Чтение нужно ради пустого
+   DataFrame: DDL [raw](glossary.md#term-raw)-таблицы выполняется по схеме прочитанного фрейма даже
+   при нуле строк (раздел 4).
 3. **[Исполнение](glossary.md#term-execution).** Для инкрементальной [партии](glossary.md#term-batch) `meta.start_batch()` ставит
    `RUNNING`, увеличивает `incremental_batches.attempt_count` на 1 и
    очищает `finished_at` ([полный срез](glossary.md#term-full) стартует без этого шага). Затем

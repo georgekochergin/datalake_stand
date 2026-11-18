@@ -171,6 +171,10 @@ SELECT * FROM "trading_core"."clients" ORDER BY "client_id" DESC FETCH FIRST 10 
 
 **Что рассказать:** в каждой таблице видна служебная колонка `_batch_id` — номер
 наполнения источника. По ней работает инкрементальная загрузка transactions.
+Тип этой колонки в источниках разный: в bank — BIGINT, в broker — NUMBER(19,0).
+Поэтому в [манифесте](glossary.md#term-manifest) bank заявлен `position_type: bigint`,
+а в [манифесте](glossary.md#term-manifest) broker — `decimal(19,0)`. Правило выбора —
+[раздел «Выбор типа позиции» архитектуры](architecture.md#выбор-типа-позиции).
 Читатель `sydafa` имеет права только на чтение.
 
 ## Шаг 3. Генерация DAG-ов загрузки (имитация CI/CD) и запуск
@@ -277,7 +281,7 @@ WHERE username = 'SYDAFA' AND program LIKE 'JDBC%';
 
 **[Пул](glossary.md#term-pool) Airflow**: Admin → [Pools](glossary.md#term-pool) → `ingest_loads`:
 
-- Ёмкость — 4 [слота](glossary.md#term-slot).
+- Ёмкость — 6 [слотов](glossary.md#term-slot).
 - `transactions` занимает 2 [слота](glossary.md#term-slot), остальные загрузки — по 1.
 - Во время загрузок колонки Running/Queued [Slots](glossary.md#term-slot) оживают.
 - На главной странице есть виджет [Pool](glossary.md#term-pool) [Slots](glossary.md#term-slot).
@@ -287,7 +291,7 @@ WHERE username = 'SYDAFA' AND program LIKE 'JDBC%';
 - [Манифест](glossary.md#term-manifest) описывает, какие таблицы загружать и с какими настройками.
 - Чтобы добавить [полный срез](glossary.md#term-full) таблицы, достаточно записи с её `fqn`.
 - [Пул](glossary.md#term-pool) `ingest_loads` ограничивает число одновременно допущенных загрузок.
-  В нём 4 [слота](glossary.md#term-slot): transactions занимает 2, остальные загрузки — по 1.
+  В нём 6 [слотов](glossary.md#term-slot): transactions занимает 2, остальные загрузки — по 1.
 
 ## Шаг 4. Результат в Trino (DBeaver) и артефакты в pg-meta
 
@@ -719,7 +723,7 @@ GROUP BY 1 ORDER BY 1;
   отсутствующие в источнике сохраняются в [raw](glossary.md#term-raw) с NULL в новых [порциях](glossary.md#term-portion).
 
 Расширения типов колонок и несовместимые изменения за рамки ручной
-демонстрации вынесены: их прогоняет автоматический сценарий `./test/test.sh`
+демонстрации вынесены: их прогоняет автоматический сценарий `./test/e2e/shell/test.sh`
 на обоих источниках. Подтверждённая матрица расширений и отказов описана в
 [разделе 5 архитектуры](architecture.md#5-устойчивость-к-эволюции-схемы-источника).
 

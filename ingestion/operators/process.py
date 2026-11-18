@@ -62,6 +62,9 @@ def log_task_event(
             "Task lifecycle event not recorded status=%s target=%s reason_type=%s",
             status, datalake_table, type(error).__name__,
         )
+    else:
+        LOG.info("Task lifecycle event recorded status=%s target=%s process_id=%s",
+                 status, datalake_table, process_id)
 
 
 class GenerateProcessIdOperator(BaseOperator):

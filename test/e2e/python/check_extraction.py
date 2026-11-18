@@ -2,6 +2,7 @@
 """Inspect managed extraction metadata after the e2e ingestion scenarios."""
 
 from collections import defaultdict
+import os
 from uuid import uuid4
 
 from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -28,7 +29,7 @@ def check_snapshot_publication():
     from ingestion.operators import publish_asset_event
 
     hook = TrinoHook(trino_conn_id="trino_default")
-    table = "raw.bank.e2e_asset_" + uuid4().hex
+    table = "raw." + os.environ["E2E_SOURCE"] + ".e2e_asset_" + uuid4().hex
     hook.run(f"CREATE TABLE {table} (__process_id BIGINT)")
     try:
         class TaskInstance:
@@ -180,6 +181,8 @@ def check_registry_recovery():
 
 def main():
     """Check state, frozen bounds, no-op results, and process identity."""
+    source = os.environ["E2E_SOURCE"]
+    require(source in ("bank", "broker"), "known isolated source")
     connection = PostgresHook(postgres_conn_id="ingestion_meta").get_conn()
     try:
         with connection.cursor() as cursor:
@@ -204,28 +207,26 @@ def main():
                     "successful load callbacks recorded END")
             require(any("FAILED" in statuses for statuses in lifecycle.values()),
                     "failed load callbacks recorded FAILED")
+            namespace = "retail_bank" if source == "bank" else "trading_core"
             expected_targets = {
-                "raw.bank.retail_bank__clients", "raw.bank.retail_bank__deals",
-                "raw.bank.retail_bank__transactions", "raw.bank.retail_bank__accounts",
-                "raw.broker.trading_core__clients", "raw.broker.trading_core__deals",
-                "raw.broker.trading_core__transactions", "raw.broker.trading_core__accounts",
-                "raw.bank.retail_bank__transactions__act_snap",
-                "raw.broker.trading_core__transactions__act_snap",
+                f"raw.{source}.{namespace}__{table}"
+                for table in ("clients", "deals", "transactions", "accounts", "transactions__act_snap")
             }
             require({target for _, target in initial_loads} == expected_targets,
                     "full, incremental and snapshot loads recorded lifecycle events")
             require(all(statuses[0] == "START" and statuses[-1] == "END"
                         for statuses in initial_loads.values()),
                     "initial successful loads recorded START and END")
-            states = records(cursor, "SELECT * FROM ingestion.incremental_state WHERE source_id IN ('bank', 'broker')")
+            states = records(cursor, f"SELECT * FROM ingestion.incremental_state WHERE source_id = '{source}'")
             batches = records(
                 cursor,
-                "SELECT * FROM ingestion.incremental_batches WHERE source_id IN ('bank', 'broker') "
+                f"SELECT * FROM ingestion.incremental_batches WHERE source_id = '{source}' "
                 "ORDER BY process_id, source_id, entity_fqn",
             )
-            require(len(states) == 2, "only the two incremental entities have registry state")
+            require(len(states) == 1, "only the selected incremental entity has registry state")
             registered = {state["entity_fqn"] for state in states}
-            require(registered == {"retail_bank.transactions", "trading_core.transactions"},
+            expected = f"{namespace}.transactions"
+            require(registered == {expected},
                     "registry tracks exactly the transactions entities")
             require(bool(batches), "extraction batches exist")
             identities = {(b["process_id"], b["source_id"], b["entity_fqn"]) for b in batches}
@@ -258,12 +259,8 @@ def main():
                             label + " no-op records zero rows")
                     require(batch["watermark_after"] == batch["watermark_before"],
                             label + " no-op preserves watermark")
-            require(all(len(ids) == 1 for (_, run), ids in processes.items()
-                        if not run.startswith("e2e-clear-")),
+            require(all(len(ids) == 1 for ids in processes.values()),
                     "each DagRun in the flow scenario shares one process ID")
-            clear_runs = [ids for (_, run), ids in processes.items() if run.startswith("e2e-clear-")]
-            require(len(clear_runs) == 1 and len(clear_runs[0]) == 3,
-                    "full and partial Clear each create new batches despite retained history")
             for state in states:
                 history = grouped[state["source_id"], state["entity_fqn"]]
                 label = f"{state['source_id']}/{state['entity_fqn']}"

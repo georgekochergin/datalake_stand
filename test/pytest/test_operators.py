@@ -307,9 +307,15 @@ class TestTaskLifecycleCallbacks(unittest.TestCase):
         )
 
     def test_start_retry_and_end_only_log_lifecycle(self):
-        for status in ("START", "START", "END", "FAILED"):
-            self.event(status)
-        self.assertEqual(self.events, ["START", "START", "END", "FAILED"])
+        statuses = ["START", "START", "END", "FAILED"]
+        with self.assertLogs(self.module.process.LOG, "INFO") as logs:
+            for status in statuses:
+                self.event(status)
+        self.assertEqual(self.events, statuses)
+        self.assertEqual([record.getMessage() for record in logs.records], [
+            f"Task lifecycle event recorded status={status} target=raw.bank.s__t process_id=42"
+            for status in statuses
+        ])
         kwargs = self.module.meta.log_task.call_args.kwargs
         self.assertEqual({key: value for key, value in kwargs.items() if key != "db_connect"}, {
             "process_id": 42, "source_id": "bank", "entity_fqn": "s.t",
@@ -320,8 +326,9 @@ class TestTaskLifecycleCallbacks(unittest.TestCase):
     def test_log_failure_is_reported_without_secrets_or_propagation(self):
         self.module.meta.log_task.side_effect = RuntimeError("password=private")
         for status in ("START", "END", "FAILED"):
-            with self.subTest(status=status), self.assertLogs(self.module.process.LOG, "WARNING") as logs:
+            with self.subTest(status=status), self.assertLogs(self.module.process.LOG, "INFO") as logs:
                 self.event(status)
+            self.assertEqual([record.levelname for record in logs.records], ["WARNING"])
             self.assertIn("RuntimeError", logs.output[0])
             self.assertIn(status, logs.output[0])
             self.assertNotIn("private", str(logs.output))

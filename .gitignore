@@ -26,6 +26,8 @@ airflow/dags/generated/**
 # Временное дерево проекта для e2e-тестов
 test/.workspace/
 test/.workspace/**
+test/.workspace-*/
+test/.results/
 
 /trino/*
 !/trino/.gitkeep

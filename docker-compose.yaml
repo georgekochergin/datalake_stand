@@ -229,7 +229,7 @@ services:
           airflow connections add ingestion_meta \
             --conn-type postgres --conn-host pg-meta --conn-port 5432 --conn-schema meta \
             --conn-login "$${STAND_USER}" --conn-password "$${STAND_PASSWORD}"
-        airflow pools set ingest_loads 4 'Raw-layer ingestion load tasks (shared across ingest DAGs)'
+        airflow pools set ingest_loads 6 'Raw-layer ingestion load tasks (shared across ingest DAGs)'
     environment: &airflow-env
       <<: *spark-env
       PYTHONPATH: /opt/python
@@ -305,10 +305,10 @@ services:
         condition: service_completed_successfully
     networks: [dlh-poc]
 
-  # ---------- Полный тестовый флоу (запускается через test/test.sh) ----------
+  # ---------- Полный тестовый флоу (запускается через test/e2e/shell/test.sh) ----------
 
   test-runner:
-    build: ./test
+    build: {context: ./test/e2e, dockerfile: docker/Dockerfile}
     image: dlh-poc-test-runner
     pull_policy: build
     profiles: ["test"]
