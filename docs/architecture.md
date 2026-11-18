@@ -271,10 +271,8 @@ DAG ingest__rdbms__<source_id>__<pipeline>
 └── activate_source       SydafaActivateOperator: поднять СУБД, TTL 15 минут
     └── TaskGroup "ingest_group"                       (сущности параллельно)
         ├── TaskGroup "load_<schema>__<table_a>" (одна сущность)
-        │   ├── log_start   событие START в pg-meta
         │   ├── load        IngestFullOperator / IngestIncrementalOperator → spark/raw/rdbms/<поток>/load_entity.py
-        │   ├── log_end     событие END в pg-meta
-        │   └── publish_asset  публикация Asset после успешного log_end
+        │   └── publish_asset  публикация Asset после успешной загрузки
         └── TaskGroup "load_<schema>__<table_b>" ...
 ```
 
@@ -285,7 +283,7 @@ DAG ingest__rdbms__<source_id>__<pipeline>
 
 Внутри
 группы [сущности](glossary.md#term-entity) независимы, внутри [сущности](glossary.md#term-entity) —
-`log_start >> load >> log_end >> publish_asset`.
+`load >> publish_asset`.
 Прямая зависимость от генератора применяется и к корням снимочных групп.
 Она нужна при частичном [Clear](glossary.md#term-clear) генератора и группы без `activate_source`:
 оставшаяся успешной активация не должна разрешать START до завершения
@@ -308,17 +306,10 @@ DAG ingest__rdbms__<source_id>__<pipeline>
 - **`activate_source`** (`SydafaActivateOperator`, пакет `sydafa-airflow`) —
   будит СУБД источника через REST sydafa с TTL 15 минут, чтобы к моменту JDBC-чтения
   СУБД источника была запущена.
-- **`log_start` / `log_end`** (`TableLogOperator`) — события жизненного цикла
-  [сущности](glossary.md#term-entity) в `airflow_tasks_log`, без публикации [Asset](glossary.md#term-asset) и управления состоянием
-  извлечения. Таблицы `ingestion.incremental_batches` и
-`ingestion.incremental_state`
-  обслуживает Spark-функция `managed_load()` через `ingestion.meta`.
-  Параметр `incremental_column` передаётся только задаче `load`.
 - **`publish_asset`** (`PythonOperator` с `outlets`, callable `publish_asset_event`) — отдельная задача публикации
   события обновления [Asset](glossary.md#term-asset) `raw://<source_id>/<fqn>`, на который смогут
   подписываться DAG-и следующих слоёв. Выполняется только после успешного
-  `log_end`: загрузка завершилась и её успех записан в pg-meta. Ошибка или
-  пропуск `log_end` не допускает публикацию.
+  `load`. Ошибка записи журнала не препятствует публикации.
 - **`load`** (`IngestFullOperator` или `IngestIncrementalOperator` по типу
   [сущности](glossary.md#term-entity), наследники `SparkSubmitOperator`,
   client-mode) — исполнитель загрузки:
@@ -352,9 +343,27 @@ DAG ingest__rdbms__<source_id>__<pipeline>
 | Callback | Действие |
 |---|---|
 | DAG success/failure | Событие END/FAILED запуска в pg-meta |
-| `log_task_failed` | Существующее событие FAILED задачи в pg-meta |
+| Load execute | START каждой попытки через `log_task_event` |
+| Load success | END через `log_task_event` |
+| Load failure | FAILED после исчерпания повторов через `log_task_event` |
 | Load retry/failure | Только диагностика: состояние, target, доступные IDs, результат guard и тип причины без реквизитов |
-| `on_execute_callback` | Не используется как барьер: Airflow может подавить его исключение |
+
+Журнал загрузок `ingestion.airflow_tasks_log` необязателен для продолжения работы:
+
+- Все три оператора загрузки добавляют callbacks к существующим обработчикам.
+- После успешной записи события в pg-meta callback пишет в лог задачи `load`
+  сообщение уровня INFO со статусом, целевой таблицей и `process_id`.
+- Ошибки получения `process_id` и записи события перехватываются. В стандартный
+  лог Airflow выводятся статус, целевая таблица и тип ошибки без её текста и реквизитов.
+- Нет `process_id` — событие пропускается с предупреждением. Сама загрузка по-прежнему
+  требует корректный `process_id`.
+- Каждый [retry](glossary.md#term-retry) и [Clear](glossary.md#term-clear) только `load`
+  создаёт новый START с прежним `process_id`. Отдельного номера попытки в журнале нет.
+- Промежуточная неудача создаёт диагностику retry, но не FAILED. END записывается только при успехе.
+- Запись журнала не управляет состоянием извлечения. Инкрементальный реестр и
+  [watermark](glossary.md#term-watermark) остаются обязательной частью инкрементальной загрузки.
+- У callbacks нет отдельных задач и независимых повторов доставки. Ручная смена
+  состояния задачи не гарантирует вызов callbacks.
 
 Диагностические callbacks — функции уровня модуля, добавляются к существующим обработчикам. Они не обращаются к master и не останавливают приложения: поздний callback не должен затронуть новую загрузку. Доставка callbacks после SIGKILL не гарантирована.
 
@@ -383,9 +392,7 @@ DAG ingest__rdbms__<source_id>__<pipeline>__act_snap_<alias>
 ├── generate_process_id   собственный process_id снимочного запуска
 └── activate_source       SydafaActivateOperator: поднять СУБД, TTL 15 минут
     └── TaskGroup "snap_<schema>__<table>"
-        ├── log_start      событие START в pg-meta
         ├── load           IngestActSnapOperator → ingestion/spark/raw/rdbms/incremental/load_act_snap.py
-        ├── log_end        событие END в pg-meta
         └── publish_asset  PythonOperator: в таблице есть строки текущего
                            процесса — публикация, иначе пропуск
 ```
@@ -1674,7 +1681,7 @@ CHECK (status = 'SUCCEEDED' OR
 
 2. Новый [DagRun](glossary.md#term-dagrun) исполняет `generate_process_id` и получает `process_id=42`.
    В `airflow_dagruns_log` появляется START с новым `id`, этим `process_id`,
-   `dag_id`, `run_id`, логической датой запуска и `ts`. `log_start` добавляет
+   `dag_id`, `run_id`, логической датой запуска и `ts`. Callback начала `load` добавляет
    в `airflow_tasks_log` новый `id`, `process_id=42`, источник, [FQN](glossary.md#term-fqn), целевую
    таблицу, `status=START`, `ts`.
 3. [Партии](glossary.md#term-batch) с ключом `(42, <source_id>, <schema>.<table>)` ещё нет —
@@ -1707,7 +1714,7 @@ CHECK (status = 'SUCCEEDED' OR
    `last_process_id=42`, `updated_at=время финализации`. В [партии](glossary.md#term-batch) меняются
    `status=SUCCEEDED`, `row_count=2`, `observed_max=11`,
    `watermark_after=11`, `finished_at=время завершения`. Остальные поля
-   неизменны. Далее `log_end` добавляет событие END [сущности](glossary.md#term-entity), публикуется
+   неизменны. Далее callback успеха `load` пытается добавить событие END [сущности](glossary.md#term-entity), публикуется
    [Asset](glossary.md#term-asset), при успехе всего DAG-а колбэк добавляет END запуска.
 6. Альтернативный исход шага 5: Iceberg append уже закоммичен, но транзакция
    финализации pg-meta не закоммичена. Две строки в [raw](glossary.md#term-raw) уже существуют,
@@ -1903,8 +1910,7 @@ COMMIT;
     Это не добавляет spark/airflow в корень YAML основного [пайплайна](glossary.md#term-pipeline).
   - `catchup=False` для снимков фиксирован.
   - `MAX_ACTIVE_RUNS=1` — проектная константа генератора для обоих видов DAG-ов, а не параметр YAML.
-- Активация источника, колбэки успеха/провала и `TableLogOperator`
-  START/END — штатные.
+- Активация источника и callbacks журнала — штатные, как у основной загрузки.
 - Снимочный поток не управляет состоянием основной загрузки:
   - В **инкрементальный реестр** (`incremental_state`, `incremental_batches`) снимок не пишет ничего.
   - `finalize_batch()` выполняет только инкрементальный поток.
@@ -1974,7 +1980,7 @@ writer обязан быть остановлен до повтора** (экс�
 
 URI снимка — `raw://<source_id>/<fqn>/act_snap`,
 обычной загрузки — `raw://<source_id>/<fqn>`. Структура DAG-а постоянна:
-`log_start → load → log_end → publish_asset`. Последняя задача всегда
+`load → publish_asset`. Последняя задача всегда
 `PythonOperator` с заранее объявленным outlet и callable `publish_asset_event`.
 Для обычной загрузки callable не выполняет проверок. Для снимка вызывает
 отдельную функцию `snapshot_has_current_process`, которая через `TrinoHook`
@@ -2058,8 +2064,9 @@ Airflow — отдельные инстансы. DDL — `conf/pg-meta/init/01_i
 статус запуска — последнее событие, длительность — разность `ts`.
 
 **`ingestion.airflow_tasks_log`** — журнал тасков ([append-only](glossary.md#term-append)): `process_id`,
-`source_id`, `entity_fqn`, `datalake_table`, `ts`, `status` (`START` / `END` —
-`log_start`/`log_end`, `FAILED` — колбэк неудачи `load`).
+`source_id`, `entity_fqn`, `datalake_table`, `ts`, `status` (`START` / `END` / `FAILED` —
+callbacks начала, успеха и окончательной неудачи `load`). Запись выполняется
+без гарантии доставки и не является условием публикации результата.
 
 ### Аудит миграций
 

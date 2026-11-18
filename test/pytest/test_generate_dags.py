@@ -85,7 +85,7 @@ class TestGenerateDagSource(unittest.TestCase):
         self.assertIn('group_id="load_retail_bank__transactions"', self.source)
         self.assertIn('Asset("raw://bank/retail_bank.clients")', self.source)
         self.assertIn('Asset("raw://bank/retail_bank.transactions")', self.source)
-        self.assertIn('datalake_table="raw.bank.retail_bank__transactions"', self.source)
+        self.assertIn('target_table="raw.bank.retail_bank__transactions"', self.source)
 
     def test_assets_are_published_only_by_separate_task(self):
         import ast
@@ -100,7 +100,10 @@ class TestGenerateDagSource(unittest.TestCase):
             self.assertNotIn("trigger_rule", keywords)
 
     def test_publication_requires_successful_end_logging(self):
-        self.assertEqual(self.source.count("log_start >> load >> log_end >> publish_asset"), 2)
+        self.assertEqual(self.source.count("load >> publish_asset"), 2)
+        self.assertNotIn("TableLogOperator", self.source)
+        self.assertNotIn("log_start", self.source)
+        self.assertNotIn("log_end", self.source)
 
     def test_load_tasks_share_pool(self):
         self.assertIn('pool="default_pool"', self.source)
@@ -108,7 +111,7 @@ class TestGenerateDagSource(unittest.TestCase):
 
     def test_incremental_column_only_where_configured(self):
         self.assertEqual(self.source.count("'source_column': '_batch_id'"), 1)
-        self.assertIn('entity_fqn="retail_bank.clients"', self.source)
+        self.assertIn('fqn="retail_bank.clients"', self.source)
         self.assertEqual(self.source.count("'lookback': {'size': 12, 'unit': None}"), 1)
         self.assertNotIn("lookback_specified=False", self.source)
 
@@ -236,7 +239,6 @@ class TestGenerateSnapshotDagSource(unittest.TestCase):
     def test_task_group_and_operators(self):
         self.assertIn('group_id="snap_retail_bank__transactions"', self.source)
         self.assertIn('IngestActSnapOperator(', self.source)
-        self.assertIn('datalake_table="raw.bank.retail_bank__transactions__act_snap"', self.source)
         self.assertIn('target_table="raw.bank.retail_bank__transactions__act_snap"', self.source)
         self.assertIn("generate_process_id >> activate_source >> snap_group", self.source)
 
@@ -273,7 +275,10 @@ class TestGenerateSnapshotDagSource(unittest.TestCase):
         self.assertIn('Asset("raw://bank/retail_bank.transactions/act_snap")', self.source)
 
     def test_logging_chain(self):
-        self.assertEqual(self.source.count("log_start >> load >> log_end >> publish_asset"), 1)
+        self.assertEqual(self.source.count("load >> publish_asset"), 1)
+        self.assertNotIn("TableLogOperator", self.source)
+        self.assertNotIn("log_start", self.source)
+        self.assertNotIn("log_end", self.source)
 
     def test_no_dag_params_and_no_hash_comments(self):
         self.assertNotIn("Param(", self.source)
@@ -321,7 +326,7 @@ class TestGenerateAll(unittest.TestCase):
     def test_broker_is_incremental(self):
         broker = self.generated["ingest__rdbms__broker__main.py"]
         self.assertIn("'source_column': '_batch_id'", broker)
-        self.assertIn('entity_fqn="trading_core.transactions"', broker)
+        self.assertIn('fqn="trading_core.transactions"', broker)
         self.assertIn('Asset("raw://broker/trading_core.deals")', broker)
         self.assertIn("'lookback': {'size': 0, 'unit': None}", broker)
         self.assertIn("'position_type': 'decimal(19,0)'", broker)

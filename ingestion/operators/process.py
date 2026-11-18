@@ -3,11 +3,14 @@
 Knows nothing about source types, load modes, or data layers.
 """
 
+import logging
 from functools import partial
 
 from airflow.sdk import BaseOperator
 
 from ingestion import meta
+
+LOG = logging.getLogger(__name__)
 
 
 def _meta_connect(pg_conn_id: str = "ingestion_meta"):
@@ -32,25 +35,36 @@ def _validate_process_id(value) -> int:
     raise ValueError("process_id must be a positive integer from generate_process_id")
 
 
-def log_task_failed(
+def log_task_event(
     context,
     source_id: str,
     entity_fqn: str,
     datalake_table: str,
+    status: str,
     pg_conn_id: str = "ingestion_meta",
 ) -> None:
-    """Append the task FAILED event; attachable via functools.partial (serializable)."""
-    process_id = _pull_process_id(context)
-    if process_id is None:
-        return
-    meta.log_task(
-        process_id=process_id,
-        source_id=source_id,
-        entity_fqn=entity_fqn,
-        datalake_table=datalake_table,
-        status="FAILED",
-        db_connect=partial(_meta_connect, pg_conn_id),
-    )
+    """Append a best-effort lifecycle event without leaking connection errors."""
+    try:
+        process_id = _pull_process_id(context)
+        if process_id is None:
+            LOG.warning("Task lifecycle event skipped status=%s target=%s: missing process_id", status, datalake_table)
+            return
+        meta.log_task(
+            process_id=process_id,
+            source_id=source_id,
+            entity_fqn=entity_fqn,
+            datalake_table=datalake_table,
+            status=status,
+            db_connect=partial(_meta_connect, pg_conn_id),
+        )
+    except Exception as error:
+        LOG.warning(
+            "Task lifecycle event not recorded status=%s target=%s reason_type=%s",
+            status, datalake_table, type(error).__name__,
+        )
+    else:
+        LOG.info("Task lifecycle event recorded status=%s target=%s process_id=%s",
+                 status, datalake_table, process_id)
 
 
 class GenerateProcessIdOperator(BaseOperator):
@@ -98,38 +112,3 @@ def dagrun_success_callback(context) -> None:
 def dagrun_failure_callback(context) -> None:
     """DAG-level failure callback: append the dagrun FAILED event."""
     _dagrun_event("FAILED", context)
-
-
-class TableLogOperator(BaseOperator):
-    """Append lifecycle events after managed loading has finalized its own state."""
-
-    template_fields = ("process_id",)
-
-    def __init__(
-        self,
-        source_id: str,
-        entity_fqn: str,
-        datalake_table: str,
-        status: str,
-        pg_conn_id: str = "ingestion_meta",
-        process_id: str = "{{ ti.xcom_pull(task_ids='generate_process_id') }}",
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.source_id = source_id
-        self.entity_fqn = entity_fqn
-        self.datalake_table = datalake_table
-        self.status = status
-        self.pg_conn_id = pg_conn_id
-        self.process_id = process_id
-
-    def execute(self, context):
-        process_id = _validate_process_id(self.process_id)
-        meta.log_task(
-            process_id=process_id,
-            source_id=self.source_id,
-            entity_fqn=self.entity_fqn,
-            datalake_table=self.datalake_table,
-            status=self.status,
-            db_connect=partial(_meta_connect, self.pg_conn_id),
-        )

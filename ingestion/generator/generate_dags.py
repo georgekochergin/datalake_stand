@@ -82,13 +82,6 @@ def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str
     load_operator = load_operator_name(entity)
     lines = [
         f'        with TaskGroup(group_id="{group_id}") as load_group:',
-        '            log_start = TableLogOperator(',
-        '                task_id="log_start",',
-        f'                source_id="{source.source_id}",',
-        f'                entity_fqn={json.dumps(entity.fqn)},',
-        f'                datalake_table="{target}",',
-        '                status="START",',
-        '            )',
         f'            load = {load_operator}(',
         '                task_id="load",',
         f'                pool={json.dumps(entity.pool)},',
@@ -103,17 +96,6 @@ def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str
     ]
     if isinstance(entity, IncrementalEntityConfig):
         lines.append(f"                incremental_config={entity.incremental_config!r},")
-    lines.extend(
-        [
-            '            )',
-            '            log_end = TableLogOperator(',
-            '                task_id="log_end",',
-            f'                source_id="{source.source_id}",',
-            f'                entity_fqn={json.dumps(entity.fqn)},',
-            f'                datalake_table="{target}",',
-            '                status="END",',
-        ]
-    )
     lines.extend([
         '            )',
         '            publish_asset = PythonOperator(',
@@ -121,7 +103,7 @@ def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str
         '                python_callable=publish_asset_event,',
         f'                outlets=[Asset("{asset_uri(source.source_id, entity.fqn)}")],',
         '            )',
-        '            log_start >> load >> log_end >> publish_asset',
+        '            load >> publish_asset',
     ])
     return lines
 
@@ -135,13 +117,6 @@ def _snapshot_entity_block(source: SourceConfig, entity, num_partitions: int) ->
     pool_slots = config.airflow.pool_slots
     lines = [
         f'    with TaskGroup(group_id="{group_id}") as snap_group:',
-        '        log_start = TableLogOperator(',
-        '            task_id="log_start",',
-        f'            source_id="{source.source_id}",',
-        f'            entity_fqn={json.dumps(entity.fqn)},',
-        f'            datalake_table="{target}",',
-        '            status="START",',
-        '        )',
         '        load = IngestActSnapOperator(',
         '            task_id="load",',
         f'            pool={json.dumps(pool)},',
@@ -154,20 +129,13 @@ def _snapshot_entity_block(source: SourceConfig, entity, num_partitions: int) ->
         f'            fqn={json.dumps(entity.fqn)},',
         f'            target_table="{target}",',
         '        )',
-        '        log_end = TableLogOperator(',
-        '            task_id="log_end",',
-        f'            source_id="{source.source_id}",',
-        f'            entity_fqn={json.dumps(entity.fqn)},',
-        f'            datalake_table="{target}",',
-        '            status="END",',
-        '        )',
         '        publish_asset = PythonOperator(',
         '            task_id="publish_asset",',
         '            python_callable=publish_asset_event,',
         f'            op_kwargs={{"target_table": "{target}"}},',
         f'            outlets=[Asset("{snapshot_asset_uri(source.source_id, entity.fqn)}")],',
         '        )',
-        '        log_start >> load >> log_end >> publish_asset',
+        '        load >> publish_asset',
     ]
     return lines
 
@@ -199,7 +167,6 @@ def generate_snapshot_dag_source(
         "    GenerateProcessIdOperator,",
         "    IngestActSnapOperator,",
         "    publish_asset_event,",
-        "    TableLogOperator,",
         "    dagrun_failure_callback,",
         "    dagrun_success_callback,",
         ")",
@@ -255,7 +222,6 @@ def generate_dag_source(
         "    GenerateProcessIdOperator,",
         *[f"    {name}," for name in load_imports],
         "    publish_asset_event,",
-        "    TableLogOperator,",
         "    dagrun_failure_callback,",
         "    dagrun_success_callback,",
         ")",

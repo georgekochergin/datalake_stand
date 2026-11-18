@@ -7,10 +7,9 @@ external consumers import operators and callbacks from ingestion.operators.
 from .assets import publish_asset_event, snapshot_has_current_process
 from .process import (
     GenerateProcessIdOperator,
-    TableLogOperator,
     dagrun_failure_callback,
     dagrun_success_callback,
-    log_task_failed,
+    log_task_event,
 )
 from .raw_rdbms import (
     IngestActSnapOperator,

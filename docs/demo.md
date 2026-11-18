@@ -213,7 +213,7 @@ python3 -m ingestion.generator.generate_dags --check
    `ingest__rdbms__{bank,broker}__{main,refs}` **появились снова**. Открыть
    `ingest__rdbms__bank__main`: видна структура
    `generate_process_id → activate_source → TaskGroup на каждую [сущность](glossary.md#term-entity)
-   (log_start → load → log_end → publish_asset)`.
+   (load → publish_asset)`.
    `publish_asset` публикует событие готовности таблицы после успешной загрузки.
 6. Запустить все четыре DAG-а (сначала банка, затем брокера — или все сразу).
 7. Пока идут: Spark Master UI (localhost:8080) — работающие приложения
@@ -746,7 +746,9 @@ FROM ingestion.incremental_batches ORDER BY process_id DESC LIMIT 8;
    - Расписание не задано: запустить вручную (Trigger), без параметров.
 2. Структура запуска та же, что у пайплайна: `generate_process_id`
    (свой номер процесса) → `activate_source` → группа `snap_...`:
-   `log_start → load → log_end → publish_asset`. В [манифестах](glossary.md#term-manifest) явно задан
+   `load → publish_asset`. START/END записываются callbacks задачи `load`.
+   Ошибка записи журнала не блокирует загрузку и публикацию.
+   В [манифестах](glossary.md#term-manifest) явно задан
    `incremental.act_snap.airflow.pool`: `ingest_loads`, вес 2, чтобы снимки
    разделяли ограничение числа Spark-приложений с обычными загрузками.
    Это самостоятельная настройка, а не наследование [пула](glossary.md#term-pool) основной загрузки.
