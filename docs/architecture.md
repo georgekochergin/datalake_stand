@@ -1251,18 +1251,40 @@ p/scale не подходят. Метаданные JDBC преобразуют�
 
 #### Нормализация instant-позиции в UTC
 
-Путь значения `DATETIMEOFFSET(7)` `2026-10-26T15:00:00.1234567+03:00`
-до [watermark](glossary.md#term-watermark):
+Выражение `__extract_position` вычисляет источник. Форма для MSSQL-колонки
+`changed_at` типа `DATETIMEOFFSET(7)` при значении
+[позиции](glossary.md#term-position) `2026-10-26T15:00:00.1234567+03:00`:
 
-1. Выражение `__extract_position` вычисляет источник. `SWITCHOFFSET`
-   пересчитывает момент в UTC, `CONVERT` с `DATEPART(nanosecond)` собирает
-   строку без потерь, литерал `Z` дописывается к строке.
-2. В Spark строка приходит текстом. Загрузчик проверяет её каноническим
+```sql
+CONVERT(char(19), CAST(SWITCHOFFSET([changed_at], '+00:00') AS datetime2(7)), 126)
++ '.' + LEFT(RIGHT('000000000'
+              + CAST(DATEPART(nanosecond, SWITCHOFFSET([changed_at], '+00:00')) AS varchar(9)), 9), 7)
++ 'Z' AS "__extract_position"
+```
+
+Выражение — конкатенация четырёх слагаемых:
+
+| Слагаемое | Роль | Результат для примера |
+|---|---|---|
+| `SWITCHOFFSET([changed_at], '+00:00')` | пересчёт момента в UTC | `2026-10-26T12:00:00.1234567` |
+| `CONVERT(char(19), CAST(... AS datetime2(7)), 126)` | дата-время строкой, 19 символов | `2026-10-26T12:00:00` |
+| `'.' + LEFT(RIGHT('000000000' + DATEPART(nanosecond, ...), 9), 7)` | дробная часть без потерь | `.1234567` |
+| `'Z'` | литерал зоны | `Z` |
+
+Конкатенация даёт `2026-10-26T12:00:00.1234567Z`. В Oracle то же самое
+выполняет одна маска `TO_CHAR`:
+
+```sql
+TO_CHAR(SYS_EXTRACT_UTC("changed_at"), 'YYYY-MM-DD"T"HH24:MI:SS.FF7"Z"')
+```
+
+Дальше значение идёт в [watermark](glossary.md#term-watermark) без пересчётов:
+
+1. В Spark строка приходит текстом. Загрузчик проверяет её каноническим
    разбором (`positions.canonical`): значение разбирается по заявленной
    точности и собирается обратно без изменений.
-3. Готовый литерал `2026-10-26T12:00:00.1234567Z` записывается в
-   [watermark](glossary.md#term-watermark) pg-meta. При последующих чтениях значение
-   не пересчитывается.
+2. Готовый литерал записывается в [watermark](glossary.md#term-watermark) pg-meta. При
+   последующих чтениях значение не пересчитывается.
 
 Пересчёт в UTC выполняет источник, а не Spark:
 
