@@ -22,7 +22,7 @@
 - [6. Порядок выполнения load-задачи](#6-порядок-выполнения-load-задачи)
   - [Проверка перед отправкой приложения](#проверка-перед-отправкой-приложения)
   - [Выполнение Spark-приложения](#выполнение-spark-приложения)
-    - [Справка: как Python-скрипт выполняется в Spark](#как-python-скрипт-выполняется-в-spark)
+    - [Как Python-скрипт выполняется в Spark](#как-python-скрипт-выполняется-в-spark)
   - [Полный срез](#полный-срез-full-append)
   - [Инкремент](#инкремент-включая-bootstrap)
   - [Вспомогательный снимок](#вспомогательный-снимок-инкрементальной-таблицы-act_snap-rtas)
@@ -40,6 +40,7 @@
 - [10. Типы и гарантии](#10-типы-данных-и-гарантии)
   - [Microsoft SQL Server (MSSQL)](#microsoft-sql-server-mssql)
   - [Oracle](#oracle)
+  - [Типы DataFrame при создании таблицы](#типы-dataframe-при-создании-таблицы)
   - [Гарантии и ограничения типов](#гарантии-и-ограничения-типов)
 - [11. Ограничения](#11-известные-ограничения)
 - [Другие документы](#другие-документы)
@@ -374,6 +375,9 @@ DAG ingest__rdbms__<source_id>__<pipeline>
 [Пул](glossary.md#term-pool) ограничивает количество одновременно работающих
 Spark-приложений (каждое — отдельный [driver](glossary.md#term-driver) + [executors](glossary.md#term-executor), что дорого для
 Docker-машины), но не выделяет им CPU/память.
+На стенде число ядер на приложение не ограничено через `spark.cores.max`.
+Первое приложение может занять все доступные ядра Spark worker, даже если
+[пул](glossary.md#term-pool) разрешил запустить следующую загрузку.
 
 ### Структура вспомогательного DAG-а снимка
 
@@ -1067,6 +1071,9 @@ Oracle), для остальных типов — по самой колонке
 - Spark запускает задачи по мере освобождения ядер.
 - Ожидающая задача ещё не держит JDBC-соединение.
 - При нехватке ядер запросы выполняются волнами, и интервал чтения растёт.
+- При настройке Spark по умолчанию (`spark.task.cpus=1`) для одновременного
+  чтения `N` [JDBC-партиций](glossary.md#term-jdbc-partition) приложению нужны
+  как минимум `N` доступных ядер у его [executors](glossary.md#term-executor).
 
 ## 8. Инкрементальная загрузка
 
@@ -2068,7 +2075,6 @@ Spark JDBC определяет типы колонок по результат�
 Таблицы ниже показывают соответствия для текущих версий Spark и JDBC-драйверов
 на стенде. Это типы **данных в Iceberg**, а не типы
 [позиции инкремента](glossary.md#term-position) (см. [контракт](#81-контракт)).
-Например, Iceberg хранит `int` даже для исходных `tinyint` и `smallint`.
 Тип `timestamp` в Iceberg — время без зоны (`timestamp_ntz` в Spark SQL),
 а `timestamptz` — абсолютный момент (`timestamp_ltz` в Spark SQL).
 
@@ -2077,7 +2083,8 @@ Spark JDBC определяет типы колонок по результат�
 | Тип в SQL Server | Тип в Iceberg | Примечание |
 |---|---|---|
 | `bit` | `boolean` | |
-| `tinyint`, `smallint`, `int` | `int` | |
+| `tinyint`, `int` | `int` | Spark JDBC читает как `IntegerType` |
+| `smallint` | `int` | Spark JDBC читает как `ShortType`. Загрузчик указывает `smallint` в Spark SQL, а Iceberg хранит `int` |
 | `bigint` | `long` | `bigint` в Spark SQL |
 | `decimal(p,s)`, `numeric(p,s)` | `decimal(p,s)` | До 38 цифр |
 | `smallmoney`, `money` | `decimal(10,4)`, `decimal(19,4)` | Соответственно |
@@ -2104,11 +2111,26 @@ Spark JDBC определяет типы колонок по результат�
 | `DATE`, `TIMESTAMP` | `timestamp` | Oracle `DATE` содержит время до секунд. JDBC-драйвер по умолчанию читает его как timestamp |
 | `TIMESTAMP WITH TIME ZONE`, `TIMESTAMP WITH LOCAL TIME ZONE` | `timestamp` | Загрузчик применяет `SYS_EXTRACT_UTC` в запросе. Хранится время в UTC без исходной зоны или смещения |
 
+### Типы DataFrame при создании таблицы
+
+При создании таблицы для добавления строк `schema_columns()` в
+[`ingestion/spark/raw/iceberg.py`](../ingestion/spark/raw/iceberg.py) принимает
+следующие типы DataFrame. Тип в DDL Spark SQL может отличаться от типа в Iceberg.
+
+| PySpark | Тип в DDL Spark SQL | Тип в Iceberg |
+|---|---|---|
+| `ByteType`, `ShortType`, `IntegerType` | `tinyint`, `smallint`, `int` соответственно | `int` |
+| `LongType` | `bigint` | `long` |
+| `FloatType`, `DoubleType` | `float`, `double` | `float`, `double` |
+| `DecimalType(p,s)` | `decimal(p,s)` | `decimal(p,s)` |
+| `StringType`, `BooleanType`, `BinaryType`, `DateType` | `string`, `boolean`, `binary`, `date` | `string`, `boolean`, `binary`, `date` |
+| `TimestampNTZType`, `TimestampType` | `timestamp_ntz`, `timestamp_ltz` | `timestamp`, `timestamptz` |
+
 ### Гарантии и ограничения типов
 
-- Сводки не обещают поддержку типов, которых нет в таблицах. Если JDBC не
-  может прочитать колонку или тип DataFrame не входит в набор поддерживаемых
-  загрузчиком типов, загрузка завершается ошибкой, а не пропускает колонку.
+- Если JDBC не может прочитать колонку, загрузка завершится ошибкой, а не
+  пропустит её. При создании таблицы для добавления строк загрузка также
+  завершится ошибкой, если [тип DataFrame не поддерживается](#типы-dataframe-при-создании-таблицы).
 - Для объявленного `NUMBER(p,s)` в Oracle не рассчитывайте на загрузку
   при отрицательном масштабе или при `s > p`: такие сочетания не входят
   в диапазон `decimal(p,s)` в Iceberg.
