@@ -774,7 +774,7 @@ spark:
 ```python
 lines = [
     "    with TaskGroup(...) as load_group:",
-    "        log_start = TableLogOperator(...)",
+    "        load = IngestFullOperator(...)",
 ]
 ```
 

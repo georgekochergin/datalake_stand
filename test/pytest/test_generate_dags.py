@@ -240,7 +240,6 @@ class TestGenerateSnapshotDagSource(unittest.TestCase):
         self.assertIn('group_id="snap_retail_bank__transactions"', self.source)
         self.assertIn('IngestActSnapOperator(', self.source)
         self.assertIn('target_table="raw.bank.retail_bank__transactions__act_snap"', self.source)
-        self.assertIn('target_table="raw.bank.retail_bank__transactions__act_snap"', self.source)
         self.assertIn("generate_process_id >> activate_source >> snap_group", self.source)
 
     def test_pool_has_independent_defaults(self):
