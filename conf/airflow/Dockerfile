@@ -14,6 +14,7 @@ ADD https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc11/23.8.0.25.04
     /opt/spark/jars/ojdbc11-23.8.0.25.04.jar
 
 COPY conf/spark/spark-defaults.conf /opt/spark/conf/spark-defaults.conf
+COPY conf/spark/log4j2.properties /opt/spark/conf/log4j2.properties
 
 RUN chmod -R a+rX /opt/spark
 

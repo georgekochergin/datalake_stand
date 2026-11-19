@@ -73,7 +73,7 @@ def _log_statement(cursor, sql, params):
 
 @contextmanager
 def _operation(db_connect, name, **key):
-    """Publish affected rows only after the owning transaction has committed."""
+    """Publish changes only after the owning transaction has committed."""
     log_step(LOG, f"pg-meta: {name}")
     LOG.info("pg-meta begin operation=%s key=%r", name, key)
     changes = []
@@ -86,8 +86,20 @@ def _operation(db_connect, name, **key):
                     name, key, type(error).__name__)
         raise
     for table, before, after in changes:
-        LOG.info("pg-meta %s operation=%s table=ingestion.%s key=%r before=%r row=%r",
-                 "committed" if after is not None else "no-op", name, table, key, before, after)
+        if after is None:
+            LOG.info("pg-meta no-op operation=%s table=ingestion.%s", name, table)
+        else:
+            fields = (
+                [f"{field}={value!r}" for field, value in after.items()
+                 if value is not None and (field not in key or key[field] != value)]
+                if before is None else
+                [f"{field}={before[field]!r}→{value!r}" for field, value in after.items()
+                 if before[field] != value]
+            )
+            LOG.info("pg-meta committed operation=%s table=ingestion.%s %s", name, table,
+                     " ".join(fields) or "no field changes")
+        LOG.debug("pg-meta rows operation=%s table=ingestion.%s key=%r before=%r row=%r",
+                  name, table, key, before, after)
     if not changes:
         LOG.info("pg-meta no writes operation=%s key=%r", name, key)
 

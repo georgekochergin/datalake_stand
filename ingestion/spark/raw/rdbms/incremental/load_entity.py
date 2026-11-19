@@ -228,7 +228,7 @@ def managed_load(spark, args):
         return
     registry.start_batch(**key)
     try:
-        source = window.read_window_frame(spark, args, batch, kind)
+        source = window.read_window_frame(spark, args, batch, kind, detailed_metadata=False)
         try:
             log_step(LOGGER, "summarize batch window")
             rows, observed, clean = window.window_summary(source, kind)

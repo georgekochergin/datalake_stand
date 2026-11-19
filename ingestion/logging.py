@@ -87,7 +87,7 @@ def restore_sql_blocks(lines):
                 pass
             else:
                 if isinstance(block, str):
-                    yield block
+                    yield prefix + block
                     continue
         yield line
 

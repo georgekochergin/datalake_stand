@@ -109,7 +109,7 @@ def compatibility_projection(dialect, keys: KeyMetadata) -> list[str] | None:
     return projected if rewrote else None
 
 
-def key_metadata(jvm, dialect, jdbc_url, user, password, source_table) -> KeyMetadata:
+def key_metadata(jvm, dialect, jdbc_url, user, password, source_table, *, detailed=True) -> KeyMetadata:
     """Catalog column facts with best-effort keys for the partitioning heuristic.
 
     Columns are the required part: when they are unavailable the caller
@@ -117,14 +117,16 @@ def key_metadata(jvm, dialect, jdbc_url, user, password, source_table) -> KeyMet
     driver or account that cannot serve them keeps the columns and the
     heuristic loses only its key-based steps.
     """
-    log_step(_LOGGER, "JDBC catalog metadata")
-    _LOGGER.info("JDBC metadata source_table=%s", source_table)
+    level = logging.INFO if detailed else logging.DEBUG
+    if detailed:
+        log_step(_LOGGER, "JDBC catalog metadata")
+    _LOGGER.log(level, "JDBC metadata source_table=%s", source_table)
     try:
         parts = parse_source_table(source_table)
         with connection(jvm, jdbc_url, user, password) as jdbc_connection:
             metadata = jdbc_connection.getMetaData()
             location = dialect.metadata_location(parts)
-            columns = _column_metadata(metadata, location)
+            columns = _column_metadata(metadata, location, level=level)
             if not columns:
                 _LOGGER.warning(
                     "No JDBC table metadata found for %s",
@@ -132,10 +134,14 @@ def key_metadata(jvm, dialect, jdbc_url, user, password, source_table) -> KeyMet
                 )
                 return KeyMetadata((), (), {})
             primary_key = _degraded_metadata(
-                "primary key", lambda: _primary_key(metadata, location))
+                "primary key", lambda: _primary_key(metadata, location, level=level))
             unique_columns = _degraded_metadata(
-                "unique indexes", lambda: _unique_single_columns(metadata, location))
-            _LOGGER.info("JDBC metadata primary_key=%r unique_single_columns=%r", primary_key, unique_columns)
+                "unique indexes", lambda: _unique_single_columns(metadata, location, level=level))
+            if detailed:
+                _LOGGER.info("JDBC metadata primary_key=%r unique_single_columns=%r", primary_key, unique_columns)
+            else:
+                _LOGGER.info("JDBC metadata refreshed source_table=%s columns=%s primary_key=%r unique_single_columns=%r",
+                             source_table, len(columns), primary_key, unique_columns)
             return KeyMetadata(primary_key, unique_columns, columns)
     except Exception as exc:
         _LOGGER.warning(
@@ -156,11 +162,11 @@ def _degraded_metadata(label: str, lookup):
         return ()
 
 
-def _primary_key(metadata, location) -> tuple[str, ...]:
+def _primary_key(metadata, location, *, level=logging.INFO) -> tuple[str, ...]:
     """Primary-key column names in KEY_SEQ order."""
     pairs: list[tuple[int, str]] = []
     args = (location.catalog, location.schema, location.table)
-    _LOGGER.info("JDBC DatabaseMetaData.getPrimaryKeys%r", args)
+    _LOGGER.log(level, "JDBC DatabaseMetaData.getPrimaryKeys%r", args)
     primary_keys = metadata.getPrimaryKeys(*args)
     try:
         while primary_keys.next():
@@ -172,7 +178,7 @@ def _primary_key(metadata, location) -> tuple[str, ...]:
     return tuple(name for _, name in sorted(pairs))
 
 
-def _unique_single_columns(metadata, location) -> tuple[str, ...]:
+def _unique_single_columns(metadata, location, *, level=logging.INFO) -> tuple[str, ...]:
     """Columns covered alone by a unique, unfiltered, non-functional index.
 
     Composite indexes contribute nothing: rows group by index name and only
@@ -181,7 +187,7 @@ def _unique_single_columns(metadata, location) -> tuple[str, ...]:
     """
     grouped: dict[str, list[str | None]] = {}
     args = (location.catalog, location.schema, location.table, True, True)
-    _LOGGER.info("JDBC DatabaseMetaData.getIndexInfo%r", args)
+    _LOGGER.log(level, "JDBC DatabaseMetaData.getIndexInfo%r", args)
     indexes = metadata.getIndexInfo(*args)
     try:
         while indexes.next():
@@ -225,7 +231,7 @@ def _exact_pattern(metadata, name: str) -> str:
     )
 
 
-def _column_metadata(metadata, location) -> dict[str, ColumnMeta]:
+def _column_metadata(metadata, location, *, level=logging.INFO) -> dict[str, ColumnMeta]:
     """Map lowercased column names to type facts for one table location."""
     result: dict[str, ColumnMeta] = {}
     args = (
@@ -234,7 +240,7 @@ def _column_metadata(metadata, location) -> dict[str, ColumnMeta]:
         location.table if location.table is None else _exact_pattern(metadata, location.table),
         None,
     )
-    _LOGGER.info("JDBC DatabaseMetaData.getColumns%r", args)
+    _LOGGER.log(level, "JDBC DatabaseMetaData.getColumns%r", args)
     columns = metadata.getColumns(*args)
     ordered = []
     try:
@@ -262,6 +268,6 @@ def _column_metadata(metadata, location) -> dict[str, ColumnMeta]:
     finally:
         columns.close()
     for ordinal, info in sorted(ordered, key=lambda item: (item[0] is None, item[0] or 0)):
-        _LOGGER.info("JDBC column ordinal=%s name=%r type=%r precision=%s scale=%s not_null=%s",
-                     ordinal, info.name, info.type_name, info.precision, info.scale, info.not_null)
+        _LOGGER.log(level, "JDBC column ordinal=%s name=%r type=%r precision=%s scale=%s not_null=%s",
+                    ordinal, info.name, info.type_name, info.precision, info.scale, info.not_null)
     return result

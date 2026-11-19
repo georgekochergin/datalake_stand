@@ -493,7 +493,11 @@ def check_load_trace(task_id, log, incremental, *, regular=False):
                      "INSERT INTO ingestion.incremental_batches", "UPDATE ingestion.incremental_state",
                      "pg-meta committed operation=finalize_batch table=ingestion.incremental_state",
                      "pg-meta committed operation=finalize_batch table=ingestion.incremental_batches",
-                     f"'reason': '{'regular' if regular else 'bootstrap'}'", "'status': 'SUCCEEDED'"]
+                     f"reason={'regular' if regular else 'bootstrap'!r}", "→'SUCCEEDED'",
+                     "JDBC metadata refreshed source_table=", "JDBCRelation: Number of partitions:"]
+        check(f"{task_id}: JDBC metadata detail appears once", log.count("JDBC DatabaseMetaData.getColumns"), 1)
+        check(f"{task_id}: Spark SQL block retains logger name", bool(re.search(
+            r"INFO [\w.]+: JDBC SQL scope=batch_window operation=partition_bounds:\n", log)), True)
         source_sql = next(iter(logged_sql(log, "operation=source_position")), "")
         check(f"{task_id}: MAX/COUNT scans whole source", bool(source_sql and
               "COUNT(*)" in source_sql and not re.search(r"\bWHERE\b", source_sql)
@@ -514,6 +518,13 @@ def check_load_trace(task_id, log, incremental, *, regular=False):
               "jdbc partitioning: column=" in log, False)
     for marker in expected:
         check(f"{task_id}: trace includes {marker}", marker in log, True)
+    check(f"{task_id}: pg-meta full rows are not emitted at INFO",
+          bool(re.search(r"pg-meta (?:committed|no-op) [^\n]*before=\{", log)), False)
+    check(f"{task_id}: Spark keeps Iceberg commit INFO", "INFO SnapshotProducer: Committed snapshot" in log, True)
+    check(f"{task_id}: noisy JVM categories do not emit INFO", bool(re.search(
+        r"INFO (?:BlockManager\w*|MemoryStore|DAGScheduler|TaskSchedulerImpl|SecurityManager|LoggingMetricsReporter):", log)), False)
+    check(f"{task_id}: submit name matches the registered Spark application", bool(re.search(
+        r"(?m)^  --name (raw\.[\w.]+) \\[^\S\n]*\n[\s\S]*?Submitted application: \1(?:\n|$)", log)), True)
     check(f"{task_id}: copyable submit command", bool(re.search(
         r"Spark-Submit cmd:\s+spark-submit \\\n"
         r"(?:[^\n]+ \\\n)*?\s+--deploy-mode client /opt/spark-jobs/[^\n]+ \\\n"

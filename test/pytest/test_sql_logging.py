@@ -3,7 +3,7 @@
 import subprocess
 import sys
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 from ingestion import meta
 from ingestion.logging import SQL_RELAY_ENV, format_sql_for_log, restore_sql_blocks
@@ -82,5 +82,20 @@ def test_sql_block_survives_line_oriented_driver_output(monkeypatch):
     lines = result.stderr.splitlines(keepends=True)
     assert len(lines) == 1
     assert list(restore_sql_blocks(["unrelated\n", *lines])) == [
-        "unrelated\n", "JDBC SQL:\n  SELECT a,\n    b\n  FROM t\n  WHERE id = 1",
+        "unrelated\n", "INFO __main__: JDBC SQL:\n  SELECT a,\n    b\n  FROM t\n  WHERE id = 1",
     ]
+
+
+def test_pg_meta_commit_summary_keeps_only_changed_fields_at_info(caplog):
+    conn = MagicMock()
+    before = {"status": "RUNNING", "row_count": None, "target_table": "unchanged"}
+    after = dict(before, status="SUCCEEDED", row_count=42)
+    with caplog.at_level("DEBUG", logger=meta.__name__):
+        with meta._operation(lambda: conn, "finalize_batch", process_id=5) as (_, changes):
+            changes.append(("incremental_batches", before, after))
+    messages = [record.getMessage() for record in caplog.records if record.levelname == "INFO"]
+    result = "pg-meta committed operation=finalize_batch table=ingestion.incremental_batches "
+    assert result + "status='RUNNING'→'SUCCEEDED' row_count=None→42" in messages
+    assert not any("unchanged" in message for message in messages)
+    assert any(record.levelname == "DEBUG" and f"before={before!r} row={after!r}" in record.getMessage()
+               for record in caplog.records)

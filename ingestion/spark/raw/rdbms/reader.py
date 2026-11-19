@@ -133,7 +133,7 @@ def apply_partition_options(spark, args, reader, query, partition, *, scope):
     return reader, low, high
 
 
-def read_extract_frame(spark, args, filters=(), extra_select=""):
+def read_extract_frame(spark, args, filters=(), extra_select="", *, detailed_metadata=True):
     """Read the source over JDBC into a cached frame with explicit predicates.
 
     Catalog metadata (columns, keys, indexes) is always required: it feeds
@@ -147,7 +147,8 @@ def read_extract_frame(spark, args, filters=(), extra_select=""):
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     source_table = render_source_table(dialect, args.source_table)
     keys = jdbc.key_metadata(
-        spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table
+        spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table,
+        detailed=detailed_metadata,
     )
     if not keys.columns:
         raise RuntimeError(

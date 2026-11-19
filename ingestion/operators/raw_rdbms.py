@@ -283,6 +283,7 @@ class IngestActSnapOperator(_RdbmsSubmitOperator):
         _strict_submit_options(source_type, jdbc_partitioning, num_partitions)
         super().__init__(
             application="/opt/spark-jobs/raw/rdbms/incremental/load_act_snap.py",
+            name=target_table,
             conn_id=SUBMIT_CONN_ID,
             deploy_mode="client",
             **kwargs,
@@ -320,6 +321,7 @@ class IngestFullOperator(_RdbmsSubmitOperator):
         _strict_submit_options(source_type, jdbc_partitioning, num_partitions)
         super().__init__(
             application="/opt/spark-jobs/raw/rdbms/full/load_entity.py",
+            name=target_table,
             conn_id=SUBMIT_CONN_ID,
             deploy_mode="client",
             **kwargs,
@@ -364,6 +366,7 @@ class IngestIncrementalOperator(_RdbmsSubmitOperator):
         validate_incremental_config(incremental_config)
         super().__init__(
             application="/opt/spark-jobs/raw/rdbms/incremental/load_entity.py",
+            name=target_table,
             conn_id=SUBMIT_CONN_ID,
             deploy_mode="client",
             **kwargs,

@@ -1,28 +1,28 @@
 # Graph Report - datalake_stand  (2026-11-19)
 
 ## Corpus Check
-- 183 files · ~154,287 words
+- 183 files · ~154,696 words
 - Verdict: corpus is large enough that graph structure adds value.
-- Unclassified: 13 file(s) not represented in the graph (top: (none) 9, .properties 2, .conf 1)
+- Unclassified: 14 file(s) not represented in the graph (top: (none) 9, .properties 3, .conf 1)
 
 ## Summary
-- 3114 nodes · 5592 edges · 213 communities (161 shown, 52 thin omitted)
+- 3115 nodes · 5595 edges · 205 communities (160 shown, 45 thin omitted)
 - Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 245 edges (avg confidence: 0.9)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `b62f7c1a`
+- Built from commit: `86bd1db4`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
-- parse_args
+- managed_load
 - keys
 - make_args
 - pathlib
 - PostgresTests
 - TestGenerateSnapshotDagSource
-- _column_metadata
+- ColumnMeta
 - manifest.py
 - Приоритет: можно отложить
 - TestBatchLifecycle
@@ -65,7 +65,7 @@
 - load_act_snap.py
 - evolution_widen
 - Init Services Compose
-- raw_rdbms.py
+- resolve_source_connection
 - Airflow Services Compose
 - Docker Compose Layout
 - Приоритет: важно
@@ -84,7 +84,7 @@
 - DAG Processor Service
 - by_conn_type
 - generate_dags.py
-- managed_load
+- operators/__init__.py
 - check_snapshot_recovery
 - TestSchemaColumns
 - Act Snap Plan Docs
@@ -93,7 +93,7 @@
 - Analysis Detection Passes
 - Named Volumes
 - 7.1. Контракт
-- TestPlanBatch
+- TestManifestShapeRejections
 - parse_source_table
 - resolve_namespace
 - speckit.analyze.md
@@ -103,7 +103,7 @@
 - FakeCursor
 - Test Runner Service
 - Спецификация: безопасный повтор Spark-загрузки
-- speckit.specify.md
+- constitution.md
 - speckit.tasks.md
 - Project Constitution
 - TestGenerateDagSource
@@ -125,7 +125,7 @@
 - generate_dags.py
 - test_dialects.py
 - Ведение документации
-- speckit-plan
+- _apply_entity_fields
 - meta/registry.py
 - _RdbmsSubmitOperator
 - depends_on
@@ -140,27 +140,27 @@
 - 6. Параллелизм Spark
 - Sources Configuration File
 - Настройка graphify — графа кодовой базы
-- TestSourcePosition
+- assert_unique_targets
 - Архитектура datalake_stand
 - 7. Инкрементальная загрузка
 - Управление ресурсами Spark на уровне отдельной джобы
-- Шаблонизация кода в generator/generate_dags.py
+- TestPublishAsset
 - check_registry_recovery
-- TestGenerateAll
+- План: callbacks журнала загрузок
 - TestIngestActSnapOperator
 - TestAirflowIgnore
 - 7. Практики прохождения цикла
 - Process ID Generation
-- Спецификация: необязательный журнал загрузок
-- speckit.plan.md
-- OracleDialect
-- check_spark_guard.py
+- Расширение стенда
+- conf/airflow/requirements.txt — Airflow Image Dependencies
+- Проверка изменения
+- test_sql_logging.py
 - TestQuoting
 - Глоссарий
 - TestTableLogOperator
 - get_batch
 - Обработка подвисших процессов Spark при retry задач
-- DAG generator (ingestion/generator/generate_dags.py)
+- allocate
 - first_row
 - speckit-analyze
 - Диагностика шагов загрузки
@@ -169,15 +169,14 @@
 - validate_target_table
 - Task Logging Tasks
 - 5. Устойчивость к эволюции схемы источника
-- compute_drift
+- TestResolveFullyQualified
 - Watermark
 - append.py (raw-layer writer)
 - compatibility_projection
 - Анализ согласованности перед реализацией
 - Задачи DATARCH-2245
 - Проверка требований DATARCH-2245
-- current_snapshot_author
-- empty_incremental_window
+- Convergence Findings
 - Bucket Init Script
 - Auth Init Script
 - Source Activation Operator
@@ -189,7 +188,6 @@
 - CAS Revision Control
 - Execution Steps
 - trino_query
-- re
 - TestDagrunCallbacks
 - incremental/load_entity.py
 - TestGetBatch
@@ -198,9 +196,7 @@
 - TestAirflowInit
 - TestPositionExpression
 - План реализации DATARCH-2245
-- TestPgMetaInitSql
 - TestTaskFailure
-- speckit.clarify.md
 - FakePg
 - Проверка реализации
 - План: параллельный e2e
@@ -208,12 +204,9 @@
 - Задачи: параллельный e2e
 - Анализ согласованности
 - TestColumnProjection
-- main
 - Task Generation Rules
 - TestResolveFullyQualified
 - Задачи
-- [CHECKLIST TYPE] Checklist: [FEATURE NAME]
-- User Scenarios & Testing *(mandatory)*
 - TestContractsReExport
 - Проверка требований
 - Модель данных
@@ -223,7 +216,6 @@
 - Task Generation Rules
 - Execution Steps
 - TestOracleIntegerKinds
-- _optional_int
 - test_plugin_syntax.py
 - load (DAG task)
 - Specification Analysis Report
@@ -244,14 +236,14 @@
 ## Surprising Connections (you probably didn't know these)
 - `Память executor` --references--> `EntityConfig`  [INFERRED]
   docs/backlog.md → ingestion/generator/manifest.py
+- `Решение` --references--> `log_task()`  [INFERRED]
+  specs/005-load-lifecycle-callbacks/plan.md → ingestion/meta/__init__.py
 - `Требования` --references--> `IngestActSnapOperator`  [INFERRED]
   specs/001-act-snap-contract/spec.md → ingestion/operators/raw_rdbms.py
 - `Проблема` --references--> `append_raw()`  [INFERRED]
   docs/backlog.md → ingestion/spark/raw/append.py
 - `Первичное наполнение и проверка источника` --references--> `source_position()`  [INFERRED]
   docs/architecture.md → ingestion/spark/raw/rdbms/incremental/load_entity.py
-- `Контекст` --references--> `_entity_block()`  [INFERRED]
-  docs/backlog.md → ingestion/generator/generate_dags.py
 
 ## Import Cycles
 - None detected.
@@ -269,15 +261,15 @@
 - **Механизм таблиц-снимков act_snap** — specs_001_act_snap_contract_spec, specs_001_act_snap_contract_spec_act_snap_config, specs_001_act_snap_contract_spec_ingest_act_snap_operator, specs_001_act_snap_contract_spec_publish_asset, docs_demo_load_act_snap, docs_glossary_snapshot, docs_glossary_rtas [INFERRED 0.85]
 - **Концепция инкрементальной загрузки (контракт инкремента)** — docs_glossary_increment, docs_glossary_position, docs_glossary_canonical, docs_architecture_watermark, docs_glossary_window, docs_architecture_lookback, docs_glossary_batch, docs_glossary_attempt, docs_glossary_portion, specs_002_incremental_config_spec [INFERRED 0.90]
 
-## Communities (213 total, 52 thin omitted)
+## Communities (205 total, 45 thin omitted)
 
-### Community 0 - "parse_args"
-Cohesion: 0.22
-Nodes (3): parse_args(), build_argv(), TestParseArgs
+### Community 0 - "managed_load"
+Cohesion: 0.06
+Nodes (11): empty_incremental_window(), main(), managed_load(), parse_args(), build_argv(), TestEmptyIncrementalWindow, TestMain, TestManagedLoad (+3 more)
 
 ### Community 1 - "keys"
 Cohesion: 0.08
-Nodes (10): day_expression(), no_candidate_reason(), PartitionChoice, plan(), keys(), meta(), TestChoose, TestDayExpression (+2 more)
+Nodes (11): day_expression(), no_candidate_reason(), partition_name(), PartitionChoice, plan(), keys(), meta(), TestChoose (+3 more)
 
 ### Community 2 - "make_args"
 Cohesion: 0.09
@@ -285,27 +277,23 @@ Nodes (6): jdbc_reader(), make_args(), RecordingReader, TestJdbcReader, TestRead
 
 ### Community 3 - "pathlib"
 Cohesion: 0.08
-Nodes (3): cli_args(), TestOverwriteSnapshot, TestResolveFullyQualified
+Nodes (3): cli_args(), TestOverwriteSnapshot, TestPgMetaInitSql
 
 ### Community 4 - "PostgresTests"
 Cohesion: 0.08
 Nodes (3): connection(), PostgresTests, TransactionTests
 
-### Community 5 - "TestGenerateSnapshotDagSource"
-Cohesion: 0.14
-Nodes (3): generate_snapshot_dag_source(), snapshot_dag_id(), TestGenerateSnapshotDagSource
-
-### Community 6 - "_column_metadata"
-Cohesion: 0.16
-Nodes (4): _column_metadata(), _exact_pattern(), TestCatalogPatternFiltering, TestColumnMetadata
+### Community 6 - "ColumnMeta"
+Cohesion: 0.17
+Nodes (5): _column_metadata(), ColumnMeta, _exact_pattern(), _optional_int(), TestColumnMetadata
 
 ### Community 7 - "manifest.py"
-Cohesion: 0.09
-Nodes (16): Генерация и настройка, ActSnapConfig, AirflowConfig, DagConfig, _expand_cron_field(), _parse_act_snap(), _parse_dag_fields(), _parse_entity() (+8 more)
+Cohesion: 0.08
+Nodes (18): Генерация и настройка, Предпочтительный путь решения, ActSnapConfig, AirflowConfig, DagConfig, _expand_cron_field(), IngestionSettings, load_settings() (+10 more)
 
 ### Community 8 - "Приоритет: можно отложить"
-Cohesion: 0.17
-Nodes (12): Автоматически формировать теги DAG и исключать дубликаты, Выбирать JDBC-колонку по метрикам с управляемым повторным анализом, Контекст, Контекст, Предпочтительный путь решения, Предпочтительный путь решения, Предпочтительный путь решения, Приоритет: можно отложить (+4 more)
+Cohesion: 0.12
+Nodes (17): Автоматически формировать теги DAG и исключать дубликаты, Бэклог, Выбирать JDBC-колонку по метрикам с управляемым повторным анализом, Контекст, Контекст, Оглавление, Предпочтительный путь решения, Предпочтительный путь решения (+9 more)
 
 ### Community 9 - "TestBatchLifecycle"
 Cohesion: 0.12
@@ -320,32 +308,32 @@ Cohesion: 0.14
 Nodes (6): airflow_token(), airflow_token_retry(), check_load_trace(), logged_sql(), snapshot_dag_id(), wake_sources_and_wait_airflow()
 
 ### Community 12 - "ParallelE2ETests"
-Cohesion: 0.07
-Nodes (6): disable_retries(), prepare_workspace(), scale_migration(), allocate(), ParallelE2ETests, token()
+Cohesion: 0.08
+Nodes (4): disable_retries(), prepare_workspace(), scale_migration(), ParallelE2ETests
 
 ### Community 13 - "Compose Environment Vars"
 Cohesion: 0.08
 Nodes (36): environment, healthcheck, image, networks, volumes, MINIO_ROOT_PASSWORD, MINIO_ROOT_USER, POSTGRES_DB (+28 more)
 
 ### Community 14 - "extending.md"
-Cohesion: 0.05
-Nodes (37): AGENTS.md, conf/airflow/Dockerfile, conf/spark/Dockerfile, ConnectionSpec, .agents/skills/e2e-testing/SKILL.md, load_sources(), ingestion/operators/ (пакет), ingestion/conf/pipelines/ (+29 more)
+Cohesion: 0.06
+Nodes (35): AGENTS.md, conf/airflow/Dockerfile, conf/spark/Dockerfile, ConnectionSpec, .agents/skills/e2e-testing/SKILL.md, load_sources(), ingestion/operators/ (пакет), ingestion/conf/pipelines/ (+27 more)
 
 ### Community 15 - "README — стенд хранилища и озера данных"
-Cohesion: 0.09
-Nodes (26): AGENTS.md — инструкции проекта datalake_stand, Скилл backlog — ведение docs/backlog.md, пакет sydafa-airflow (SydafaActivateOperator), airflow/plugins/migrations/ — миграции источников bank/broker, conf/airflow/Dockerfile, conf/airflow/requirements.txt — Airflow Image Dependencies, apache-airflow-providers-apache-spark, apache-airflow-providers-trino (+18 more)
+Cohesion: 0.10
+Nodes (22): AGENTS.md — инструкции проекта datalake_stand, Скилл backlog — ведение docs/backlog.md, пакет sydafa-airflow (SydafaActivateOperator), airflow/plugins/migrations/ — миграции источников bank/broker, conf/airflow/Dockerfile, conf/pg-meta/init/ — DDL pg-meta, conf/spark/Dockerfile, conf/sydafa/sources.json — конфигурация источников (+14 more)
 
 ### Community 16 - "load_pipeline"
-Cohesion: 0.07
-Nodes (10): load_pipeline(), load_sources(), temporal_lookback_default(), assert_unique_targets(), TestGenerateAllValidation, TestLoadPipeline, TestLoadSources, TestManifestShapeRejections (+2 more)
+Cohesion: 0.14
+Nodes (6): load_pipeline(), load_sources(), temporal_lookback_default(), TestLoadPipeline, TestLoadSources, write_temp_yaml()
 
 ### Community 18 - "make_batch"
 Cohesion: 0.16
 Nodes (6): read_window_frame(), window_filters(), make_args(), make_batch(), TestReadWindowFrame, TestWindowFilters
 
 ### Community 19 - "ConnectionSpec"
-Cohesion: 0.09
-Nodes (11): 1. Выбор вида изменения, 2. Подключение новой JDBC-СУБД, 4. Новый слой данных, 5. Порядок разработки, Проверки совместимости, Расширение стенда, Регистрация и окружение, Содержание (+3 more)
+Cohesion: 0.07
+Nodes (7): 2. Подключение новой JDBC-СУБД, Проверки совместимости, Регистрация и окружение, ConnectionSpec, MssqlDialect, OracleDialect, TestConnections
 
 ### Community 20 - "001-act-snap-contract/converge.md"
 Cohesion: 0.20
@@ -360,31 +348,31 @@ Cohesion: 0.22
 Nodes (6): airflow_task_states(), airflow_wait_run_failed(), check(), evolution_incompatible(), evolution_source_check(), validate_manifests_and_dags()
 
 ### Community 23 - "load_act_snap.py"
-Cohesion: 0.24
-Nodes (3): main(), parse_args(), TestParseArgs
+Cohesion: 0.12
+Nodes (8): __act_snap auxiliary snapshot, IngestActSnapOperator, build_rtas_sql(), main(), _overwrite_snapshot(), parse_args(), TestBuildRtasSql, TestParseArgs
 
 ### Community 24 - "Spec Kit Workflow"
 Cohesion: 0.06
 Nodes (30): args, inputs, integration, spec, default, prompt, type, any (+22 more)
 
 ### Community 25 - "test_operators.py"
-Cohesion: 0.06
-Nodes (11): fake_make_dsn(), FakeOperator, FakeSkip, load_meta_api(), load_operators(), test_driver_arguments_have_an_explicit_log_display_policy(), test_standard_jdbc_urls_are_visible_for_all_registered_dialects(), TestMetaConnect (+3 more)
+Cohesion: 0.08
+Nodes (10): fake_make_dsn(), FakeOperator, FakeSkip, load_meta_api(), load_operators(), test_driver_arguments_have_an_explicit_log_display_policy(), test_standard_jdbc_urls_are_visible_for_all_registered_dialects(), TestMetaConnect (+2 more)
 
 ### Community 26 - "Spec Kit Cycle Instructions"
 Cohesion: 0.07
 Nodes (29): 10. Обновление Spec Kit, 11. Взаимодействие с graphify и Pull Request, 12. Работа в ZCode Desktop (интерактивно), 1. Назначение, 2. Установка для сопровождающего (выполнена один раз), 3. Инструкция для разработчика, 4. Состояние цикла: каталоги, машины, ветки, 5. Состав артефактов (+21 more)
 
 ### Community 27 - "speckit-plan"
-Cohesion: 0.07
-Nodes (33): contracts/ (interface contracts), plan.md (implementation plan), spec.md (feature specification), Модель состояния guard, Содержание, Состояния, Команды, Приёмка (+25 more)
+Cohesion: 0.06
+Nodes (40): contracts/ (interface contracts), plan.md (implementation plan), spec.md (feature specification), Модель состояния guard, Содержание, Состояния, Исследование, Источники и ограничения (+32 more)
 
 ### Community 28 - "check_extraction.py"
 Cohesion: 0.18
 Nodes (5): check_logged_submit_replay(), check_snapshot_publication(), main(), records(), require()
 
 ### Community 29 - "RdbmsDialect"
-Cohesion: 0.09
+Cohesion: 0.10
 Nodes (4): Контракт диалекта, __getattr__(), RdbmsDialect, TestBaseDialectContract
 
 ### Community 30 - "canonical"
@@ -396,8 +384,8 @@ Cohesion: 0.16
 Nodes (21): check-prerequisites.sh script, check_dir(), check_file(), find_specify_root(), format_speckit_command(), get_current_branch(), get_feature_paths(), get_invoke_separator() (+13 more)
 
 ### Community 32 - "process.py"
-Cohesion: 0.09
-Nodes (11): Событие готовности Asset, publish_asset_event(), snapshot_has_current_process(), _dagrun_event(), dagrun_failure_callback(), dagrun_success_callback(), GenerateProcessIdOperator, log_task_event() (+3 more)
+Cohesion: 0.10
+Nodes (8): _dagrun_event(), dagrun_failure_callback(), dagrun_success_callback(), log_task_event(), _meta_connect(), _pull_process_id(), _validate_process_id(), SparkGuardStatus
 
 ### Community 33 - "guard.py"
 Cohesion: 0.13
@@ -412,20 +400,20 @@ Cohesion: 0.08
 Nodes (26): Dependencies & Execution Order, Format: `[ID] [P?] [Story] Description`, Implementation for User Story 1, Implementation for User Story 2, Implementation for User Story 3, Implementation Strategy, Incremental Delivery, MVP First (User Story 1 Only) (+18 more)
 
 ### Community 36 - "choose"
-Cohesion: 0.24
-Nodes (5): column_position_kind(), choose(), _family(), _first_candidate(), source_kind()
+Cohesion: 0.32
+Nodes (4): column_position_kind(), choose(), _family(), _first_candidate()
 
 ### Community 37 - "Airflow Env Config"
 Cohesion: 0.26
 Nodes (25): environment, environment, environment, environment, AIRFLOW__API_AUTH__JWT_SECRET, AIRFLOW__API__EXPOSE_CONFIG, AIRFLOW__API__SECRET_KEY, AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION (+17 more)
 
 ### Community 38 - "IngestFullOperator"
-Cohesion: 0.10
-Nodes (22): Назначение задач, Границы рефакторинга, Задача Jira, Контекст, Контекст, Контекст, Предпочтительный путь решения, Проблема (+14 more)
+Cohesion: 0.14
+Nodes (15): Границы рефакторинга, Контекст, Предпочтительный путь решения, 3. Новый тип источника, EntityConfig, FullEntityConfig, IngestActSnapOperator, IngestFullOperator (+7 more)
 
 ### Community 39 - "temporal_extraction.py"
-Cohesion: 0.13
-Nodes (13): ColumnMeta, check_partitioned_load_path(), check_partitioning(), check_post_append_retry(), exercise(), jdbc_count(), load_module(), main() (+5 more)
+Cohesion: 0.14
+Nodes (11): check_partitioned_load_path(), check_post_append_retry(), exercise(), jdbc_count(), load_module(), main(), metadata_row(), precision_fixtures() (+3 more)
 
 ### Community 40 - "Nessie Catalog Config"
 Cohesion: 0.09
@@ -436,8 +424,8 @@ Cohesion: 0.11
 Nodes (21): pg-meta DDL (conf/pg-meta/init/01_ingestion.sql), Glossary (glossary.md), MSSQL dialect (ingestion/sources/rdbms/dialects/mssql.py), Oracle dialect (ingestion/sources/rdbms/dialects/oracle.py), Iceberg writer layer (ingestion/spark/raw/iceberg.py), Full-slice loader (ingestion/spark/raw/rdbms/full/load_entity.py), Incremental loader (ingestion/spark/raw/rdbms/incremental/load_entity.py), Incremental window reader (incremental/window.py) (+13 more)
 
 ### Community 43 - "Dev Tooling Documentation"
-Cohesion: 0.13
-Nodes (17): AGENTS.md, graphify-out/graph.json, graphify (CLI-утилита), AGENTS.md, .specify/feature.json (локальный указатель фичи), opencode, .opencode/commands/, specify CLI (GitHub Spec Kit) (+9 more)
+Cohesion: 0.12
+Nodes (18): AGENTS.md, graphify-out/graph.json, graphify (CLI-утилита), AGENTS.md, .specify/feature.json (локальный указатель фичи), opencode, .opencode/commands/, specify CLI (GitHub Spec Kit) (+10 more)
 
 ### Community 44 - "resolve_target_table_name"
 Cohesion: 0.17
@@ -448,8 +436,8 @@ Cohesion: 0.17
 Nodes (7): _degraded_metadata(), key_metadata(), KeyMetadata, fake_jvm(), TestCatalogAddressing, TestDegradedKeyMetadata, TestKeyMetadata
 
 ### Community 46 - "load_act_snap.py"
-Cohesion: 0.07
-Nodes (12): format_sql_for_log(), build_create_table_sql(), quote_identifier(), schema_columns(), table_location(), build_rtas_sql(), main(), TestBuildCreateTableSql (+4 more)
+Cohesion: 0.08
+Nodes (11): format_sql_for_log(), append_raw(), build_create_table_sql(), quote_identifier(), schema_columns(), table_location(), main(), TestBuildCreateTableSql (+3 more)
 
 ### Community 47 - "evolution_widen"
 Cohesion: 0.18
@@ -459,9 +447,9 @@ Nodes (7): evolution_ddl(), evolution_first_load(), evolution_host(), evolution_
 Cohesion: 0.11
 Nodes (19): nessie, silo-init, trino-init, condition, spark-master, trino, condition, command (+11 more)
 
-### Community 49 - "raw_rdbms.py"
-Cohesion: 0.08
-Nodes (12): Контекст, Предпочтительный путь решения, Проблема, Убрать пароль JDBC-источника из аргументов spark-submit, _apply_entity_fields(), log_spark_task_event(), _pgmeta_dsn(), resolve_source_connection() (+4 more)
+### Community 49 - "resolve_source_connection"
+Cohesion: 0.20
+Nodes (5): Контекст, _pgmeta_dsn(), resolve_source_connection(), run_spark_guard(), _submit_args()
 
 ### Community 50 - "Airflow Services Compose"
 Cohesion: 0.11
@@ -472,12 +460,12 @@ Cohesion: 0.12
 Nodes (16): name, networks, dlh-poc, services, spark-worker, trino-init, command, depends_on (+8 more)
 
 ### Community 52 - "Приоритет: важно"
-Cohesion: 0.17
-Nodes (12): Бэклог, Задача Jira, Задача Jira, Контекст, Контекст, Оглавление, Определить и проверить минимальные поддерживаемые версии компонентов, Предпочтительный путь решения (+4 more)
+Cohesion: 0.14
+Nodes (14): Задача Jira, Задача Jira, Задача Jira, Контекст, Контекст, Определить и проверить минимальные поддерживаемые версии компонентов, Предпочтительный путь решения, Приоритет: важно (+6 more)
 
 ### Community 53 - "Spec Kit Converge Skill"
-Cohesion: 0.16
-Nodes (11): 1. Initialize Convergence Context, 2. Load Artifacts (Progressive Disclosure), 3. Build the Intent Inventory, 4. Assess the Codebase and Classify Findings, 5. Assign Severity, 6. Present the In-Session Findings Summary, 7. Append Convergence Tasks (or report converged), 8. Provide Next Actions (Handoff) (+3 more)
+Cohesion: 0.29
+Nodes (7): 1. Initialize Convergence Context, 2. Load Artifacts (Progressive Disclosure), 3. Build the Intent Inventory, 4. Assess the Codebase and Classify Findings, 5. Assign Severity, 6. Present the In-Session Findings Summary, Execution Steps
 
 ### Community 54 - "Bank Pipeline Manifest"
 Cohesion: 0.12
@@ -492,20 +480,24 @@ Cohesion: 0.12
 Nodes (15): Outline, Post-Execution Checks, Pre-Execution Checks, Scope Guard, User Input, Core Principles, Governance, [PRINCIPLE_1_NAME] (+7 more)
 
 ### Community 57 - "DATARCH-2243: Templatize code in generator/generate_dags.py"
-Cohesion: 0.24
-Nodes (14): Snapshot stream (incremental/load_act_snap.py), Increment (incremental column contract), Snapshot table (actual snapshot, __act_snap), generate_dag_source(), generate_snapshot_dag_source(), build_create_table_sql(), build_rtas_sql(), build_extract_query() (+6 more)
+Cohesion: 0.12
+Nodes (25): Snapshot stream (incremental/load_act_snap.py), Increment (incremental column contract), Snapshot table (actual snapshot, __act_snap), Bank pipeline manifest (ingestion/conf/pipelines/bank/main.yaml), DAG generator (ingestion/generator/generate_dags.py), generate_dag_source(), generate_snapshot_dag_source(), Manifest parser (ingestion/generator/manifest.py) (+17 more)
 
 ### Community 59 - "generate_all"
-Cohesion: 0.11
-Nodes (9): Предпочтительный путь решения, file_name_for(), generate_all(), main(), IngestionSettings, load_settings(), _read_yaml(), SourceConfig (+1 more)
+Cohesion: 0.07
+Nodes (7): compute_drift(), generate_all(), main(), TestCheckMode, TestGenerateAll, TestGenerateAllValidation, TestConfiguration
 
 ### Community 60 - "test_no_sys_path.py"
 Cohesion: 0.17
 Nodes (3): TestNoHashComments, manipulates_sys_path(), TestNoSysPathManipulation
 
 ### Community 61 - "jdbc_reader"
-Cohesion: 0.28
-Nodes (3): bound_literal(), derived_day_frame(), TestBoundLiteral
+Cohesion: 0.24
+Nodes (4): bound_literal(), check_partitioning(), derived_day_frame(), TestBoundLiteral
+
+### Community 62 - "pathlib"
+Cohesion: 0.10
+Nodes (5): main(), main(), orphan(), require(), snapshot()
 
 ### Community 63 - "Any"
 Cohesion: 0.22
@@ -524,12 +516,16 @@ Cohesion: 0.19
 Nodes (5): by_conn_type(), position_select(), render_source_table(), TestRenderSourceTable, TestPositionSelect
 
 ### Community 67 - "generate_dags.py"
-Cohesion: 0.11
-Nodes (7): resolve_namespace(), resolve_snapshot_fully_qualified(), resolve_snapshot_table_name(), snapshot_alias(), _validate_identifier(), TestResolveNamespace, TestSnapshotNames
+Cohesion: 0.13
+Nodes (6): resolve_namespace(), resolve_snapshot_fully_qualified(), resolve_snapshot_table_name(), _validate_identifier(), TestResolveNamespace, TestSnapshotNames
+
+### Community 68 - "operators/__init__.py"
+Cohesion: 0.18
+Nodes (5): Назначение задач, Событие готовности Asset, publish_asset_event(), snapshot_has_current_process(), GenerateProcessIdOperator
 
 ### Community 69 - "check_snapshot_recovery"
-Cohesion: 0.20
-Nodes (8): check_snapshot_recovery(), incremental(), projection(), snapshot(), register_virtual(), require(), virtual_sources(), keys()
+Cohesion: 0.15
+Nodes (9): check_snapshot_recovery(), incremental(), projection(), registry(), snapshot(), register_virtual(), require(), virtual_sources() (+1 more)
 
 ### Community 70 - "TestSchemaColumns"
 Cohesion: 0.15
@@ -544,8 +540,8 @@ Cohesion: 0.33
 Nodes (5): Deprecation Notice, Outline, Post-Execution Checks, Pre-Execution Checks, User Input
 
 ### Community 73 - "meta/__init__.py"
-Cohesion: 0.09
-Nodes (18): allocate_process_id(), _execute(), find_process_id(), log_dagrun(), _log_statement(), log_task(), _operation(), Конституция (+10 more)
+Cohesion: 0.10
+Nodes (14): allocate_process_id(), _execute(), find_process_id(), log_dagrun(), _log_statement(), log_task(), _operation(), Выводы (+6 more)
 
 ### Community 74 - "Analysis Detection Passes"
 Cohesion: 0.15
@@ -568,8 +564,8 @@ Cohesion: 0.22
 Nodes (8): Analysis Guidelines, Context, Context Efficiency, Goal, Operating Constraints, Operating Principles, Pre-Execution Checks, User Input
 
 ### Community 81 - "ScriptedResult"
-Cohesion: 0.08
-Nodes (4): _primary_key(), _unique_single_columns(), ScriptedResult, TestKeyStructure
+Cohesion: 0.07
+Nodes (5): _primary_key(), _unique_single_columns(), ScriptedResult, TestCatalogPatternFiltering, TestKeyStructure
 
 ### Community 82 - "Тестирование datalake_stand"
 Cohesion: 0.22
@@ -587,9 +583,9 @@ Nodes (10): AIRFLOW_PASSWORD, AIRFLOW_USER, TRINO_PASSWORD, TRINO_USER, test-run
 Cohesion: 0.17
 Nodes (11): US1: повтор после потери процесса задачи (P1), US2: запрет неподтверждённого запуска (P1), US3: предсказуемые повторы и диагностика (P2), Краевые случаи, Критерии успеха, Содержание, Спецификация: безопасный повтор Spark-загрузки, Сущности (+3 more)
 
-### Community 87 - "speckit.specify.md"
-Cohesion: 0.17
-Nodes (11): Completion Report, Done When, For AI Generation, Mandatory Post-Execution Hooks, Outline, Pre-Execution Checks, Quick Guidelines, Section Requirements (+3 more)
+### Community 87 - "constitution.md"
+Cohesion: 0.07
+Nodes (29): Скилл pull-request — создание Pull Request, graphify-out/graph.json — граф кодовой базы, Completion Report, Done When, Mandatory Post-Execution Hooks, Outline, Pre-Execution Checks, User Input (+21 more)
 
 ### Community 88 - "speckit.tasks.md"
 Cohesion: 0.18
@@ -599,13 +595,17 @@ Nodes (10): Checklist Format (REQUIRED), Completion Report, Done When, Mandatory
 Cohesion: 0.18
 Nodes (11): I. Граф кодовой базы прежде чтения файлов, II. Изменения подтверждаются тестами, III. Чистый Python без комментариев, IV. Дисциплина Git: ветка → Pull Request → мерж пользователем, V. Перестроение графа после каждого коммита, VI. Документация на русском языке, Базовые принципы, Конституция проекта datalake_stand (+3 more)
 
+### Community 90 - "TestGenerateDagSource"
+Cohesion: 0.09
+Nodes (4): PipelineManifest, validate_pipeline(), TestGenerateDagSource, TestValidatePipeline
+
 ### Community 91 - "Silo Service Compose"
 Cohesion: 0.20
 Nodes (10): silo, AWS_DEFAULT_REGION, silo-init, condition, depends_on, entrypoint, environment, image (+2 more)
 
 ### Community 92 - "Предпочтительный путь решения"
-Cohesion: 0.20
-Nodes (10): Жизненный цикл, Задача Jira, Изолировать Spark drivers через DockerOperator, Контракт оператора, Образ и зависимости, Предпочтительный путь решения, Проблема, Проверки и критерии готовности (+2 more)
+Cohesion: 0.18
+Nodes (11): Жизненный цикл, Задача Jira, Изолировать Spark drivers через DockerOperator, Контекст, Контракт оператора, Образ и зависимости, Предпочтительный путь решения, Проблема (+3 more)
 
 ### Community 93 - "Bank References Manifest"
 Cohesion: 0.20
@@ -632,8 +632,8 @@ Cohesion: 0.22
 Nodes (9): 4. Таблицы raw-слоя: структура и наполнение, Гарантии записи, Запросы к raw в Trino, Имена и колонки, Как исключить повторные попытки из выборки, Как различать партии и попытки, Ограничение: последняя попытка прочитала пустое окно, Полный срез и инкремент (+1 more)
 
 ### Community 101 - "full/load_entity.py"
-Cohesion: 0.27
-Nodes (12): conf/spark/spark-defaults.conf, Global settings (ingestion/conf/settings.yaml), Sources registry (ingestion/conf/sources.yaml), load_sources(), Load operators module (ingestion/operators.py), DATARCH-2242: Split sources registry into YAML files, per-source JDBC parallelism, DATARCH-2244: Isolate Spark drivers via DockerOperator, DATARCH-2245: Handle hung Spark processes on task retry (+4 more)
+Cohesion: 0.16
+Nodes (18): conf/spark/spark-defaults.conf, conf/airflow/Dockerfile, conf/airflow/requirements.txt, conf/spark/Dockerfile, Global settings (ingestion/conf/settings.yaml), Sources registry (ingestion/conf/sources.yaml), load_sources(), ingestion/generator/requirements.txt (+10 more)
 
 ### Community 102 - "source_ddl.py"
 Cohesion: 0.21
@@ -641,15 +641,15 @@ Nodes (6): _connect(), execute(), mssql_dba_connect(), oracle_dba_connect(), que
 
 ### Community 104 - "speckit-checklist"
 Cohesion: 0.12
-Nodes (17): Скилл pull-request — создание Pull Request, tasks.md (task list), graphify-out/graph.json — граф кодовой базы, $speckit-github-taskstoissues (github extension), speckit-checklist, Anti-Examples: What NOT To Do, Checklist Purpose: "Unit Tests for English", Example Checklist Types & Sample Items (+9 more)
+Nodes (15): tasks.md (task list), $speckit-github-taskstoissues (github extension), speckit-checklist, Anti-Examples: What NOT To Do, Checklist Purpose: "Unit Tests for English", Example Checklist Types & Sample Items, Execution Steps, Post-Execution Checks (+7 more)
 
 ### Community 105 - "Platform Component Overview"
 Cohesion: 0.33
 Nodes (9): Airflow — оркестрация загрузок, JDBC-драйверы MSSQL/Oracle в образах Airflow и Spark, Nessie — каталог Iceberg, pg-catalog — база метаданных Nessie, pg-meta — база журналов и состояния загрузок, silo — MinIO-совместимое S3-хранилище, Spark — вычисления и загрузка по JDBC, sydafa — сервис управления источниками (+1 more)
 
 ### Community 106 - "generate_dags.py"
-Cohesion: 0.14
-Nodes (7): asset_uri(), _entity_block(), load_operator_name(), snapshot_asset_uri(), _snapshot_entity_block(), resolve_fully_qualified(), TestAssetUri
+Cohesion: 0.09
+Nodes (14): asset_uri(), dag_id_for(), _entity_block(), file_name_for(), generate_dag_source(), load_operator_name(), snapshot_asset_uri(), snapshot_dag_id() (+6 more)
 
 ### Community 107 - "test_dialects.py"
 Cohesion: 0.09
@@ -659,9 +659,9 @@ Nodes (7): MetadataLocation, decimal_kind(), fractional_kind(), integer_kind(), 
 Cohesion: 0.25
 Nodes (8): Ведение документации, Когда применять, Ответственность документов, Порядок работы и проверки, Содержание, Термины и глоссарий, Техническая точность, Язык и порядок изложения
 
-### Community 109 - "speckit-plan"
-Cohesion: 0.18
-Nodes (11): speckit-plan, Completion Report, Done When, Key rules, Mandatory Post-Execution Hooks, Outline, Phase 0: Outline & Research, Phase 1: Design & Contracts (+3 more)
+### Community 109 - "_apply_entity_fields"
+Cohesion: 0.28
+Nodes (3): _apply_entity_fields(), log_spark_task_event(), _strict_submit_options()
 
 ### Community 110 - "meta/registry.py"
 Cohesion: 0.14
@@ -676,24 +676,24 @@ Cohesion: 0.22
 Nodes (8): Complexity Tracking, Constitution Check, Documentation (this feature), Implementation Plan: [FEATURE], Project Structure, Source Code (repository root), Summary, Technical Context
 
 ### Community 114 - "parse_args"
-Cohesion: 0.15
-Nodes (5): parse_args(), build_argv(), TestMain, TestManagedLoad, TestParseArgs
+Cohesion: 0.13
+Nodes (7): main(), managed_load(), parse_args(), build_argv(), TestMain, TestManagedLoad, TestParseArgs
 
 ### Community 115 - "by_jdbc_url"
 Cohesion: 0.10
 Nodes (7): all_dialects(), by_jdbc_url(), supported_conn_types(), supported_url_prefixes(), TestDayExpression, TestPositionKind, TestRegistry
 
 ### Community 116 - "managed_snapshot"
-Cohesion: 0.26
-Nodes (3): managed_snapshot(), FakeCatalog, TestManagedSnapshot
+Cohesion: 0.16
+Nodes (5): current_snapshot_author(), managed_snapshot(), FakeCatalog, TestCurrentSnapshotAuthor, TestManagedSnapshot
 
 ### Community 117 - "Speckit Checklist Phase"
-Cohesion: 0.25
-Nodes (7): Anti-Examples: What NOT To Do, Checklist Purpose: "Unit Tests for English", Example Checklist Types & Sample Items, Execution Steps, Post-Execution Checks, Pre-Execution Checks, User Input
+Cohesion: 0.15
+Nodes (11): Anti-Examples: What NOT To Do, Checklist Purpose: "Unit Tests for English", Example Checklist Types & Sample Items, Execution Steps, Post-Execution Checks, Pre-Execution Checks, User Input, [Category 1] (+3 more)
 
 ### Community 118 - "Feature Spec Template"
-Cohesion: 0.25
-Nodes (7): Assumptions, Feature Specification: [FEATURE NAME], Functional Requirements, Key Entities *(include if feature involves data)*, Measurable Outcomes, Requirements *(mandatory)*, Success Criteria *(mandatory)*
+Cohesion: 0.15
+Nodes (12): Assumptions, Edge Cases, Feature Specification: [FEATURE NAME], Functional Requirements, Key Entities *(include if feature involves data)*, Measurable Outcomes, Requirements *(mandatory)*, Success Criteria *(mandatory)* (+4 more)
 
 ### Community 120 - "test.sh"
 Cohesion: 0.36
@@ -723,13 +723,13 @@ Nodes (11): 7.2. Жизненный цикл загрузки, 7.3. `incremental
 Cohesion: 0.25
 Nodes (8): Выполнение и обмен данными, Задача Jira, Контекст, Память executor, Предпочтительный путь решения, Проблема, Проверки и критерии готовности, Управление ресурсами Spark на уровне отдельной джобы
 
-### Community 128 - "Шаблонизация кода в generator/generate_dags.py"
-Cohesion: 0.33
-Nodes (6): Генерация DAG, Загрузка и окружение, Задача Jira, Предпочтительный путь решения, Проверки и критерии готовности, Шаблонизация кода в generator/generate_dags.py
-
 ### Community 129 - "check_registry_recovery"
 Cohesion: 0.25
 Nodes (4): check_registry_recovery(), arguments(), key(), sql()
+
+### Community 130 - "План: callbacks журнала загрузок"
+Cohesion: 0.33
+Nodes (5): Конституция, План: callbacks журнала загрузок, Проверки, Решение, Содержание
 
 ### Community 133 - "7. Практики прохождения цикла"
 Cohesion: 0.22
@@ -739,17 +739,17 @@ Nodes (8): US1 — загрузка без обязательного журна
 Cohesion: 0.33
 Nodes (6): ingestion.airflow_dagruns_log, generate_process_id (Airflow task), GenerateProcessIdOperator, generate_process_id (DAG task), pg-meta metadata database, ingestion.process_id_seq
 
-### Community 135 - "Спецификация: необязательный журнал загрузок"
-Cohesion: 0.33
-Nodes (6): conf/airflow/Dockerfile, conf/airflow/requirements.txt, conf/spark/Dockerfile, ingestion/generator/requirements.txt, E2E test suite (test/test.sh), DATARCH-2241: Define and verify minimal supported component versions
+### Community 135 - "Расширение стенда"
+Cohesion: 0.40
+Nodes (5): 1. Выбор вида изменения, 4. Новый слой данных, 5. Порядок разработки, Расширение стенда, Содержание
 
-### Community 136 - "speckit.plan.md"
-Cohesion: 0.18
-Nodes (10): Completion Report, Done When, Key rules, Mandatory Post-Execution Hooks, Outline, Phase 0: Outline & Research, Phase 1: Design & Contracts, Phases (+2 more)
+### Community 136 - "conf/airflow/requirements.txt — Airflow Image Dependencies"
+Cohesion: 0.50
+Nodes (4): conf/airflow/requirements.txt — Airflow Image Dependencies, apache-airflow-providers-apache-spark, apache-airflow-providers-trino, sydafa-airflow — Airflow Integration Package (SydafaActivateOperator, SydafaMigrateOperator)
 
-### Community 138 - "check_spark_guard.py"
-Cohesion: 0.13
-Nodes (6): restore_sql_blocks(), main(), orphan(), require(), snapshot(), test_sql_block_survives_line_oriented_driver_output()
+### Community 137 - "Проверка изменения"
+Cohesion: 0.50
+Nodes (4): Команды, Приёмка, Проверка изменения, Содержание
 
 ### Community 140 - "Глоссарий"
 Cohesion: 0.25
@@ -760,12 +760,8 @@ Cohesion: 0.33
 Nodes (6): 2. Манифесты и генерация DAG-ов, Манифест пайплайна, Настройки таблицы источника, Общие настройки и демо-набор, Подготовка DAG-ов, Реестр источников
 
 ### Community 143 - "Обработка подвисших процессов Spark при retry задач"
-Cohesion: 0.33
-Nodes (6): Задача Jira, Обработка подвисших процессов Spark при retry задач, Предпочтительный путь решения, Проблема, Проверки и критерии готовности, Реализация и граница решения
-
-### Community 144 - "DAG generator (ingestion/generator/generate_dags.py)"
-Cohesion: 0.40
-Nodes (5): Bank pipeline manifest (ingestion/conf/pipelines/bank/main.yaml), DAG generator (ingestion/generator/generate_dags.py), Manifest parser (ingestion/generator/manifest.py), Backlog: Auto-generate DAG tags and drop duplicates, Backlog: Split Airflow pools for loads vs service tasks
+Cohesion: 0.29
+Nodes (7): Задача Jira, Контекст, Обработка подвисших процессов Spark при retry задач, Предпочтительный путь решения, Проблема, Проверки и критерии готовности, Реализация и граница решения
 
 ### Community 145 - "first_row"
 Cohesion: 0.29
@@ -800,8 +796,8 @@ Cohesion: 0.22
 Nodes (11): Batch registry (ingestion/meta/registry.py), Incremental batch, Bootstrap (initial fill), ingestion.incremental_batches, incremental contract (canonical position type), ingestion.incremental_state, ingestion.incremental_state_migrations, Lookback (+3 more)
 
 ### Community 155 - "append.py (raw-layer writer)"
-Cohesion: 0.33
-Nodes (7): __act_snap auxiliary snapshot, append.py (raw-layer writer), dds / dma layers (planned), IngestActSnapOperator, ods layer (planned), raw layer, source schema evolution handling
+Cohesion: 0.50
+Nodes (5): append.py (raw-layer writer), dds / dma layers (planned), ods layer (planned), raw layer, source schema evolution handling
 
 ### Community 157 - "Анализ согласованности перед реализацией"
 Cohesion: 0.29
@@ -814,6 +810,10 @@ Nodes (4): Задачи DATARCH-2245, Приёмка, Реализация, Со
 ### Community 159 - "Проверка требований DATARCH-2245"
 Cohesion: 0.50
 Nodes (3): Проверка требований DATARCH-2245, Результат, Содержание
+
+### Community 160 - "Convergence Findings"
+Cohesion: 0.50
+Nodes (4): 7. Append Convergence Tasks (or report converged), 8. Provide Next Actions (Handoff), 9. Check for extension hooks, Convergence Findings
 
 ### Community 168 - "4. Detection Passes (Token-Efficient Analysis)"
 Cohesion: 0.29
@@ -828,8 +828,8 @@ Cohesion: 0.25
 Nodes (4): initial_raw_stats(), raw_snapshot_count(), raw_stats(), trino_query()
 
 ### Community 176 - "incremental/load_entity.py"
-Cohesion: 0.08
-Nodes (17): reader.py (shared JDBC reader), Backlog: Remove JDBC password from spark-submit arguments, configure_driver_logging(), log_sql(), log_step(), connection(), partition_name(), append_raw() (+9 more)
+Cohesion: 0.09
+Nodes (13): reader.py (shared JDBC reader), Backlog: Remove JDBC password from spark-submit arguments, configure_driver_logging(), log_sql(), log_step(), connection(), source_kind(), source_position() (+5 more)
 
 ### Community 178 - "main"
 Cohesion: 0.40
@@ -842,10 +842,6 @@ Nodes (6): Completion Report, Done When, Mandatory Post-Execution Hooks, Outline
 ### Community 182 - "План реализации DATARCH-2245"
 Cohesion: 0.33
 Nodes (6): План реализации DATARCH-2245, Подход, Проверка конституции, Содержание, Структура и проверка, Технический контекст
-
-### Community 185 - "speckit.clarify.md"
-Cohesion: 0.29
-Nodes (6): Completion Report, Done When, Mandatory Post-Execution Hooks, Outline, Pre-Execution Checks, User Input
 
 ### Community 187 - "Проверка реализации"
 Cohesion: 0.25
@@ -883,14 +879,6 @@ Nodes (4): Команды, Ожидания, Проверка, Содержан�
 Cohesion: 0.40
 Nodes (4): Задачи, Реализация, Результаты проверки, Содержание
 
-### Community 197 - "[CHECKLIST TYPE] Checklist: [FEATURE NAME]"
-Cohesion: 0.40
-Nodes (4): [Category 1], [Category 2], [CHECKLIST TYPE] Checklist: [FEATURE NAME], Notes
-
-### Community 198 - "User Scenarios & Testing *(mandatory)*"
-Cohesion: 0.40
-Nodes (5): Edge Cases, User Scenarios & Testing *(mandatory)*, User Story 1 - [Brief Title] (Priority: P1), User Story 2 - [Brief Title] (Priority: P2), User Story 3 - [Brief Title] (Priority: P3)
-
 ### Community 200 - "Проверка требований"
 Cohesion: 0.50
 Nodes (3): Проверка требований, Результат, Содержание
@@ -922,19 +910,19 @@ Nodes (4): 7. Provide Next Actions, 8. Offer Remediation, 9. Check for extension
 ## Knowledge Gaps
 - **104 isolated node(s):** `TEST_FAILURE_LOG_DIR`, `conf/spark/spark-defaults.conf`, `$speckit-github-taskstoissues (github extension)`, `pg-catalog — база метаданных Nessie`, `GenerateProcessIdOperator` (+99 more)
   These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 1491 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **52 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **45 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `AGENTS.md — инструкции проекта datalake_stand` connect `README — стенд хранилища и озера данных` to `speckit-checklist`, `Architecture Documentation`, `Dev Tooling Documentation`, `extending.md`, `speckit.specify.md`?**
-  _High betweenness centrality (0.115) - this node is a cross-community bridge._
+- **Why does `AGENTS.md — инструкции проекта datalake_stand` connect `README — стенд хранилища и озера данных` to `Architecture Documentation`, `Dev Tooling Documentation`, `extending.md`, `constitution.md`?**
+  _High betweenness centrality (0.123) - this node is a cross-community bridge._
 - **Are the 16 inferred relationships involving `RdbmsDialect` (e.g. with `Контекст` and `Предпочтительный путь решения`) actually correct?**
   _`RdbmsDialect` has 16 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `TEST_FAILURE_LOG_DIR`, `conf/spark/spark-defaults.conf`, `$speckit-github-taskstoissues (github extension)` to the rest of the system?**
   _104 weakly-connected nodes found - possible documentation gaps or missing edges._
-- **Should `keys` be split into smaller, more focused modules?**
-  _Cohesion score 0.0803633822501747 - nodes in this community are weakly interconnected._
+- **Should `managed_load` be split into smaller, more focused modules?**
+  _Cohesion score 0.058496853017400964 - nodes in this community are weakly interconnected._
 - **Why does `services` connect `Docker Compose Layout` to `DAG Processor Service`, `Sydafa Service Compose`, `Nessie Catalog Config`, `Compose Environment Vars`, `Init Services Compose`, `Airflow Services Compose`, `Postgres Services Compose`, `Test Runner Service`, `Silo Service Compose`?**
   _High betweenness centrality (0.112) - this node is a cross-community bridge._
 - **Are the 2 inferred relationships involving `generate_all()` (e.g. with `IncrementalEntityConfig` and `SourceConfig`) actually correct?**

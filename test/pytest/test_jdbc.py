@@ -1,5 +1,6 @@
 """Unit tests for the shared JDBC layer (ingestion.sources.rdbms.jdbc)."""
 
+import logging
 import sys
 import unittest
 from pathlib import Path
@@ -36,8 +37,8 @@ class TestKeyMetadata(unittest.TestCase):
                 spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", 'schema."Mixed.Table"'
             )
         self.assertEqual(result, jdbc.KeyMetadata(("id",), (), located))
-        columns.assert_called_once_with(metadata, MetadataLocation(None, "schema", "Mixed.Table"))
-        primary.assert_called_once_with(metadata, MetadataLocation(None, "schema", "Mixed.Table"))
+        columns.assert_called_once_with(metadata, MetadataLocation(None, "schema", "Mixed.Table"), level=logging.INFO)
+        primary.assert_called_once_with(metadata, MetadataLocation(None, "schema", "Mixed.Table"), level=logging.INFO)
         connection.close.assert_called_once()
 
     def test_fully_quoted_names_never_fold(self):
@@ -50,7 +51,7 @@ class TestKeyMetadata(unittest.TestCase):
             )
         self.assertEqual(result, jdbc.KeyMetadata((), (), {}))
         columns.assert_called_once_with(connection.getMetaData.return_value,
-                                        MetadataLocation(None, "Schema", "Table"))
+                                        MetadataLocation(None, "Schema", "Table"), level=logging.INFO)
         self.assertIn("No JDBC table metadata found", logs.output[0])
 
     def test_metadata_error_warns(self):
