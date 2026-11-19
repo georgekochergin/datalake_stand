@@ -30,6 +30,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import ssl
 import sys
 import time
@@ -462,6 +463,48 @@ def airflow_check_asset_publication(token: str, dag_id: str, run_id: str) -> Non
             for status in ("START", "END"):
                 check(f"{task_id}: task log confirms pg-meta {status}",
                       f"Task lifecycle event recorded status={status}" in log, True)
+            if dag_id.endswith("__main") and task_id.endswith(("__transactions.load", "__deals.load")):
+                check_load_trace(task_id, log, task_id.endswith("__transactions.load"))
+        elif run_id.startswith("e2e-ingest3-") and task_id.endswith("__transactions.load"):
+            log = airflow_task_log(token, dag_id, run_id, task_id)
+            check_load_trace(task_id, log, True, regular=True)
+
+
+def check_load_trace(task_id, log, incremental, *, regular=False):
+    """Validate the actual task log from the Airflow API, for both reader modes."""
+    expected = [
+        "== pg-meta: log_task ==", "INSERT INTO ingestion.airflow_tasks_log",
+        "pg-meta committed operation=log_task table=ingestion.airflow_tasks_log",
+        "== step №1: launch spark guard ==", "result=admitted", "== step №2: launch spark-submit cmd ==",
+        "JDBC DatabaseMetaData.getColumns", "JDBC DatabaseMetaData.getPrimaryKeys", "JDBC DatabaseMetaData.getIndexInfo",
+        "JDBC column ordinal=1", "JDBC metadata primary_key=", "Iceberg append committed",
+    ]
+    scope = "batch_window" if incremental else "source_table"
+    expected += [f"JDBC dbtable scope={scope}:"]
+    if incremental:
+        expected += [f"JDBC SQL scope={scope} operation=partition_bounds:", "jdbc partitioning: selected column=",
+                     "JDBC result operation=partition_bounds lower_bound=",
+                     "JDBC result operation=source_position max_increment_col=", "count_all=", "count_increment_col=",
+                     "INSERT INTO ingestion.incremental_batches", "UPDATE ingestion.incremental_state",
+                     "pg-meta committed operation=finalize_batch table=ingestion.incremental_state",
+                     "pg-meta committed operation=finalize_batch table=ingestion.incremental_batches",
+                     f"'reason': '{'regular' if regular else 'bootstrap'}'", "'status': 'SUCCEEDED'"]
+        source_sql = re.search(r"operation=source_position: ([^\r\n]+)", log)
+        check(f"{task_id}: MAX/COUNT scans whole source", bool(source_sql and
+              "COUNT(*)" in source_sql[1] and " WHERE " not in source_sql[1]), True)
+        bounds_sql = re.search(r"operation=partition_bounds: ([^\r\n]+)", log)
+        check(f"{task_id}: partition probe uses the frozen window", bool(bounds_sql and
+              " WHERE " in bounds_sql[1] and " <= " in bounds_sql[1] and (not regular or " > " in bounds_sql[1])), True)
+    else:
+        expected += ["--no-jdbc-partitioning", "JDBC partition bounds skipped reason=disabled"]
+        for marker in ("operation=source_position", "operation=partition_bounds",
+                       "ingestion.incremental_state", "ingestion.incremental_batches"):
+            check(f"{task_id}: full load does not emit {marker}", marker in log, False)
+    for marker in expected:
+        check(f"{task_id}: trace includes {marker}", marker in log, True)
+    check(f"{task_id}: multiline and redacted submit command", bool(re.search(
+        r"Spark-Submit cmd:\s+spark-submit\s+--master [^\n]+\n(?:[^\n]*\n)*?\s+--jdbc-url ['\"]?<redacted>['\"]?\n"
+        r"\s+--jdbc-user ['\"]?<redacted>['\"]?\n\s+--jdbc-password ['\"]?<redacted>['\"]?\n", log)), True)
 
 
 def airflow_task_states(token: str, dag_id: str, run_id: str) -> dict[str, str]:
@@ -477,8 +520,11 @@ def airflow_task_states(token: str, dag_id: str, run_id: str) -> dict[str, str]:
 def airflow_task_log(token: str, dag_id: str, run_id: str, task_id: str) -> str:
     """Лог первой попытки задачи."""
     url = "%s/api/v2/dags/%s/dagRuns/%s/taskInstances/%s/logs/1?full_content=true" % (AIRFLOW, dag_id, run_id, task_id)
-    _, raw = http("GET", url, None, {"Authorization": "Bearer " + token}, timeout=120)
-    return raw
+    code, raw = http("GET", url, None, {"Authorization": "Bearer " + token}, timeout=120)
+    if code != 200:
+        return raw
+    return "\n".join(item if isinstance(item, str) else str(item.get("event", ""))
+                     for item in json.loads(raw)["content"])
 
 
 def airflow_wait_run_failed(token: str, dag_id: str, run_id: str, timeout: int = 900, name: str | None = None) -> bool:

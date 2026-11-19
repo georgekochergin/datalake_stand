@@ -256,6 +256,19 @@ Default фреймворка — `default_pool` с весом 1.
 После [Clear](glossary.md#term-clear) генератора выделится `process_id=43`: это уже новые [партии](glossary.md#term-batch),
 хотя `run_id` Airflow не изменился.
 
+Лог задачи `load` разделён на этапы: Spark guard, многострочная команда `spark-submit`,
+JDBC-метаданные, выбор колонки, чтение и запись в Iceberg. Реквизиты подключения
+и значения произвольных `--conf` в команде скрываются. Вместо внутреннего SQL JDBC-драйвера
+выводятся вызовы `DatabaseMetaData` и свойства колонок в порядке `ORDINAL_POSITION`.
+
+- `source_position` выполняет `MAX/COUNT` по всей таблице без `WHERE` только при планировании новой
+  [партии](glossary.md#term-batch). `partition_bounds` выполняет `MIN/MAX` по итоговому запросу чтения.
+  Для [инкремента](glossary.md#term-increment) этот запрос уже ограничен [окном](glossary.md#term-window).
+  Для [полного среза](glossary.md#term-full) и [актуального снимка](glossary.md#term-snapshot) он читает всю таблицу.
+- События pg-meta показывают SQL и параметры отдельно. Записанные строки выводятся как `committed`
+  после фиксации транзакции. `no-op` означает отсутствие изменений, `not committed` — неуспешную операцию.
+  Записи задачи, генератора `process_id`, Spark-драйвера и DAG-колбэков связываются по `process_id`.
+
 ### Зависимости задач
 
 ```text

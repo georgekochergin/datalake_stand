@@ -51,7 +51,7 @@ class TestKeyMetadata(unittest.TestCase):
         self.assertEqual(result, jdbc.KeyMetadata((), (), {}))
         columns.assert_called_once_with(connection.getMetaData.return_value,
                                         MetadataLocation(None, "Schema", "Table"))
-        self.assertIn("falling back", logs.output[0])
+        self.assertIn("No JDBC table metadata found", logs.output[0])
 
     def test_metadata_error_warns(self):
         spark, _ = fake_jvm()
@@ -61,7 +61,8 @@ class TestKeyMetadata(unittest.TestCase):
                 spark._jvm, ORACLE, "jdbc:oracle:", "u", "p", "s.t"
             )
         self.assertEqual(result, jdbc.KeyMetadata((), (), {}))
-        self.assertIn("metadata offline", logs.output[0])
+        self.assertIn("reason_type=RuntimeError", logs.output[0])
+        self.assertNotIn("metadata offline", logs.output[0])
 
     def test_malformed_reference_warns(self):
         spark, _ = fake_jvm()
@@ -149,7 +150,8 @@ class TestCatalogAddressing(unittest.TestCase):
                 spark._jvm, CatalogDialect(), "jdbc:stub://", "u", "p", "example_db.example_table"
             )
         self.assertEqual(result, jdbc.KeyMetadata((), (), {}))
-        self.assertIn("catalog engine offline", logs.output[0])
+        self.assertIn("reason_type=RuntimeError", logs.output[0])
+        self.assertNotIn("catalog engine offline", logs.output[0])
 
 
 class TestCompatibilityProjection(unittest.TestCase):
@@ -271,6 +273,16 @@ class TestColumnMetadata(unittest.TestCase):
         metadata = MagicMock()
         metadata.getColumns.return_value = ScriptedResult(rows)
         return jdbc._column_metadata(metadata, MetadataLocation(None, "s", "t"))
+
+    def test_column_log_uses_ordinal_order_without_changing_projection_order(self):
+        with self.assertLogs(jdbc.__name__, level="INFO") as logs:
+            columns = self.columns([
+                {"COLUMN_NAME": "b", "TYPE_NAME": "int", "ORDINAL_POSITION": 2},
+                {"COLUMN_NAME": "a", "TYPE_NAME": "int", "ORDINAL_POSITION": 1},
+            ])
+        self.assertEqual(list(columns), ["b", "a"])
+        self.assertIn("ordinal=1 name='a'", logs.output[-2])
+        self.assertIn("ordinal=2 name='b'", logs.output[-1])
 
     def test_types_normalized_and_keyed_lowercase(self):
         result = self.columns([

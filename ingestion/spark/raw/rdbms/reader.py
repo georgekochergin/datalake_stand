@@ -13,6 +13,8 @@ namespace of each application carries the JDBC credentials.
 import logging
 from decimal import Decimal
 
+from ingestion.logging import log_step
+
 from ingestion.sources.rdbms import jdbc
 from ingestion.sources.rdbms import jdbc_partitioning
 from ingestion.sources.rdbms import positions
@@ -70,15 +72,19 @@ def long_representable(*values) -> bool:
     return all(-(2 ** 63) <= int(value) <= 2 ** 63 - 1 for value in values)
 
 
-def read_bounds(spark, args, read_query, column) -> tuple:
+def read_bounds(spark, args, read_query, column, *, scope="read_query") -> tuple:
     """Read MIN/MAX of the partition column over the read query (one-row JDBC read)."""
     column_ref = dialects.by_jdbc_url(args.jdbc_url).quote_identifier(column)
     query = (
         f"(SELECT MIN({column_ref}) AS lower_bound, MAX({column_ref}) AS upper_bound "
         f"FROM {read_query}) bounds"
     )
+    log_step(LOGGER, "probe JDBC partition bounds")
+    LOGGER.info("JDBC SQL scope=%s operation=partition_bounds: %s",
+                scope, query)
     frame = jdbc_reader(spark, args, query).load()
     row = frame.collect()[0]
+    LOGGER.info("JDBC result operation=partition_bounds lower_bound=%s upper_bound=%s", row[0], row[1])
     return row[0], row[1]
 
 
@@ -97,7 +103,7 @@ def build_extract_query(source_table, projection, filters=(), extra_select=""):
     )
 
 
-def apply_partition_options(spark, args, reader, query, partition):
+def apply_partition_options(spark, args, reader, query, partition, *, scope):
     """Probe MIN/MAX of the partition column and enable parallel ranges.
 
     Returns (reader, low, high): the reader carries the partition options
@@ -108,7 +114,7 @@ def apply_partition_options(spark, args, reader, query, partition):
     if partition is None:
         return reader, None, None
     reference = jdbc_partitioning.partition_name(partition)
-    low, high = read_bounds(spark, args, query, reference)
+    low, high = read_bounds(spark, args, query, reference, scope=scope)
     parallel = low is not None and high is not None and low != high
     if parallel and positions.kind_info(partition.kind)[0] == "integral" and not long_representable(low, high):
         LOGGER.warning(
@@ -118,6 +124,9 @@ def apply_partition_options(spark, args, reader, query, partition):
         )
         parallel = False
     if not parallel:
+        LOGGER.info("jdbc partitioning: fallback reason=%s",
+                    "null_bounds" if low is None or high is None else
+                    "equal_bounds" if low == high else "out_of_long_range")
         return reader, low, high
     reader = reader.option("partitionColumn", reference).option(
         "lowerBound", bound_literal(low)).option("upperBound", bound_literal(high)).option(
@@ -135,6 +144,7 @@ def read_extract_frame(spark, args, filters=(), extra_select=""):
     passes the frozen-window predicates and the exact typed extraction
     position as extra_select.
     """
+    scope = "batch_window" if filters or extra_select else "source_table"
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     source_table = render_source_table(dialect, args.source_table)
     keys = jdbc.key_metadata(
@@ -148,19 +158,26 @@ def read_extract_frame(spark, args, filters=(), extra_select=""):
     partition = partition_select = None
     if not args.no_jdbc_partitioning:
         partition, partition_select = jdbc_partitioning.plan(dialect, keys, args.source_table)
+    else:
+        LOGGER.info("jdbc partitioning: skipped reason=disabled")
     if partition_select:
         extra_select = f"{extra_select}{partition_select}"
     query = build_extract_query(source_table, projection, filters, extra_select)
     reader = jdbc_reader(spark, args, query)
-    reader, low, high = apply_partition_options(spark, args, reader, query, partition)
+    reader, low, high = apply_partition_options(spark, args, reader, query, partition, scope=scope)
+    log_step(LOGGER, "read JDBC source")
+    LOGGER.info("JDBC dbtable scope=%s: %s", scope, query)
+    if partition is None:
+        LOGGER.info("JDBC partition bounds skipped reason=%s",
+                    "disabled" if args.no_jdbc_partitioning else "no_partition_column")
     frame = reader.load()
     if partition is not None and partition.derived:
         frame = frame.drop(jdbc_partitioning.partition_name(partition))
     frame = frame.cache()
-    if partition is not None:
-        LOGGER.info(
-            "jdbc partitioning: column=%s step=%s window=[%s..%s] partitions=%s of %s requested",
-            partition.column, partition.step, low, high,
-            frame.rdd.getNumPartitions(), args.num_partitions,
-        )
+    LOGGER.info(
+        "jdbc partitioning: column=%s step=%s window=[%s..%s] partitions=%s of %s requested",
+        jdbc_partitioning.partition_name(partition) if partition else None,
+        partition.step if partition else None, low, high,
+        frame.rdd.getNumPartitions() if partition else 1, args.num_partitions,
+    )
     return frame

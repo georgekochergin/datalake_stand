@@ -9,6 +9,7 @@ PostgreSQL.
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -44,15 +45,14 @@ class FakeCursor:
     def execute(self, sql, params=()):
         """Apply one known statement to the in-memory database."""
         statement = " ".join(sql.split())
-        if statement.startswith("INSERT INTO ingestion.airflow_dagruns_log") and "RETURNING" in statement:
+        if statement.startswith("INSERT INTO ingestion.airflow_dagruns_log") and "nextval(" in statement:
             dag_id, run_id, execution_date = params
             self.db.process_seq += 1
             process_id = self.db.process_seq
             self.db.dagruns.append({"id": len(self.db.dagruns) + 1, "process_id": process_id,
                                     "dag_id": dag_id, "run_id": run_id,
                                     "execution_date": execution_date, "status": "START"})
-            self.description = [("process_id",)]
-            self._row = (process_id,)
+            self._return_row(self.db.dagruns[-1])
             return
         if statement.startswith("INSERT INTO ingestion.airflow_dagruns_log"):
             process_id, dag_id, run_id, execution_date, status = params
@@ -60,6 +60,7 @@ class FakeCursor:
                                     "dag_id": dag_id, "run_id": run_id,
                                     "execution_date": execution_date, "status": status})
             self.rowcount = 1
+            self._return_row(self.db.dagruns[-1])
             return
         if statement.startswith("INSERT INTO ingestion.airflow_tasks_log"):
             process_id, source_id, entity_fqn, datalake_table, status = params
@@ -67,6 +68,7 @@ class FakeCursor:
                                   "source_id": source_id, "entity_fqn": entity_fqn,
                                   "datalake_table": datalake_table, "status": status})
             self.rowcount = 1
+            self._return_row(self.db.tasks[-1])
             return
         if statement.startswith("SELECT max(process_id)"):
             dag_id, run_id = params
@@ -77,14 +79,19 @@ class FakeCursor:
             return
         if statement.startswith("INSERT INTO ingestion.incremental_state"):
             source_id, entity_fqn = params[0], params[1]
-            if (source_id, entity_fqn) not in self.db.state:
+            key = (source_id, entity_fqn)
+            if key not in self.db.state:
                 self.db.state[(source_id, entity_fqn)] = {
                     "source_id": source_id, "entity_fqn": entity_fqn,
                     "incremental_column": params[2], "incremental_type": params[3],
                     "watermark": None, "revision": 1,
                     "last_process_id": None, "updated_at": None,
                 }
-            self.rowcount = 1
+                self.rowcount = 1
+                self._return_row(self.db.state[key])
+            else:
+                self.rowcount = 0
+                self._row = None
             return
         if statement.startswith("SELECT * FROM ingestion.incremental_state"):
             state = self.db.state.get((params[0], params[1]))
@@ -129,8 +136,9 @@ class FakeCursor:
                 self.rowcount = 0
                 return
             state.update(watermark=after, revision=state["revision"] + 1,
-                         last_process_id=process_id, updated_at="now")
+                          last_process_id=process_id, updated_at="now")
             self.rowcount = 1
+            self._return_row(state)
             return
         if statement.startswith("UPDATE ingestion.incremental_batches SET status = 'SUCCEEDED'"):
             row_count, observed_max, watermark_after, process_id, source_id, entity_fqn = params
@@ -149,6 +157,11 @@ class FakeCursor:
             self.rowcount = 1
             return
         raise AssertionError(f"unexpected statement: {statement!r}")
+
+    def _return_row(self, row):
+        """Expose a copy of the returned row through DB-API metadata."""
+        self.description = [(name,) for name in row]
+        self._row = tuple(row.values())
 
     def fetchone(self):
         """Return the single row produced by the last SELECT or RETURNING."""
@@ -301,6 +314,20 @@ class TestPlanBatch(BatchTestCase):
 
 class TestBatchLifecycle(BatchTestCase):
     """Start, finalize, and fail transitions with their fencing rules."""
+
+    def test_commit_failure_does_not_log_rows_as_committed(self):
+        batch = self.plan()
+        conn = self.db.connect()
+        with patch.object(conn, "commit", side_effect=RuntimeError("commit failed")), self.assertLogs(
+            meta.__name__, level="INFO"
+        ) as logs:
+            with self.assertRaisesRegex(RuntimeError, "commit failed"):
+                registry.finalize_batch(**(self.key(batch) | {"db_connect": lambda: conn, "row_count": 0}))
+        self.assertEqual(conn.rollbacks, 1)
+        output = "\n".join(logs.output)
+        self.assertIn("UPDATE ingestion.incremental_batches", output)
+        self.assertIn("pg-meta not committed operation=finalize_batch", output)
+        self.assertNotIn("pg-meta committed", output)
 
     def key(self, batch):
         """The composite batch key."""

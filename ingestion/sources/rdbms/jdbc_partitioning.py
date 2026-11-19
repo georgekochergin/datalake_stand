@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from . import jdbc
 from . import positions
+from ingestion.logging import log_step
 
 LOGGER = logging.getLogger(__name__)
 
@@ -100,6 +101,7 @@ def choose(dialect, keys) -> PartitionChoice | None:
         info = keys.columns.get(keys.primary_key[0].lower())
         if info is not None and _family(dialect, info) == "integral":
             return PartitionChoice(info.name, jdbc.column_position_kind(dialect, info), STEP_PRIMARY_KEY, False)
+    LOGGER.info("jdbc partitioning: step=%s rejected; requires a single integral PK", STEP_PRIMARY_KEY)
     unique_infos = [
         keys.columns[name.lower()] for name in keys.unique_columns
         if name.lower() in keys.columns
@@ -112,6 +114,7 @@ def choose(dialect, keys) -> PartitionChoice | None:
         info = _first_candidate(dialect, infos, families)
         if info is not None:
             return PartitionChoice(info.name, jdbc.column_position_kind(dialect, info), step, derived)
+        LOGGER.info("jdbc partitioning: step=%s rejected; no NOT NULL candidate of family %s", step, families)
     return None
 
 
@@ -125,6 +128,7 @@ def plan(dialect, keys, source_table):
     day expression appended to the read query. The caller owns the
     partitioning switch and the metadata access.
     """
+    log_step(LOGGER, "choose JDBC partition column")
     partition = choose(dialect, keys)
     if partition is None:
         if keys.columns:
@@ -134,6 +138,8 @@ def plan(dialect, keys, source_table):
                 source_table, no_candidate_reason(dialect, keys),
             )
         return None, None
+    LOGGER.info("jdbc partitioning: selected column=%s step=%s kind=%s derived=%s tie_break=normalized_name",
+                partition.column, partition.step, partition.kind, partition.derived)
     if not partition.derived:
         return partition, None
     if DAY_ALIAS in keys.columns:

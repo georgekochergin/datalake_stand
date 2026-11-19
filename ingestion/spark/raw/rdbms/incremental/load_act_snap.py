@@ -13,6 +13,8 @@ import argparse
 import logging
 from datetime import datetime, timezone
 
+from ingestion.logging import configure_driver_logging, log_step
+
 from ingestion.spark.raw.iceberg import (
     CATALOG,
     METADATA_DTTM,
@@ -82,8 +84,13 @@ def _overwrite_snapshot(spark, args, frame, load_dttm) -> None:
     )
     portion.createOrReplaceTempView(SNAPSHOT_SOURCE_VIEW)
     namespace, _ = validate_target_table(args.target_table)
-    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{namespace}")
-    spark.sql(build_rtas_sql(args.target_table, args.process_id, portion.columns))
+    log_step(LOGGER, "publish Iceberg snapshot")
+    namespace_sql = f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{namespace}"
+    replace_sql = build_rtas_sql(args.target_table, args.process_id, portion.columns)
+    LOGGER.info("Iceberg SQL: %s", namespace_sql)
+    spark.sql(namespace_sql)
+    LOGGER.info("Iceberg SQL: %s", replace_sql)
+    spark.sql(replace_sql)
 
 
 def managed_snapshot(spark, args) -> None:
@@ -124,7 +131,7 @@ def managed_snapshot(spark, args) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     """Overwrite the actual snapshot of one entity from a JDBC source."""
-    logging.basicConfig(level=logging.INFO)
+    configure_driver_logging()
     args = parse_args(argv)
     validate_target_table(args.target_table)
     from pyspark.sql import SparkSession

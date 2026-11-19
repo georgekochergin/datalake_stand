@@ -111,6 +111,20 @@ class TestIngestOperator(unittest.TestCase):
         self.context["ti"].xcom_pull.return_value = 42
         self.config = {"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 0, "unit": None}}
 
+    def test_submit_preview_preserves_argument_boundaries_and_masks_values(self):
+        argv = ["spark-submit", "--master", "spark://master:7077", "--conf", "spark.driverEnv.X=token with spaces",
+                "--verbose", "/load.py", "--jdbc-url", "jdbc:private", "--jdbc-user", "private-user",
+                "--jdbc-password", "--contains-spaces and symbols", "--no-jdbc-partitioning",
+                "--incremental-config", json.dumps(self.config)]
+        original = list(argv)
+        preview = self.module.raw_rdbms._format_submit_command(argv, argv.index("/load.py"))
+        self.assertEqual(argv, original)
+        for value in ("token with spaces", "jdbc:private", "private-user", "--contains-spaces"):
+            self.assertNotIn(value, preview)
+        self.assertIn("\n  --conf '<redacted>'\n  --verbose\n  /load.py\n", preview)
+        self.assertIn("\n  --jdbc-password '<redacted>'\n  --no-jdbc-partitioning\n", preview)
+        self.assertIn(f"\n  --incremental-config '{json.dumps(self.config)}'", preview)
+
     def full_operator(self, **kwargs):
         return self.module.IngestFullOperator(
             task_id="load", source_id="bank", airflow_conn_id="source", fqn="s.t",
