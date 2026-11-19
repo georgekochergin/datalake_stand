@@ -114,7 +114,7 @@ class TestMain(unittest.TestCase):
     def test_dispatches_to_managed_load(self):
         spark = MagicMock()
         session = MagicMock()
-        session.builder.appName.return_value.getOrCreate.return_value = spark
+        session.builder.getOrCreate.return_value = spark
         sql = types.ModuleType("pyspark.sql")
         sql.SparkSession = session
         pyspark = types.ModuleType("pyspark")

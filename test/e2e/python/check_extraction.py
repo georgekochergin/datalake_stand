@@ -27,7 +27,7 @@ def records(cursor, sql):
 
 
 def check_logged_submit_replay(source, namespace, batch):
-    """Run the command copied from the task log against a completed batch on this worker."""
+    """Replay a completed batch with a distinct submit name to verify Spark honors it."""
     from airflow.sdk import BaseHook
     from ingestion.operators.raw_rdbms import _pgmeta_dsn, resolve_source_connection
 
@@ -42,6 +42,12 @@ def check_logged_submit_replay(source, namespace, batch):
     require("  --jdbc-password *** \\" in command.splitlines(), "logged command masks the JDBC password with ***")
     values = {"--jdbc-url": url, "--jdbc-user": user, "--jdbc-password": password}
     lines = command.splitlines()
+    replay_name = f"e2e-replay-{source}"
+    name_lines = [index for index, line in enumerate(lines) if line.lstrip().startswith("--name ")]
+    require(len(name_lines) == 1, "logged command has one Spark application name")
+    index = name_lines[0]
+    require(lines[index] == f"  --name {batch['target_table']} \\", "logged name matches the target table")
+    lines[index] = f"  --name {replay_name} \\"
     for index, line in enumerate(lines):
         flag = line.strip().split(maxsplit=1)[0]
         if flag in values and "***" in line:
@@ -53,8 +59,11 @@ def check_logged_submit_replay(source, namespace, batch):
     result = subprocess.run(["sh", "-c", command], env={**os.environ, "JDBC_PASSWORD": password,
                             "JDBC_URL": url,
                             "INGESTION_META_DSN": dsn}, capture_output=True, text=True, timeout=120)
-    require(result.returncode == 0 and "batch already succeeded; repeat read skipped" in result.stderr + result.stdout,
-            "command copied from the log runs in the worker and reuses the completed batch")
+    output = result.stderr + result.stdout
+    require(result.returncode == 0 and "batch already succeeded; repeat read skipped" in output,
+             "command copied from the log runs in the worker and reuses the completed batch")
+    require(any(line.endswith(f"Submitted application: {replay_name}") for line in output.splitlines()),
+            "Spark uses --name even when it differs from --target-table")
 
 
 def check_snapshot_publication():

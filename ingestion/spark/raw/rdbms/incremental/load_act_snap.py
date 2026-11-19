@@ -136,7 +136,7 @@ def main(argv: list[str] | None = None) -> None:
     validate_target_table(args.target_table)
     from pyspark.sql import SparkSession
 
-    spark = SparkSession.builder.appName(args.target_table).getOrCreate()
+    spark = SparkSession.builder.getOrCreate()
     try:
         managed_snapshot(spark, args)
     finally:
