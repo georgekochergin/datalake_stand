@@ -12,6 +12,7 @@ import logging
 from ingestion.spark.raw import append
 from ingestion.spark.raw.iceberg import validate_target_table
 from ingestion.spark.raw.rdbms import reader
+from ingestion.logging import configure_driver_logging
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,13 +51,14 @@ def managed_load(spark, args):
 
 def main(argv: list[str] | None = None) -> None:
     """Load one full entity slice from a JDBC source into the raw layer."""
+    configure_driver_logging()
     args = parse_args(argv)
     if not args.source_id:
         raise ValueError("--source-id is required: extraction runs only as a managed Airflow batch")
     validate_target_table(args.target_table)
     from pyspark.sql import SparkSession
 
-    spark = SparkSession.builder.appName(args.target_table).getOrCreate()
+    spark = SparkSession.builder.getOrCreate()
     try:
         managed_load(spark, args)
     finally:

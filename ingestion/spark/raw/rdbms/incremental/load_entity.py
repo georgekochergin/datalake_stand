@@ -14,6 +14,8 @@ import json
 import logging
 import os
 
+from ingestion.logging import configure_driver_logging, log_sql, log_step
+
 from ingestion.spark.raw import append
 from ingestion.spark.raw.iceberg import validate_target_table
 from ingestion.spark.raw.rdbms import reader
@@ -60,13 +62,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     """Load one entity from a JDBC source into the raw layer."""
+    configure_driver_logging()
     args = parse_args(argv)
     if not args.source_id:
         raise ValueError("--source-id is required: extraction runs only as a managed Airflow batch")
     validate_target_table(args.target_table)
     from pyspark.sql import SparkSession
 
-    spark = SparkSession.builder.appName(args.target_table).getOrCreate()
+    spark = SparkSession.builder.getOrCreate()
     try:
         managed_load(spark, args)
     finally:
@@ -121,13 +124,16 @@ def source_position(spark, args):
     column = dialect.quote_identifier(args.incremental_column)
     table = render_source_table(dialect, args.source_table)
     kind = source_kind(spark, args)
+    log_step(LOGGER, "probe source incremental position")
+    expression = dialect.position_expression(f"MAX({column})", kind)
+    sql = f"SELECT {expression}, COUNT(*), COUNT({column}) FROM {table}"
+    log_sql(LOGGER, "JDBC SQL scope=source_table operation=source_position", sql)
     with jdbc.connection(spark._jvm, args.jdbc_url, args.jdbc_user, args.jdbc_password) as connection:
-        expression = dialect.position_expression(f"MAX({column})", kind)
-        row = jdbc.first_row(
-            connection, f"SELECT {expression}, COUNT(*), COUNT({column}) FROM {table}"
-        )
+        row = jdbc.first_row(connection, sql)
     upper = positions.canonical(row[0], kind)
     count, nonnull = int(row[1]), int(row[2])
+    LOGGER.info("JDBC result operation=source_position max_increment_col=%s count_all=%s count_increment_col=%s",
+                upper, count, nonnull)
     return kind, upper, count == 0, count != nonnull
 
 
@@ -147,6 +153,7 @@ def _plan_batch(spark, args, connect):
     batch = registry.get_batch(process_id=args.process_id, source_id=args.source_id,
                            entity_fqn=args.source_table, db_connect=connect)
     if batch is not None:
+        LOGGER.info("JDBC source position probe skipped reason=persisted_batch")
         if batch["target_table"] != args.target_table:
             raise ValueError("Persisted batch target does not match")
         if batch["incremental_column"] != args.incremental_column:
@@ -208,6 +215,7 @@ def managed_load(spark, args):
             )
         return psycopg2.connect(dsn)
 
+    log_step(LOGGER, "resolve incremental batch")
     batch = _plan_batch(spark, args, connect)
     if batch["status"] == "SUCCEEDED":
         return
@@ -215,13 +223,16 @@ def managed_load(spark, args):
                entity_fqn=args.source_table, db_connect=connect)
     kind = batch["incremental_type"]
     if empty_incremental_window(batch):
+        LOGGER.info("JDBC batch read and Iceberg append skipped reason=empty_window")
         registry.finalize_batch(row_count=0, observed_max=None, **key)
         return
     registry.start_batch(**key)
     try:
-        source = window.read_window_frame(spark, args, batch, kind)
+        source = window.read_window_frame(spark, args, batch, kind, detailed_metadata=False)
         try:
+            log_step(LOGGER, "summarize batch window")
             rows, observed, clean = window.window_summary(source, kind)
+            LOGGER.info("batch summary row_count=%s observed_max=%s", rows, observed)
             append.append_raw(spark, args.target_table, clean, rows, args.process_id)
             watermark = batch["watermark_before"]
             watermark = positions.maximum(watermark, observed, kind)

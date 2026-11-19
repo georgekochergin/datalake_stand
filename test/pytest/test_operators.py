@@ -1,12 +1,21 @@
 """Behavioral ingestion operator tests using scoped Airflow module doubles."""
 
+import ast
 import importlib.util
 import json
+import os
+import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
+
+from ingestion.sources.rdbms.contracts import ConnectionSpec
+from ingestion.sources.rdbms.registry import all_dialects
 
 
 class FakeSkip(Exception):
@@ -95,6 +104,28 @@ class TestMetaDouble(unittest.TestCase):
                 getattr(module.meta, name)
 
 
+@pytest.mark.parametrize("dialect", all_dialects(), ids=lambda dialect: type(dialect).__name__)
+def test_standard_jdbc_urls_are_visible_for_all_registered_dialects(dialect):
+    raw = load_operators().raw_rdbms
+    url = dialect.build_jdbc_url(ConnectionSpec("source-db", None, "source_db", "reader", "secret"))
+    assert raw._PUBLIC_JDBC_URL.fullmatch(url), f"Review the safe display rule for {type(dialect).__name__}"
+
+
+@pytest.mark.parametrize("driver", ("full/load_entity.py", "incremental/load_entity.py", "incremental/load_act_snap.py"))
+def test_driver_arguments_have_an_explicit_log_display_policy(driver):
+    raw = load_operators().raw_rdbms
+    path = Path(__file__).resolve().parents[2] / "ingestion/spark/raw/rdbms" / driver
+    parser = next(node for node in ast.parse(path.read_text()).body
+                  if isinstance(node, ast.FunctionDef) and node.name == "parse_args")
+    options = {arg.value for node in ast.walk(parser) if isinstance(node, ast.Call)
+               and isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument"
+               for arg in node.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+               and arg.value.startswith("--")}
+    assert options
+    missing = options - (raw._VISIBLE_VALUES | raw._SWITCHES | {"--jdbc-url", "--jdbc-user", "--jdbc-password"})
+    assert not missing, f"Review the log display policy for {driver}: {sorted(missing)}"
+
+
 class TestIngestOperator(unittest.TestCase):
     """Validate runtime connection compatibility, CLI arguments and run-scoped IDs."""
 
@@ -110,6 +141,39 @@ class TestIngestOperator(unittest.TestCase):
         self.context = {"ti": MagicMock(), "dag_run": types.SimpleNamespace(dag_id="dag", run_id="run", conf={})}
         self.context["ti"].xcom_pull.return_value = 42
         self.config = {"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 0, "unit": None}}
+
+    def test_submit_preview_preserves_argument_boundaries_and_masks_values(self):
+        argv = ["spark-submit", "--master", "spark://master:7077", "--conf", "spark.driverEnv.X=token with spaces",
+                "--verbose", "/load.py", "--jdbc-url", "jdbc:private", "--jdbc-user", "private-user",
+                "--jdbc-password", "--contains-spaces and symbols", "--no-jdbc-partitioning",
+                "--incremental-config", json.dumps(self.config)]
+        original = list(argv)
+        preview = self.module.raw_rdbms._format_submit_command(argv, argv.index("/load.py"))
+        self.assertEqual(argv, original)
+        for value in ("token with spaces", "jdbc:private", "--contains-spaces"):
+            self.assertNotIn(value, preview)
+        self.assertIn("--verbose /load.py", preview)
+        self.assertIn("--jdbc-user private-user", preview)
+        self.assertIn("  --jdbc-password *** \\", preview.splitlines())
+        replay = preview.replace("--jdbc-password ***", '--jdbc-password "$JDBC_PASSWORD"')
+        with tempfile.TemporaryDirectory() as directory:
+            spark = Path(directory) / "spark-submit"
+            spark.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            spark.chmod(0o700)
+            result = subprocess.check_output(["sh", "-c", replay], text=True, env={
+                **os.environ, "PATH": f"{directory}:{os.environ['PATH']}",
+                "SPARK_ARG_4": argv[4], "JDBC_URL": argv[8], "JDBC_PASSWORD": argv[12],
+            })
+        self.assertEqual(result.splitlines(), argv[1:])
+
+    def test_submit_preview_displays_standard_jdbc_endpoint_and_user(self):
+        argv = ["spark-submit", "/load.py", "--jdbc-url", "jdbc:oracle:thin:@//oracle:1521/service",
+                "--jdbc-user", "reader", "--jdbc-password", "secret"]
+        formatter = self.module.raw_rdbms._format_submit_command
+        preview = formatter(argv, 1)
+        self.assertIn(f"--jdbc-url {argv[3]}", preview)
+        self.assertIn("--jdbc-user reader", preview)
+        self.assertNotIn("secret", preview)
 
     def full_operator(self, **kwargs):
         return self.module.IngestFullOperator(

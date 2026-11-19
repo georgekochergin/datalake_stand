@@ -25,12 +25,13 @@ def position_select(dialect, kind, incremental_column) -> str:
     return f', {dialect.position_expression(column, kind)} AS "__extract_position"'
 
 
-def read_window_frame(spark, args, batch, kind):
+def read_window_frame(spark, args, batch, kind, *, detailed_metadata=True):
     """Read the frozen batch window into a cached frame via the shared JDBC reader."""
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     filters = window_filters(dialect, batch, kind, args.incremental_column)
     extra_select = position_select(dialect, kind, args.incremental_column)
-    return reader.read_extract_frame(spark, args, filters=filters, extra_select=extra_select)
+    return reader.read_extract_frame(spark, args, filters=filters, extra_select=extra_select,
+                                     detailed_metadata=detailed_metadata)
 
 
 def window_summary(frame, kind):

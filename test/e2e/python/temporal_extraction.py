@@ -50,11 +50,11 @@ def virtual_sources(*modules):
         fixture = VIRTUAL_SOURCES.get(source_table)
         return fixture["sql"] if fixture else real_render(dialect, source_table)
 
-    def keys(jvm, dialect, jdbc_url, user, password, source_table):
+    def keys(jvm, dialect, jdbc_url, user, password, source_table, *, detailed=True):
         fixture = VIRTUAL_SOURCES.get(source_table)
         if fixture:
             return jdbc_pkg.KeyMetadata((), (), dict(fixture["columns"]))
-        return real_keys(jvm, dialect, jdbc_url, user, password, source_table)
+        return real_keys(jvm, dialect, jdbc_url, user, password, source_table, detailed=detailed)
 
     with ExitStack() as stack:
         stack.enter_context(patch.object(reader_pkg, "render_source_table", render))

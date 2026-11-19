@@ -30,6 +30,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import ssl
 import sys
 import time
@@ -462,6 +463,85 @@ def airflow_check_asset_publication(token: str, dag_id: str, run_id: str) -> Non
             for status in ("START", "END"):
                 check(f"{task_id}: task log confirms pg-meta {status}",
                       f"Task lifecycle event recorded status={status}" in log, True)
+            if dag_id.endswith("__main") and task_id.endswith(("__transactions.load", "__deals.load")):
+                check_load_trace(task_id, log, task_id.endswith("__transactions.load"))
+        elif run_id.startswith("e2e-ingest3-") and task_id.endswith("__transactions.load"):
+            log = airflow_task_log(token, dag_id, run_id, task_id)
+            check_load_trace(task_id, log, True, regular=True)
+
+
+def check_load_trace(task_id, log, incremental, *, regular=False):
+    """Validate the actual task log from the Airflow API, for both reader modes."""
+    expected = [
+        "== pg-meta: log_task ==", "INSERT INTO ingestion.airflow_tasks_log",
+        "pg-meta committed operation=log_task table=ingestion.airflow_tasks_log",
+        "== launch spark guard ==", "result=admitted", "== launch spark-submit cmd ==",
+        "JDBC DatabaseMetaData.getColumns", "JDBC DatabaseMetaData.getPrimaryKeys", "JDBC DatabaseMetaData.getIndexInfo",
+        "JDBC column ordinal=1", "JDBC metadata primary_key=", "Iceberg append committed",
+    ]
+    scope = "batch_window" if incremental else "source_table"
+    expected += [f"JDBC dbtable scope={scope}:"]
+    lifecycle_sql = logged_sql(log, "pg-meta SQL")
+    check(f"{task_id}: rendered multiline pg-meta SQL", bool(
+        lifecycle_sql and "INSERT INTO ingestion.airflow_tasks_log" in lifecycle_sql[0]
+        and len(lifecycle_sql[0].splitlines()) > 1 and "%s" not in lifecycle_sql[0]
+        and "'START'" in lifecycle_sql[0]), True)
+    if incremental:
+        expected += [f"JDBC SQL scope={scope} operation=partition_bounds:", "jdbc partitioning: selected column=",
+                     "JDBC result operation=partition_bounds lower_bound=",
+                     "JDBC result operation=source_position max_increment_col=", "count_all=", "count_increment_col=",
+                     "INSERT INTO ingestion.incremental_batches", "UPDATE ingestion.incremental_state",
+                     "pg-meta committed operation=finalize_batch table=ingestion.incremental_state",
+                     "pg-meta committed operation=finalize_batch table=ingestion.incremental_batches",
+                     f"reason={'regular' if regular else 'bootstrap'!r}", "→'SUCCEEDED'",
+                     "JDBC metadata refreshed source_table=", "JDBCRelation: Number of partitions:"]
+        check(f"{task_id}: JDBC metadata detail appears once", log.count("JDBC DatabaseMetaData.getColumns"), 1)
+        check(f"{task_id}: Spark SQL block retains logger name", bool(re.search(
+            r"INFO [\w.]+: JDBC SQL scope=batch_window operation=partition_bounds:\n", log)), True)
+        source_sql = next(iter(logged_sql(log, "operation=source_position")), "")
+        check(f"{task_id}: MAX/COUNT scans whole source", bool(source_sql and
+              "COUNT(*)" in source_sql and not re.search(r"\bWHERE\b", source_sql)
+              and len(source_sql.splitlines()) > 1), True)
+        bounds_sql = next(iter(logged_sql(log, "operation=partition_bounds")), "")
+        check(f"{task_id}: partition probe uses the frozen window", bool(bounds_sql and
+              re.search(r"(?m)^\s+WHERE\b", bounds_sql) and " <= " in bounds_sql
+              and (not regular or " > " in bounds_sql)), True)
+        check(f"{task_id}: rendered Spark pg-meta SQL", any(
+            "SELECT 1" in sql and "FROM ingestion.incremental_batches" in sql and "%s" not in sql
+            for sql in lifecycle_sql), True)
+    else:
+        expected += ["--no-jdbc-partitioning", "JDBC partition bounds skipped reason=disabled"]
+        for marker in ("operation=source_position", "operation=partition_bounds",
+                       "ingestion.incremental_state", "ingestion.incremental_batches"):
+            check(f"{task_id}: full load does not emit {marker}", marker in log, False)
+        check(f"{task_id}: disabled partitioning does not report requested partitions",
+              "jdbc partitioning: column=" in log, False)
+    for marker in expected:
+        check(f"{task_id}: trace includes {marker}", marker in log, True)
+    check(f"{task_id}: pg-meta full rows are not emitted at INFO",
+          bool(re.search(r"pg-meta (?:committed|no-op) [^\n]*before=\{", log)), False)
+    check(f"{task_id}: Spark keeps Iceberg commit INFO", "INFO SnapshotProducer: Committed snapshot" in log, True)
+    check(f"{task_id}: noisy JVM categories do not emit INFO", bool(re.search(
+        r"INFO (?:BlockManager\w*|MemoryStore|DAGScheduler|TaskSchedulerImpl|SecurityManager|LoggingMetricsReporter):", log)), False)
+    check(f"{task_id}: submit name matches the registered Spark application", bool(re.search(
+        r"(?m)^  --name (raw\.[\w.]+) \\[^\S\n]*\n[\s\S]*?Submitted application: \1(?:\n|$)", log)), True)
+    check(f"{task_id}: copyable submit command", bool(re.search(
+        r"Spark-Submit cmd:\s+spark-submit \\\n"
+        r"(?:[^\n]+ \\\n)*?\s+--deploy-mode client /opt/spark-jobs/[^\n]+ \\\n"
+        r"\s+--jdbc-url [^\n]+ \\\n\s+--jdbc-user [^\n]+ \\\n"
+        r"\s+--jdbc-password \*\*\* \\", log)), True)
+    if not regular:
+        check(f"{task_id}: multiline Iceberg CREATE TABLE", any(
+            re.search(r"CREATE TABLE [^\n]+ \(\n +`[^\n]+\n", sql)
+            and re.search(r"(?m)^  USING iceberg\n  PARTITIONED BY\b", sql)
+            for sql in logged_sql(log, "Iceberg SQL")), True)
+    check(f"{task_id}: pg-meta transaction boundaries", bool(re.search(
+        r"pg-meta transaction: BEGIN[^\n]*\n[\s\S]*?pg-meta SQL:\n[\s\S]*?pg-meta transaction: COMMIT", log)), True)
+
+
+def logged_sql(log, label):
+    """Extract SQL blocks restored as single events by the submit relay."""
+    return re.findall(rf"{re.escape(label)}:\n((?:  [^\n]*(?:\n|$))+)", log)
 
 
 def airflow_task_states(token: str, dag_id: str, run_id: str) -> dict[str, str]:
@@ -477,8 +557,11 @@ def airflow_task_states(token: str, dag_id: str, run_id: str) -> dict[str, str]:
 def airflow_task_log(token: str, dag_id: str, run_id: str, task_id: str) -> str:
     """Лог первой попытки задачи."""
     url = "%s/api/v2/dags/%s/dagRuns/%s/taskInstances/%s/logs/1?full_content=true" % (AIRFLOW, dag_id, run_id, task_id)
-    _, raw = http("GET", url, None, {"Authorization": "Bearer " + token}, timeout=120)
-    return raw
+    code, raw = http("GET", url, None, {"Authorization": "Bearer " + token}, timeout=120)
+    if code != 200:
+        return raw
+    return "\n".join(item if isinstance(item, str) else str(item.get("event", ""))
+                     for item in json.loads(raw)["content"])
 
 
 def airflow_wait_run_failed(token: str, dag_id: str, run_id: str, timeout: int = 900, name: str | None = None) -> bool:

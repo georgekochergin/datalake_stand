@@ -219,7 +219,7 @@ class TestGuardOperatorWiring(unittest.TestCase):
         self.assertEqual(module.meta.log_task.call_args.kwargs["status"], "FAILED")
         self.assertEqual(module.meta.log_task.call_args.kwargs["process_id"], 42)
 
-    def test_all_entrypoints_use_verbatim_target_application_name(self):
+    def test_entrypoints_do_not_override_submit_application_name(self):
         import ast
 
         root = Path(__file__).resolve().parents[2] / "ingestion/spark/raw/rdbms"
@@ -227,8 +227,7 @@ class TestGuardOperatorWiring(unittest.TestCase):
             with self.subTest(entrypoint=relative):
                 tree = ast.parse((root / relative).read_text())
                 calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "appName"]
-                self.assertEqual(len(calls), 1)
-                self.assertEqual(ast.unparse(calls[0].args[0]), "args.target_table")
+                self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":
