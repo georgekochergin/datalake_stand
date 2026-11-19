@@ -512,15 +512,18 @@ def check_load_trace(task_id, log, incremental, *, regular=False):
             check(f"{task_id}: full load does not emit {marker}", marker in log, False)
     for marker in expected:
         check(f"{task_id}: trace includes {marker}", marker in log, True)
-    check(f"{task_id}: multiline and redacted submit command", bool(re.search(
-        r"Spark-Submit cmd:\s+spark-submit\s+--master [^\n]+\n(?:[^\n]*\n)*?\s+--jdbc-url ['\"]?<redacted>['\"]?\n"
-        r"\s+--jdbc-user ['\"]?<redacted>['\"]?\n\s+--jdbc-password ['\"]?<redacted>['\"]?\n", log)), True)
+    check(f"{task_id}: copyable submit command", bool(re.search(
+        r"Spark-Submit cmd:\s+(?:INGESTION_META_DSN=[^\n]+ )?spark-submit \\\n"
+        r"(?:[^\n]+ \\\n)*?\s+--deploy-mode client /opt/spark-jobs/[^\n]+ \\\n"
+        r"\s+--jdbc-url [^\n]+ \\\n\s+--jdbc-user [^\n]+ \\\n"
+        r'\s+--jdbc-password "\$\{JDBC_PASSWORD:\?set JDBC_PASSWORD\}" \\', log)), True)
+    check(f"{task_id}: pg-meta transaction boundaries", bool(re.search(
+        r"pg-meta transaction: BEGIN[^\n]*\n[\s\S]*?pg-meta SQL:\n[\s\S]*?pg-meta transaction: COMMIT", log)), True)
 
 
 def logged_sql(log, label):
-    """Extract SQL blocks whether Airflow kept or stripped the outer indentation."""
-    blocks = re.findall(rf"{re.escape(label)}:\n((?:[ \t]*\| [^\n]*(?:\n|$))+)", log)
-    return [re.sub(r"(?m)^[ \t]*\| ", "", block) for block in blocks]
+    """Extract SQL blocks restored as single events by the submit relay."""
+    return re.findall(rf"{re.escape(label)}:\n((?:  [^\n]*(?:\n|$))+)", log)
 
 
 def airflow_task_states(token: str, dag_id: str, run_id: str) -> dict[str, str]:

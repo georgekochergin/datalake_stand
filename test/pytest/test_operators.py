@@ -2,7 +2,10 @@
 
 import importlib.util
 import json
+import os
+import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -119,11 +122,28 @@ class TestIngestOperator(unittest.TestCase):
         original = list(argv)
         preview = self.module.raw_rdbms._format_submit_command(argv, argv.index("/load.py"))
         self.assertEqual(argv, original)
-        for value in ("token with spaces", "jdbc:private", "private-user", "--contains-spaces"):
+        for value in ("token with spaces", "jdbc:private", "--contains-spaces"):
             self.assertNotIn(value, preview)
-        self.assertIn("\n  --conf '<redacted>'\n  --verbose\n  /load.py\n", preview)
-        self.assertIn("\n  --jdbc-password '<redacted>'\n  --no-jdbc-partitioning\n", preview)
-        self.assertIn(f"\n  --incremental-config '{json.dumps(self.config)}'", preview)
+        self.assertIn("--verbose /load.py", preview)
+        self.assertIn("--jdbc-user private-user", preview)
+        with tempfile.TemporaryDirectory() as directory:
+            spark = Path(directory) / "spark-submit"
+            spark.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            spark.chmod(0o700)
+            result = subprocess.check_output(["sh", "-c", preview], text=True, env={
+                **os.environ, "PATH": f"{directory}:{os.environ['PATH']}",
+                "SPARK_ARG_4": argv[4], "JDBC_URL": argv[8], "JDBC_PASSWORD": argv[12],
+            })
+        self.assertEqual(result.splitlines(), argv[1:])
+
+    def test_submit_preview_displays_standard_jdbc_endpoint_and_user(self):
+        argv = ["spark-submit", "/load.py", "--jdbc-url", "jdbc:oracle:thin:@//oracle:1521/service",
+                "--jdbc-user", "reader", "--jdbc-password", "secret"]
+        formatter = self.module.raw_rdbms._format_submit_command
+        preview = formatter(argv, 1)
+        self.assertIn(f"--jdbc-url {argv[3]}", preview)
+        self.assertIn("--jdbc-user reader", preview)
+        self.assertNotIn("secret", preview)
 
     def full_operator(self, **kwargs):
         return self.module.IngestFullOperator(

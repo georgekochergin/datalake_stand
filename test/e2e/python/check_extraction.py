@@ -2,7 +2,11 @@
 """Inspect managed extraction metadata after the e2e ingestion scenarios."""
 
 from collections import defaultdict
+import json
 import os
+from pathlib import Path
+import shlex
+import subprocess
 from uuid import uuid4
 
 from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -20,6 +24,37 @@ def records(cursor, sql):
     cursor.execute(sql)
     names = [column[0] for column in cursor.description]
     return [dict(zip(names, row)) for row in cursor.fetchall()]
+
+
+def check_logged_submit_replay(source, namespace, batch):
+    """Run the command copied from the task log against a completed batch on this worker."""
+    from airflow.sdk import BaseHook
+    from ingestion.operators.raw_rdbms import _pgmeta_dsn, resolve_source_connection
+
+    directory = Path("/opt/airflow/logs") / f"dag_id={batch['dag_id']}" / f"run_id={batch['run_id']}"
+    path = directory / f"task_id=ingest_group.load_{namespace}__transactions.load" / "attempt=1.log"
+    events = [json.loads(line).get("event", "") for line in path.read_text().splitlines()]
+    commands = [event.split("Spark-Submit cmd:", 1)[1].strip() for event in events
+                if event.startswith("Spark-Submit cmd:")]
+    require(len(commands) == 1, "one copyable command in task log")
+    url, user, password = resolve_source_connection(BaseHook.get_connection(f"{source}_source"))
+    command = commands[0]
+    require("--jdbc-password \"${JDBC_PASSWORD:?set JDBC_PASSWORD}\"" in command,
+            "logged command reads the JDBC password from the environment")
+    values = {"--jdbc-url": url, "--jdbc-user": user}
+    lines = command.splitlines()
+    for index, line in enumerate(lines):
+        flag = line.strip().split(maxsplit=1)[0]
+        if flag in values and "***" in line:
+            require(line.endswith(" \\"), "masked JDBC argument retains its shell continuation")
+            lines[index] = f"  {flag} {shlex.quote(values[flag])} \\"
+    command = "\n".join(lines)
+    dsn = _pgmeta_dsn(BaseHook.get_connection("ingestion_meta"))
+    result = subprocess.run(["sh", "-c", command], env={**os.environ, "JDBC_PASSWORD": password,
+                            "JDBC_URL": url,
+                            "INGESTION_META_DSN": dsn}, capture_output=True, text=True, timeout=60)
+    require(result.returncode == 0 and "batch already succeeded; repeat read skipped" in result.stderr + result.stdout,
+            "command copied from the log runs in the worker and reuses the completed batch")
 
 
 def check_snapshot_publication():
@@ -278,6 +313,8 @@ def main():
                         label + " batch revisions contiguous")
         check_registry_recovery()
         check_snapshot_publication()
+        bootstrap = next(batch for batch in batches if batch["run_id"].startswith("e2e-ingest1-"))
+        check_logged_submit_replay(source, namespace, bootstrap)
         print("PASS extraction metadata checks; FAIL=0")
     finally:
         connection.close()

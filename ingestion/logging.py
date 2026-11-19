@@ -1,7 +1,12 @@
 """Phase headings and logging setup shared by ingestion entry points."""
 
+import json
 import logging
+import os
 import re
+
+SQL_RELAY_ENV = "INGESTION_SQL_LOG_RELAY"
+_SQL_FRAME = "INGESTION_SQL_LOG "
 
 
 _SQL_PART = re.compile(
@@ -45,13 +50,30 @@ def format_sql_for_log(sql):
         elif depth in queries and token[0].isalpha() and not token.startswith("E'"):
             flush(match.start(), depth + (token in ("AND", "OR")))
     flush(len(sql), 0)
-    return "\n".join("  | " + line for fragment in lines for line in fragment.splitlines())
+    return "\n".join(lines)
 
 
 def log_sql(logger, label, sql):
-    """Mark SQL lines so indentation survives the Spark submit log relay."""
+    """Send one SQL record, framed only when the Airflow relay is enabled."""
     if logger.isEnabledFor(logging.INFO):
-        logger.info("%s:\n%s", label, format_sql_for_log(sql))
+        block = f"{label}:\n" + "\n".join("  " + line for line in format_sql_for_log(sql).splitlines())
+        logger.info("%s", _SQL_FRAME + json.dumps(block) if os.environ.get(SQL_RELAY_ENV) == "1" else block)
+
+
+def restore_sql_blocks(lines):
+    """Restore framed SQL records before the provider splits them into log events."""
+    for line in lines:
+        prefix, marker, payload = line.partition(_SQL_FRAME)
+        if marker and (not prefix or re.fullmatch(r"INFO [\w.]+: ", prefix)):
+            try:
+                block = json.loads(payload)
+            except ValueError:
+                pass
+            else:
+                if isinstance(block, str):
+                    yield block
+                    continue
+        yield line
 
 
 def log_step(logger, title):

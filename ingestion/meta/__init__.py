@@ -22,10 +22,13 @@ def connection(db_connect):
     conn = db_connect()
     try:
         conn.autocommit = False
+        LOG.info("pg-meta transaction: BEGIN (implicit on first statement)")
         yield conn
         conn.commit()
+        LOG.info("pg-meta transaction: COMMIT")
     except BaseException:
         conn.rollback()
+        LOG.info("pg-meta transaction: ROLLBACK")
         raise
     finally:
         conn.close()

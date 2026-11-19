@@ -12,7 +12,7 @@ from airflow.sdk import BaseHook
 from psycopg2.extensions import make_dsn
 
 from .process import _pull_process_id, log_task_event
-from ingestion.logging import log_step
+from ingestion.logging import SQL_RELAY_ENV, log_step, restore_sql_blocks
 from ingestion.spark import guard as spark_guard
 from ingestion.sources.rdbms import registry as rdbms_registry
 from ingestion.sources.rdbms.contracts import ConnectionSpec
@@ -73,25 +73,46 @@ _VISIBLE_VALUES = frozenset({
 })
 _SWITCHES = frozenset({"--verbose", "--no-jdbc-partitioning"})
 _FLAG = re.compile(r"--[a-zA-Z0-9][a-zA-Z0-9-]*")
+_PUBLIC_JDBC_URL = re.compile(
+    r"jdbc:(?:sqlserver://[\w.\-]+:\d+;databaseName=[\w.\-]+;encrypt=false"
+    r"|oracle:thin:@//[\w.\-]+:\d+/[\w.\-]+)"
+)
 
 
-def _format_submit_command(argv, application_index):
-    """Render provider argv without splitting values or displaying unknown values."""
-    lines = [shlex.quote(argv[0])]
+def _format_submit_command(argv, application_index, *, needs_meta=False):
+    """Render a POSIX command with required environment variables for hidden values."""
+    def env(name):
+        """Fail before running Spark if the operator did not supply a hidden value."""
+        return f'"${{{name}:?set {name}}}"'
+
+    binary = shlex.quote(argv[0])
+    lines = [f"INGESTION_META_DSN={env('INGESTION_META_DSN')} {binary}" if needs_meta else binary]
     i = 1
     while i < len(argv):
         flag = argv[i]
-        if i == application_index or flag in _SWITCHES:
+        if i == application_index:
+            lines[-1] += " " + shlex.quote(flag)
+            i += 1
+        elif flag in _SWITCHES:
             lines.append(shlex.quote(flag))
             i += 1
         elif _FLAG.fullmatch(flag) and i + 1 < len(argv) and i + 1 != application_index:
-            value = argv[i + 1] if flag in _VISIBLE_VALUES else "<redacted>"
-            lines.append(f"{flag} {shlex.quote(value)}")
+            value = argv[i + 1]
+            public_jdbc = flag == "--jdbc-user" or (
+                flag == "--jdbc-url" and _PUBLIC_JDBC_URL.fullmatch(value)
+            )
+            if flag in _VISIBLE_VALUES or public_jdbc:
+                display = shlex.quote(value)
+            elif flag in ("--jdbc-url", "--jdbc-password"):
+                display = env(flag[2:].replace("-", "_").upper())
+            else:
+                display = env(f"SPARK_ARG_{i + 1}")
+            lines.append(f"{flag} {display}")
             i += 2
         else:
-            lines.append("<redacted>")
+            lines.append(env(f"SPARK_ARG_{i}"))
             i += 1
-    return "\n  " + "\n  ".join(lines)
+    return "\n" + " \\\n  ".join(lines)
 
 
 class _RdbmsSubmitOperator(SparkSubmitOperator):
@@ -101,6 +122,9 @@ class _RdbmsSubmitOperator(SparkSubmitOperator):
         """Format actual argv at the provider's 6.3.2 masking/logging boundary."""
         hook = super()._get_hook()
         provider_mask = hook._mask_cmd
+        provider_relay = hook._process_spark_submit_log
+        hook._env_vars = dict(hook._env_vars or {}, **{SQL_RELAY_ENV: "1"})
+        hook._process_spark_submit_log = lambda lines: provider_relay(restore_sql_blocks(lines))
         args = self.application_args or []
         credentials = [args[i + 1] for i, arg in enumerate(args[:-1])
                        if arg in ("--jdbc-url", "--jdbc-user", "--jdbc-password")]
@@ -112,7 +136,7 @@ class _RdbmsSubmitOperator(SparkSubmitOperator):
             if isinstance(argv, list) and len(argv) > len(args) + 1:
                 index = len(argv) - len(args) - 1
                 if argv[index] == self.application:
-                    return _format_submit_command(argv, index)
+                    return _format_submit_command(argv, index, needs_meta=dsn is not None)
             lines = argv if isinstance(argv, list) else [argv]
             sanitized = []
             for line in lines:
