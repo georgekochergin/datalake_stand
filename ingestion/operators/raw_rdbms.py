@@ -48,7 +48,7 @@ def log_spark_task_event(context):
 
 def run_spark_guard(operator):
     """Resolve Airflow configuration and record each execution's guard outcome."""
-    log_step(LOG, "launch spark guard", number=1)
+    log_step(LOG, "launch spark guard")
     operator._guard_application_ids = []
     operator._guard_result = SparkGuardStatus.CHECKING
     try:
@@ -126,7 +126,7 @@ class _RdbmsSubmitOperator(SparkSubmitOperator):
 
     def execute(self, context):
         """Mark submit after guard admission and argument resolution."""
-        log_step(LOG, "launch spark-submit cmd", number=2)
+        log_step(LOG, "launch spark-submit cmd")
         return super().execute(context)
 
 

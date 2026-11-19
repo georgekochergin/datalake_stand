@@ -6,7 +6,7 @@ types or load modes.
 
 import logging
 
-from ingestion.logging import log_step
+from ingestion.logging import log_sql, log_step
 
 from ingestion.spark.raw.iceberg import (
     CATALOG,
@@ -34,11 +34,11 @@ def append_raw(spark, target_table, frame, rows, process_id):
         raise ValueError("Source column collides with ingestion metadata")
     namespace, _ = validate_target_table(target_table)
     namespace_sql = f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{namespace}"
-    LOGGER.info("Iceberg SQL: %s", namespace_sql)
+    log_sql(LOGGER, "Iceberg SQL", namespace_sql)
     spark.sql(namespace_sql)
     if not spark.catalog.tableExists(target_table):
         table_sql = build_create_table_sql(target_table, schema_columns(frame.schema))
-        LOGGER.info("Iceberg SQL: %s", table_sql)
+        log_sql(LOGGER, "Iceberg SQL", table_sql)
         spark.sql(table_sql)
     if rows:
         portion = frame.withColumn(METADATA_DTTM, F.current_timestamp()).withColumn(

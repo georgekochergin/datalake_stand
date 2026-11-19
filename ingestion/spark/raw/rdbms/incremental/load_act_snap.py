@@ -13,7 +13,7 @@ import argparse
 import logging
 from datetime import datetime, timezone
 
-from ingestion.logging import configure_driver_logging, log_step
+from ingestion.logging import configure_driver_logging, log_sql, log_step
 
 from ingestion.spark.raw.iceberg import (
     CATALOG,
@@ -87,9 +87,9 @@ def _overwrite_snapshot(spark, args, frame, load_dttm) -> None:
     log_step(LOGGER, "publish Iceberg snapshot")
     namespace_sql = f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{namespace}"
     replace_sql = build_rtas_sql(args.target_table, args.process_id, portion.columns)
-    LOGGER.info("Iceberg SQL: %s", namespace_sql)
+    log_sql(LOGGER, "Iceberg SQL", namespace_sql)
     spark.sql(namespace_sql)
-    LOGGER.info("Iceberg SQL: %s", replace_sql)
+    log_sql(LOGGER, "Iceberg SQL", replace_sql)
     spark.sql(replace_sql)
 
 

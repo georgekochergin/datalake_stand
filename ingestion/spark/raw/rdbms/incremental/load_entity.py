@@ -14,7 +14,7 @@ import json
 import logging
 import os
 
-from ingestion.logging import configure_driver_logging, log_step
+from ingestion.logging import configure_driver_logging, log_sql, log_step
 
 from ingestion.spark.raw import append
 from ingestion.spark.raw.iceberg import validate_target_table
@@ -127,7 +127,7 @@ def source_position(spark, args):
     log_step(LOGGER, "probe source incremental position")
     expression = dialect.position_expression(f"MAX({column})", kind)
     sql = f"SELECT {expression}, COUNT(*), COUNT({column}) FROM {table}"
-    LOGGER.info("JDBC SQL scope=source_table operation=source_position: %s", sql)
+    log_sql(LOGGER, "JDBC SQL scope=source_table operation=source_position", sql)
     with jdbc.connection(spark._jvm, args.jdbc_url, args.jdbc_user, args.jdbc_password) as connection:
         row = jdbc.first_row(connection, sql)
     upper = positions.canonical(row[0], kind)

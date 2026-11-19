@@ -11,7 +11,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import logging
 
-from ingestion.logging import log_step
+from ingestion.logging import log_sql, log_step
 
 LOG = logging.getLogger(__name__)
 
@@ -39,8 +39,33 @@ def _row(cursor):
 
 def _execute(cursor, sql, params):
     """Log only application-owned SQL and its operational parameters."""
-    LOG.info("pg-meta SQL: %s\n  params=%r", sql, params)
+    if LOG.isEnabledFor(logging.INFO):
+        _log_statement(cursor, sql, params)
     cursor.execute(sql, params)
+
+
+def _log_statement(cursor, sql, params):
+    """Adapt bind values for display only, independently of execution."""
+    try:
+        mogrify = getattr(cursor, "mogrify", None)
+        if mogrify is not None:
+            rendered = mogrify(sql, params)
+            if isinstance(rendered, bytes):
+                rendered = rendered.decode(cursor.connection.encoding or "utf-8")
+        else:
+            from psycopg import ClientCursor, Connection
+
+            if not isinstance(cursor.connection, Connection):
+                raise TypeError("Cursor has no SQL rendering support")
+            with ClientCursor(cursor.connection) as renderer:
+                rendered = renderer.mogrify(sql, params)
+        if not isinstance(rendered, str):
+            raise TypeError("Cursor returned no rendered SQL text")
+    except Exception:
+        log_sql(LOG, "pg-meta SQL (template)", sql)
+        LOG.info("pg-meta SQL params=%r", params)
+    else:
+        log_sql(LOG, "pg-meta SQL", rendered)
 
 
 @contextmanager

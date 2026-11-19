@@ -13,7 +13,7 @@ namespace of each application carries the JDBC credentials.
 import logging
 from decimal import Decimal
 
-from ingestion.logging import log_step
+from ingestion.logging import log_sql, log_step
 
 from ingestion.sources.rdbms import jdbc
 from ingestion.sources.rdbms import jdbc_partitioning
@@ -80,8 +80,7 @@ def read_bounds(spark, args, read_query, column, *, scope="read_query") -> tuple
         f"FROM {read_query}) bounds"
     )
     log_step(LOGGER, "probe JDBC partition bounds")
-    LOGGER.info("JDBC SQL scope=%s operation=partition_bounds: %s",
-                scope, query)
+    log_sql(LOGGER, f"JDBC SQL scope={scope} operation=partition_bounds", query)
     frame = jdbc_reader(spark, args, query).load()
     row = frame.collect()[0]
     LOGGER.info("JDBC result operation=partition_bounds lower_bound=%s upper_bound=%s", row[0], row[1])
@@ -166,7 +165,7 @@ def read_extract_frame(spark, args, filters=(), extra_select=""):
     reader = jdbc_reader(spark, args, query)
     reader, low, high = apply_partition_options(spark, args, reader, query, partition, scope=scope)
     log_step(LOGGER, "read JDBC source")
-    LOGGER.info("JDBC dbtable scope=%s: %s", scope, query)
+    log_sql(LOGGER, f"JDBC dbtable scope={scope}", query)
     if partition is None:
         LOGGER.info("JDBC partition bounds skipped reason=%s",
                     "disabled" if args.no_jdbc_partitioning else "no_partition_column")

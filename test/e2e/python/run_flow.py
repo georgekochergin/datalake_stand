@@ -475,12 +475,17 @@ def check_load_trace(task_id, log, incremental, *, regular=False):
     expected = [
         "== pg-meta: log_task ==", "INSERT INTO ingestion.airflow_tasks_log",
         "pg-meta committed operation=log_task table=ingestion.airflow_tasks_log",
-        "== step №1: launch spark guard ==", "result=admitted", "== step №2: launch spark-submit cmd ==",
+        "== launch spark guard ==", "result=admitted", "== launch spark-submit cmd ==",
         "JDBC DatabaseMetaData.getColumns", "JDBC DatabaseMetaData.getPrimaryKeys", "JDBC DatabaseMetaData.getIndexInfo",
         "JDBC column ordinal=1", "JDBC metadata primary_key=", "Iceberg append committed",
     ]
     scope = "batch_window" if incremental else "source_table"
     expected += [f"JDBC dbtable scope={scope}:"]
+    lifecycle_sql = logged_sql(log, "pg-meta SQL")
+    check(f"{task_id}: rendered multiline pg-meta SQL", bool(
+        lifecycle_sql and "INSERT INTO ingestion.airflow_tasks_log" in lifecycle_sql[0]
+        and len(lifecycle_sql[0].splitlines()) > 1 and "%s" not in lifecycle_sql[0]
+        and "'START'" in lifecycle_sql[0]), True)
     if incremental:
         expected += [f"JDBC SQL scope={scope} operation=partition_bounds:", "jdbc partitioning: selected column=",
                      "JDBC result operation=partition_bounds lower_bound=",
@@ -489,12 +494,17 @@ def check_load_trace(task_id, log, incremental, *, regular=False):
                      "pg-meta committed operation=finalize_batch table=ingestion.incremental_state",
                      "pg-meta committed operation=finalize_batch table=ingestion.incremental_batches",
                      f"'reason': '{'regular' if regular else 'bootstrap'}'", "'status': 'SUCCEEDED'"]
-        source_sql = re.search(r"operation=source_position: ([^\r\n]+)", log)
+        source_sql = next(iter(logged_sql(log, "operation=source_position")), "")
         check(f"{task_id}: MAX/COUNT scans whole source", bool(source_sql and
-              "COUNT(*)" in source_sql[1] and " WHERE " not in source_sql[1]), True)
-        bounds_sql = re.search(r"operation=partition_bounds: ([^\r\n]+)", log)
+              "COUNT(*)" in source_sql and not re.search(r"\bWHERE\b", source_sql)
+              and len(source_sql.splitlines()) > 1), True)
+        bounds_sql = next(iter(logged_sql(log, "operation=partition_bounds")), "")
         check(f"{task_id}: partition probe uses the frozen window", bool(bounds_sql and
-              " WHERE " in bounds_sql[1] and " <= " in bounds_sql[1] and (not regular or " > " in bounds_sql[1])), True)
+              re.search(r"(?m)^\s+WHERE\b", bounds_sql) and " <= " in bounds_sql
+              and (not regular or " > " in bounds_sql)), True)
+        check(f"{task_id}: rendered Spark pg-meta SQL", any(
+            "SELECT 1" in sql and "FROM ingestion.incremental_batches" in sql and "%s" not in sql
+            for sql in lifecycle_sql), True)
     else:
         expected += ["--no-jdbc-partitioning", "JDBC partition bounds skipped reason=disabled"]
         for marker in ("operation=source_position", "operation=partition_bounds",
@@ -505,6 +515,12 @@ def check_load_trace(task_id, log, incremental, *, regular=False):
     check(f"{task_id}: multiline and redacted submit command", bool(re.search(
         r"Spark-Submit cmd:\s+spark-submit\s+--master [^\n]+\n(?:[^\n]*\n)*?\s+--jdbc-url ['\"]?<redacted>['\"]?\n"
         r"\s+--jdbc-user ['\"]?<redacted>['\"]?\n\s+--jdbc-password ['\"]?<redacted>['\"]?\n", log)), True)
+
+
+def logged_sql(log, label):
+    """Extract SQL blocks whether Airflow kept or stripped the outer indentation."""
+    blocks = re.findall(rf"{re.escape(label)}:\n((?:[ \t]*\| [^\n]*(?:\n|$))+)", log)
+    return [re.sub(r"(?m)^[ \t]*\| ", "", block) for block in blocks]
 
 
 def airflow_task_states(token: str, dag_id: str, run_id: str) -> dict[str, str]:
