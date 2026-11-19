@@ -69,7 +69,8 @@ def _lock_batch(cur, process_id, source_id, entity_fqn):
 
 def get_batch(*, process_id, source_id, entity_fqn, db_connect):
     """Return the process's revision-validated batch, or None before planning."""
-    with _operation(db_connect, "get_batch", key=(process_id, source_id, entity_fqn)) as (cur, _):
+    with _operation(db_connect, "get_batch", process_id=process_id, source_id=source_id,
+                    entity_fqn=entity_fqn) as (cur, _):
         _execute(cur,
             "SELECT 1 FROM ingestion.incremental_batches "
             "WHERE process_id = %s AND source_id = %s AND entity_fqn = %s",
@@ -140,7 +141,8 @@ def plan_batch(*, process_id, dag_id, run_id, source_id,
         calculate_lower=calculate_lower,
         compare_positions=compare_positions,
     )
-    with _operation(db_connect, "plan_batch", key=(process_id, source_id, entity_fqn)) as (cur, changes):
+    with _operation(db_connect, "plan_batch", process_id=process_id, source_id=source_id,
+                    entity_fqn=entity_fqn) as (cur, changes):
         _execute(cur,
             "INSERT INTO ingestion.incremental_state "
             "(source_id, entity_fqn, incremental_column, incremental_type) "
@@ -184,7 +186,8 @@ def plan_batch(*, process_id, dag_id, run_id, source_id,
 
 def start_batch(*, process_id, source_id, entity_fqn, db_connect):
     """Start an attempt after the caller has ensured no live executor remains."""
-    with _operation(db_connect, "start_batch", key=(process_id, source_id, entity_fqn)) as (cur, changes):
+    with _operation(db_connect, "start_batch", process_id=process_id, source_id=source_id,
+                    entity_fqn=entity_fqn) as (cur, changes):
         _, batch = _lock_batch(cur, process_id, source_id, entity_fqn)
         if batch["status"] == "SUCCEEDED":
             changes.append(("incremental_batches", batch, None))
@@ -213,7 +216,8 @@ def finalize_batch(*, process_id, source_id, entity_fqn, row_count, observed_max
     """
     if type(row_count) is not int or row_count < 0:
         raise ValueError("row_count must be a nonnegative integer")
-    with _operation(db_connect, "finalize_batch", key=(process_id, source_id, entity_fqn)) as (cur, changes):
+    with _operation(db_connect, "finalize_batch", process_id=process_id, source_id=source_id,
+                    entity_fqn=entity_fqn) as (cur, changes):
         state, batch = _lock_batch(cur, process_id, source_id, entity_fqn)
         if batch["status"] == "SUCCEEDED":
             changes.append(("incremental_batches", batch, None))
@@ -255,7 +259,8 @@ def finalize_batch(*, process_id, source_id, entity_fqn, row_count, observed_max
 
 def fail_batch(*, process_id, source_id, entity_fqn, db_connect):
     """Record a failed attempt without changing extraction state."""
-    with _operation(db_connect, "fail_batch", key=(process_id, source_id, entity_fqn)) as (cur, changes):
+    with _operation(db_connect, "fail_batch", process_id=process_id, source_id=source_id,
+                    entity_fqn=entity_fqn) as (cur, changes):
         _, batch = _lock_batch(cur, process_id, source_id, entity_fqn)
         if batch["status"] == "SUCCEEDED":
             changes.append(("incremental_batches", batch, None))

@@ -11,8 +11,9 @@ _SQL_FRAME = "INGESTION_SQL_LOG "
 
 _SQL_PART = re.compile(
     r"--[^\n]*|/\*[\s\S]*?\*/|\$(?P<tag>[a-zA-Z_]\w*|)\$[\s\S]*?\$(?P=tag)\$"
-    r"|(?:[eE]'(?:\\.|''|[^'\\])*'|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|\[(?:\]\]|[^\]])*\])"
-    r"|\b(?:SELECT|FROM|WHERE|AND|OR|SET|VALUES|ON\s+CONFLICT|RETURNING|FOR\s+UPDATE|AS\s+SELECT)\b|[(),]",
+    r"|(?:[eE]'(?:\\.|''|[^'\\])*'|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|\[(?:\]\]|[^\]])*\]|`(?:``|[^`])*`)"
+    r"|\b(?:SELECT|FROM|WHERE|AND|OR|SET|VALUES|ON\s+CONFLICT|RETURNING|FOR\s+UPDATE|AS\s+SELECT"
+    r"|USING|PARTITIONED\s+BY|LOCATION|TBLPROPERTIES)\b|[(),]",
     re.IGNORECASE,
 )
 
@@ -20,6 +21,10 @@ _SQL_PART = re.compile(
 def format_sql_for_log(sql):
     """Lay out generated SQL without splitting quoted values or function arguments."""
     depth = 0
+    create_table = re.match(r"\s*CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\b", sql, re.IGNORECASE)
+    ddl_clauses = {"USING", "PARTITIONED BY", "LOCATION", "TBLPROPERTIES"}
+    columns = False
+    before_clause = True
     queries = {0}
     offset = 0
     indent = 0
@@ -36,8 +41,15 @@ def format_sql_for_log(sql):
     for match in _SQL_PART.finditer(sql):
         token = match[0].upper()
         if token == "(":
+            if create_table and before_clause and depth == 0:
+                columns = True
+                before_clause = False
+                flush(match.end(), 1)
             depth += 1
         elif token == ")":
+            if columns and depth == 1:
+                flush(match.start(), 0)
+                columns = False
             if depth in queries and depth:
                 flush(match.start(), depth - 1)
                 queries.remove(depth)
@@ -45,8 +57,12 @@ def format_sql_for_log(sql):
         elif token == "SELECT":
             queries.add(depth)
             flush(match.start(), depth)
-        elif depth in queries and token == ",":
-            flush(match.end(), depth + 1)
+        elif token == "," and (depth in queries or (columns and depth == 1)):
+            flush(match.end(), 1 if columns else depth + 1)
+        elif " ".join(token.split()) in ddl_clauses:
+            if create_table and depth == 0:
+                before_clause = False
+                flush(match.start(), 0)
         elif depth in queries and token[0].isalpha() and not token.startswith("E'"):
             flush(match.start(), depth + (token in ("AND", "OR")))
     flush(len(sql), 0)

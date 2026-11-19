@@ -157,8 +157,6 @@ def read_extract_frame(spark, args, filters=(), extra_select=""):
     partition = partition_select = None
     if not args.no_jdbc_partitioning:
         partition, partition_select = jdbc_partitioning.plan(dialect, keys, args.source_table)
-    else:
-        LOGGER.info("jdbc partitioning: skipped reason=disabled")
     if partition_select:
         extra_select = f"{extra_select}{partition_select}"
     query = build_extract_query(source_table, projection, filters, extra_select)
@@ -173,10 +171,10 @@ def read_extract_frame(spark, args, filters=(), extra_select=""):
     if partition is not None and partition.derived:
         frame = frame.drop(jdbc_partitioning.partition_name(partition))
     frame = frame.cache()
-    LOGGER.info(
-        "jdbc partitioning: column=%s step=%s window=[%s..%s] partitions=%s of %s requested",
-        jdbc_partitioning.partition_name(partition) if partition else None,
-        partition.step if partition else None, low, high,
-        frame.rdd.getNumPartitions() if partition else 1, args.num_partitions,
-    )
+    if partition is not None:
+        LOGGER.info(
+            "jdbc partitioning: column=%s step=%s window=[%s..%s] partitions=%s of %s requested",
+            jdbc_partitioning.partition_name(partition), partition.step, low, high,
+            frame.rdd.getNumPartitions(), args.num_partitions,
+        )
     return frame

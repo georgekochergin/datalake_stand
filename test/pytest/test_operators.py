@@ -1,5 +1,6 @@
 """Behavioral ingestion operator tests using scoped Airflow module doubles."""
 
+import ast
 import importlib.util
 import json
 import os
@@ -10,6 +11,11 @@ import types
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
+
+from ingestion.sources.rdbms.contracts import ConnectionSpec
+from ingestion.sources.rdbms.registry import all_dialects
 
 
 class FakeSkip(Exception):
@@ -96,6 +102,28 @@ class TestMetaDouble(unittest.TestCase):
         ):
             with self.subTest(name=name), self.assertRaises(AttributeError):
                 getattr(module.meta, name)
+
+
+@pytest.mark.parametrize("dialect", all_dialects(), ids=lambda dialect: type(dialect).__name__)
+def test_standard_jdbc_urls_are_visible_for_all_registered_dialects(dialect):
+    raw = load_operators().raw_rdbms
+    url = dialect.build_jdbc_url(ConnectionSpec("source-db", None, "source_db", "reader", "secret"))
+    assert raw._PUBLIC_JDBC_URL.fullmatch(url), f"Review the safe display rule for {type(dialect).__name__}"
+
+
+@pytest.mark.parametrize("driver", ("full/load_entity.py", "incremental/load_entity.py", "incremental/load_act_snap.py"))
+def test_driver_arguments_have_an_explicit_log_display_policy(driver):
+    raw = load_operators().raw_rdbms
+    path = Path(__file__).resolve().parents[2] / "ingestion/spark/raw/rdbms" / driver
+    parser = next(node for node in ast.parse(path.read_text()).body
+                  if isinstance(node, ast.FunctionDef) and node.name == "parse_args")
+    options = {arg.value for node in ast.walk(parser) if isinstance(node, ast.Call)
+               and isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument"
+               for arg in node.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+               and arg.value.startswith("--")}
+    assert options
+    missing = options - (raw._VISIBLE_VALUES | raw._SWITCHES | {"--jdbc-url", "--jdbc-user", "--jdbc-password"})
+    assert not missing, f"Review the log display policy for {driver}: {sorted(missing)}"
 
 
 class TestIngestOperator(unittest.TestCase):

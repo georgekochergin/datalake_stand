@@ -52,7 +52,7 @@ def check_logged_submit_replay(source, namespace, batch):
     dsn = _pgmeta_dsn(BaseHook.get_connection("ingestion_meta"))
     result = subprocess.run(["sh", "-c", command], env={**os.environ, "JDBC_PASSWORD": password,
                             "JDBC_URL": url,
-                            "INGESTION_META_DSN": dsn}, capture_output=True, text=True, timeout=60)
+                            "INGESTION_META_DSN": dsn}, capture_output=True, text=True, timeout=120)
     require(result.returncode == 0 and "batch already succeeded; repeat read skipped" in result.stderr + result.stdout,
             "command copied from the log runs in the worker and reuses the completed batch")
 

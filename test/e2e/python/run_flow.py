@@ -510,13 +510,20 @@ def check_load_trace(task_id, log, incremental, *, regular=False):
         for marker in ("operation=source_position", "operation=partition_bounds",
                        "ingestion.incremental_state", "ingestion.incremental_batches"):
             check(f"{task_id}: full load does not emit {marker}", marker in log, False)
+        check(f"{task_id}: disabled partitioning does not report requested partitions",
+              "jdbc partitioning: column=" in log, False)
     for marker in expected:
         check(f"{task_id}: trace includes {marker}", marker in log, True)
     check(f"{task_id}: copyable submit command", bool(re.search(
-        r"Spark-Submit cmd:\s+(?:INGESTION_META_DSN=[^\n]+ )?spark-submit \\\n"
+        r"Spark-Submit cmd:\s+spark-submit \\\n"
         r"(?:[^\n]+ \\\n)*?\s+--deploy-mode client /opt/spark-jobs/[^\n]+ \\\n"
         r"\s+--jdbc-url [^\n]+ \\\n\s+--jdbc-user [^\n]+ \\\n"
         r"\s+--jdbc-password \*\*\* \\", log)), True)
+    if not regular:
+        check(f"{task_id}: multiline Iceberg CREATE TABLE", any(
+            re.search(r"CREATE TABLE [^\n]+ \(\n +`[^\n]+\n", sql)
+            and re.search(r"(?m)^  USING iceberg\n  PARTITIONED BY\b", sql)
+            for sql in logged_sql(log, "Iceberg SQL")), True)
     check(f"{task_id}: pg-meta transaction boundaries", bool(re.search(
         r"pg-meta transaction: BEGIN[^\n]*\n[\s\S]*?pg-meta SQL:\n[\s\S]*?pg-meta transaction: COMMIT", log)), True)
 

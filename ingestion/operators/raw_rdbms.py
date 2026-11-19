@@ -79,14 +79,14 @@ _PUBLIC_JDBC_URL = re.compile(
 )
 
 
-def _format_submit_command(argv, application_index, *, needs_meta=False):
+def _format_submit_command(argv, application_index):
     """Render a POSIX command with required environment variables for hidden values."""
     def env(name):
         """Fail before running Spark if the operator did not supply a hidden value."""
         return f'"${{{name}:?set {name}}}"'
 
     binary = shlex.quote(argv[0])
-    lines = [f"INGESTION_META_DSN={env('INGESTION_META_DSN')} {binary}" if needs_meta else binary]
+    lines = [binary]
     i = 1
     while i < len(argv):
         flag = argv[i]
@@ -138,7 +138,7 @@ class _RdbmsSubmitOperator(SparkSubmitOperator):
             if isinstance(argv, list) and len(argv) > len(args) + 1:
                 index = len(argv) - len(args) - 1
                 if argv[index] == self.application:
-                    return _format_submit_command(argv, index, needs_meta=dsn is not None)
+                    return _format_submit_command(argv, index)
             lines = argv if isinstance(argv, list) else [argv]
             sanitized = []
             for line in lines:
