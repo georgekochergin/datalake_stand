@@ -516,7 +516,7 @@ def check_load_trace(task_id, log, incremental, *, regular=False):
         r"Spark-Submit cmd:\s+(?:INGESTION_META_DSN=[^\n]+ )?spark-submit \\\n"
         r"(?:[^\n]+ \\\n)*?\s+--deploy-mode client /opt/spark-jobs/[^\n]+ \\\n"
         r"\s+--jdbc-url [^\n]+ \\\n\s+--jdbc-user [^\n]+ \\\n"
-        r'\s+--jdbc-password "\$\{JDBC_PASSWORD:\?set JDBC_PASSWORD\}" \\', log)), True)
+        r"\s+--jdbc-password \*\*\* \\", log)), True)
     check(f"{task_id}: pg-meta transaction boundaries", bool(re.search(
         r"pg-meta transaction: BEGIN[^\n]*\n[\s\S]*?pg-meta SQL:\n[\s\S]*?pg-meta transaction: COMMIT", log)), True)
 

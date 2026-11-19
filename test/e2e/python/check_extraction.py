@@ -39,15 +39,15 @@ def check_logged_submit_replay(source, namespace, batch):
     require(len(commands) == 1, "one copyable command in task log")
     url, user, password = resolve_source_connection(BaseHook.get_connection(f"{source}_source"))
     command = commands[0]
-    require("--jdbc-password \"${JDBC_PASSWORD:?set JDBC_PASSWORD}\"" in command,
-            "logged command reads the JDBC password from the environment")
-    values = {"--jdbc-url": url, "--jdbc-user": user}
+    require("  --jdbc-password *** \\" in command.splitlines(), "logged command masks the JDBC password with ***")
+    values = {"--jdbc-url": url, "--jdbc-user": user, "--jdbc-password": password}
     lines = command.splitlines()
     for index, line in enumerate(lines):
         flag = line.strip().split(maxsplit=1)[0]
         if flag in values and "***" in line:
             require(line.endswith(" \\"), "masked JDBC argument retains its shell continuation")
-            lines[index] = f"  {flag} {shlex.quote(values[flag])} \\"
+            value = '"$JDBC_PASSWORD"' if flag == "--jdbc-password" else shlex.quote(values[flag])
+            lines[index] = f"  {flag} {value} \\"
     command = "\n".join(lines)
     dsn = _pgmeta_dsn(BaseHook.get_connection("ingestion_meta"))
     result = subprocess.run(["sh", "-c", command], env={**os.environ, "JDBC_PASSWORD": password,

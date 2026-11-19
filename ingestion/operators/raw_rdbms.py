@@ -103,8 +103,10 @@ def _format_submit_command(argv, application_index, *, needs_meta=False):
             )
             if flag in _VISIBLE_VALUES or public_jdbc:
                 display = shlex.quote(value)
-            elif flag in ("--jdbc-url", "--jdbc-password"):
-                display = env(flag[2:].replace("-", "_").upper())
+            elif flag == "--jdbc-password":
+                display = "***"
+            elif flag == "--jdbc-url":
+                display = env("JDBC_URL")
             else:
                 display = env(f"SPARK_ARG_{i + 1}")
             lines.append(f"{flag} {display}")

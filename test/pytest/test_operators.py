@@ -126,11 +126,13 @@ class TestIngestOperator(unittest.TestCase):
             self.assertNotIn(value, preview)
         self.assertIn("--verbose /load.py", preview)
         self.assertIn("--jdbc-user private-user", preview)
+        self.assertIn("  --jdbc-password *** \\", preview.splitlines())
+        replay = preview.replace("--jdbc-password ***", '--jdbc-password "$JDBC_PASSWORD"')
         with tempfile.TemporaryDirectory() as directory:
             spark = Path(directory) / "spark-submit"
             spark.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
             spark.chmod(0o700)
-            result = subprocess.check_output(["sh", "-c", preview], text=True, env={
+            result = subprocess.check_output(["sh", "-c", replay], text=True, env={
                 **os.environ, "PATH": f"{directory}:{os.environ['PATH']}",
                 "SPARK_ARG_4": argv[4], "JDBC_URL": argv[8], "JDBC_PASSWORD": argv[12],
             })
