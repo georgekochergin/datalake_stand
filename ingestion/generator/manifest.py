@@ -111,7 +111,7 @@ def _read_yaml(path: str | PathLike[str]) -> object:
         return yaml.safe_load(stream)
 
 
-def _strict_object(value: object, allowed: set[str], label: str) -> dict:
+def _strict_object(value: object, allowed: set[str], label: str) -> dict[str, object]:
     """Validate a nested configuration object and reject unknown keys.
 
     Enforces that value is a dict with only keys from the allowlist.
@@ -219,7 +219,7 @@ def _parse_dag_fields(raw: dict[str, object], label: str) -> dict[str, str | tup
     return {"schedule": schedule, "tags": tuple(tags)}
 
 
-def _parse_load_options(raw: dict, label: str) -> tuple[SparkConfig, AirflowConfig]:
+def _parse_load_options(raw: dict[str, object], label: str) -> tuple[SparkConfig, AirflowConfig]:
     """Parse the same nested YAML paths for entity and snapshot load settings."""
     spark = _strict_object(raw.get("spark", {}), {"jdbc_partitioning"}, f"{label}.spark")
     partitioning = spark.get("jdbc_partitioning", True)
@@ -243,7 +243,7 @@ def _parse_act_snap(raw: object) -> ActSnapConfig:
     return ActSnapConfig(**_parse_dag_fields(raw, label), spark=spark, airflow=airflow)
 
 
-def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]) -> EntityConfig:
+def _parse_entity(entity: dict[str, object], position: int, temporal_default: tuple[int, str]) -> EntityConfig:
     """Parse and validate a single entity from a pipeline manifest.
 
     Args:
