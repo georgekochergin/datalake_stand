@@ -2,6 +2,10 @@
 
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ingestion.sources.rdbms.dialects.base import RdbmsDialect
 
 SOURCE_PART_PATTERN = re.compile(r'"((?:[A-Za-z0-9_.]|"")+)"|([A-Za-z0-9_]+)')
 
@@ -47,7 +51,7 @@ def parse_source_table(source_table: str) -> list[tuple[str, bool]]:
     return parts
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> "type[RdbmsDialect]":
     """Lazily re-export the dialect base contract without a circular import."""
     if name == "RdbmsDialect":
         from ingestion.sources.rdbms.dialects.base import RdbmsDialect

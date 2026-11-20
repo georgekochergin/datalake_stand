@@ -4,8 +4,10 @@ import json
 import logging
 import re
 import shlex
+from collections.abc import Sequence
 from enum import Enum
 from functools import partial
+from typing import TYPE_CHECKING, Any
 
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 from airflow.sdk import BaseHook
@@ -17,6 +19,12 @@ from ingestion.spark import guard as spark_guard
 from ingestion.sources.rdbms import registry as rdbms_registry
 from ingestion.sources.rdbms.contracts import ConnectionSpec
 from ingestion.sources.rdbms.incremental_config import validate as validate_incremental_config
+
+if TYPE_CHECKING:
+    from airflow.providers.apache.spark.hooks.spark_submit import SparkSubmitHook
+    from airflow.sdk import Connection, Context
+
+    from ingestion.sources.rdbms.incremental_config import IncrementalConfig
 
 SUBMIT_CONN_ID = "spark_main_submit"
 MASTER_HTTP_CONN_ID = "spark_main_master_http"
@@ -32,7 +40,7 @@ class SparkGuardStatus(Enum):
     UNAVAILABLE = "unavailable"
 
 
-def log_spark_task_event(context):
+def log_spark_task_event(context: "Context") -> None:
     """Log guard diagnostics without master requests or exception text."""
     task = context.get("task") or getattr(context.get("ti"), "task", None)
     error = context.get("exception")
@@ -46,7 +54,7 @@ def log_spark_task_event(context):
     )
 
 
-def run_spark_guard(operator):
+def run_spark_guard(operator: "_RdbmsSubmitOperator") -> None:
     """Resolve Airflow configuration and record each execution's guard outcome."""
     log_step(LOG, "launch spark guard")
     operator._guard_application_ids = []
@@ -79,9 +87,9 @@ _PUBLIC_JDBC_URL = re.compile(
 )
 
 
-def _format_submit_command(argv, application_index):
+def _format_submit_command(argv: Sequence[str], application_index: int) -> str:
     """Render a POSIX command with required environment variables for hidden values."""
-    def env(name):
+    def env(name: str) -> str:
         """Fail before running Spark if the operator did not supply a hidden value."""
         return f'"${{{name}:?set {name}}}"'
 
@@ -120,7 +128,7 @@ def _format_submit_command(argv, application_index):
 class _RdbmsSubmitOperator(SparkSubmitOperator):
     """Keep provider submission intact and replace its argv display only."""
 
-    def _get_hook(self):
+    def _get_hook(self) -> "SparkSubmitHook":
         """Format actual argv at the provider's 6.3.2 masking/logging boundary."""
         hook = super()._get_hook()
         provider_mask = hook._mask_cmd
@@ -133,7 +141,7 @@ class _RdbmsSubmitOperator(SparkSubmitOperator):
         dsn = (self.env_vars or {}).get("INGESTION_META_DSN")
         secrets = sorted({value for value in [*credentials, dsn] if value}, key=len, reverse=True)
 
-        def mask(argv):
+        def mask(argv: list[str] | str) -> str:
             """Handle full argv and the provider's individual output-tail lines."""
             if isinstance(argv, list) and len(argv) > len(args) + 1:
                 index = len(argv) - len(args) - 1
@@ -150,13 +158,13 @@ class _RdbmsSubmitOperator(SparkSubmitOperator):
         hook._mask_cmd = mask
         return hook
 
-    def execute(self, context):
+    def execute(self, context: "Context") -> None:
         """Mark submit after guard admission and argument resolution."""
         log_step(LOG, "launch spark-submit cmd")
         return super().execute(context)
 
 
-def resolve_source_connection(connection) -> tuple:
+def resolve_source_connection(connection: "Connection") -> tuple[str, str, str]:
     """Build (jdbc_url, user, password) from an Airflow Connection via the dialect registry."""
     dialect = rdbms_registry.by_conn_type(connection.conn_type)
     jdbc_url = dialect.build_jdbc_url(ConnectionSpec(
@@ -169,7 +177,7 @@ def resolve_source_connection(connection) -> tuple:
     return jdbc_url, connection.login, connection.password
 
 
-def _pgmeta_dsn(connection) -> str:
+def _pgmeta_dsn(connection: "Connection") -> str:
     """Serialize the pg-meta Airflow Connection into an escaped libpq connection string."""
     return make_dsn(
         host=connection.host,
@@ -180,7 +188,7 @@ def _pgmeta_dsn(connection) -> str:
     )
 
 
-def _strict_submit_options(source_type, jdbc_partitioning, num_partitions) -> None:
+def _strict_submit_options(source_type: object, jdbc_partitioning: object, num_partitions: object) -> None:
     """Reject malformed shared submit options before any Spark wiring."""
     if not isinstance(source_type, str):
         raise ValueError("source_type must be a string")
@@ -190,7 +198,7 @@ def _strict_submit_options(source_type, jdbc_partitioning, num_partitions) -> No
         raise ValueError("num_partitions must be a positive integer")
 
 
-def _submit_args(operator, context) -> tuple:
+def _submit_args(operator: _RdbmsSubmitOperator, context: "Context") -> tuple[int, list[str]]:
     """Resolve runtime credentials and build the arguments shared by the submit operators."""
     if operator.source_type != "rdbms":
         raise ValueError(f"source_type {operator.source_type!r} is not supported by JDBC ingestion")
@@ -221,7 +229,7 @@ def _submit_args(operator, context) -> tuple:
 
 
 def _apply_entity_fields(
-    operator,
+    operator: _RdbmsSubmitOperator,
     source_id: str,
     airflow_conn_id: str,
     fqn: str,
@@ -278,8 +286,8 @@ class IngestActSnapOperator(_RdbmsSubmitOperator):
         source_type: str = "rdbms",
         jdbc_partitioning: bool = True,
         num_partitions: int = 4,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         _strict_submit_options(source_type, jdbc_partitioning, num_partitions)
         super().__init__(
             application="/opt/spark-jobs/raw/rdbms/incremental/load_act_snap.py",
@@ -293,7 +301,7 @@ class IngestActSnapOperator(_RdbmsSubmitOperator):
             source_type, jdbc_partitioning, num_partitions,
         )
 
-    def execute(self, context):
+    def execute(self, context: "Context") -> None:
         run_spark_guard(self)
         _, self.application_args = _submit_args(self, context)
         super().execute(context)
@@ -316,8 +324,8 @@ class IngestFullOperator(_RdbmsSubmitOperator):
         source_type: str = "rdbms",
         jdbc_partitioning: bool = True,
         num_partitions: int = 4,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         _strict_submit_options(source_type, jdbc_partitioning, num_partitions)
         super().__init__(
             application="/opt/spark-jobs/raw/rdbms/full/load_entity.py",
@@ -331,7 +339,7 @@ class IngestFullOperator(_RdbmsSubmitOperator):
             source_type, jdbc_partitioning, num_partitions,
         )
 
-    def execute(self, context):
+    def execute(self, context: "Context") -> None:
         run_spark_guard(self)
         _, args = _submit_args(self, context)
         dag_run = context["dag_run"]
@@ -355,13 +363,13 @@ class IngestIncrementalOperator(_RdbmsSubmitOperator):
         airflow_conn_id: str,
         fqn: str,
         target_table: str,
-        incremental_config: dict,
+        incremental_config: "IncrementalConfig",
         pg_conn_id: str = "ingestion_meta",
         source_type: str = "rdbms",
         jdbc_partitioning: bool = True,
         num_partitions: int = 4,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         _strict_submit_options(source_type, jdbc_partitioning, num_partitions)
         validate_incremental_config(incremental_config)
         super().__init__(
@@ -378,7 +386,7 @@ class IngestIncrementalOperator(_RdbmsSubmitOperator):
         self.incremental_config = incremental_config
         self.pg_conn_id = pg_conn_id
 
-    def execute(self, context):
+    def execute(self, context: "Context") -> None:
         run_spark_guard(self)
         _, args = _submit_args(self, context)
         dag_run = context["dag_run"]

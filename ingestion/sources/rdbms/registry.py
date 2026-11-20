@@ -22,7 +22,7 @@ def supported_url_prefixes() -> tuple[str, ...]:
     return tuple(sorted(prefix for dialect in _DIALECTS for prefix in dialect.url_prefixes))
 
 
-def by_conn_type(conn_type) -> RdbmsDialect:
+def by_conn_type(conn_type: str | None) -> RdbmsDialect:
     """Resolve a dialect by an Airflow connection type alias."""
     for dialect in _DIALECTS:
         if conn_type in dialect.conn_type_aliases:
@@ -33,7 +33,7 @@ def by_conn_type(conn_type) -> RdbmsDialect:
     )
 
 
-def by_jdbc_url(jdbc_url) -> RdbmsDialect:
+def by_jdbc_url(jdbc_url: str) -> RdbmsDialect:
     """Resolve a dialect by its JDBC URL prefix; unknown and empty URLs are rejected."""
     if isinstance(jdbc_url, str):
         for dialect in _DIALECTS:

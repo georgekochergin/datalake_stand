@@ -1,5 +1,7 @@
 """Asset publication for raw loads: unconditional for pipelines, checked for snapshots."""
 
+from typing import Any
+
 from airflow.sdk.exceptions import AirflowSkipException
 
 from .process import _pull_process_id
@@ -17,7 +19,7 @@ def snapshot_has_current_process(target_table: str, process_id: int) -> bool:
     return bool(row) and row[0] == process_id
 
 
-def publish_asset_event(target_table: str | None = None, **context) -> None:
+def publish_asset_event(target_table: str | None = None, **context: Any) -> None:
     """Publish unconditionally for raw loads, or only for this process's nonempty snapshot."""
     if target_table is None:
         return

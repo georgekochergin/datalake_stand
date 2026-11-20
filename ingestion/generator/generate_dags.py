@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from ingestion.generator.manifest import (
+    EntityConfig,
     IncrementalEntityConfig,
     PipelineManifest,
     SourceConfig,
@@ -68,14 +69,14 @@ def snapshot_asset_uri(source_id: str, fqn: str) -> str:
     return f"{asset_uri(source_id, fqn)}/act_snap"
 
 
-def load_operator_name(entity) -> str:
+def load_operator_name(entity: EntityConfig) -> str:
     """Class name of the load operator matching one entity's mode."""
     if isinstance(entity, IncrementalEntityConfig):
         return "IngestIncrementalOperator"
     return "IngestFullOperator"
 
 
-def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str]:
+def _entity_block(source: SourceConfig, entity: EntityConfig, num_partitions: int) -> list[str]:
     """Render logging, loading, and separate Asset publication for one entity."""
     target = resolve_fully_qualified(source.source_id, entity.fqn)
     group_id = f"load_{target.split('.')[-1]}"
@@ -108,7 +109,9 @@ def _entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str
     return lines
 
 
-def _snapshot_entity_block(source: SourceConfig, entity, num_partitions: int) -> list[str]:
+def _snapshot_entity_block(
+    source: SourceConfig, entity: IncrementalEntityConfig, num_partitions: int,
+) -> list[str]:
     """Render the snapshot load task group for one incremental entity."""
     target = resolve_snapshot_fully_qualified(source.source_id, entity.fqn)
     group_id = f"snap_{resolve_target_table_name(entity.fqn)}"
@@ -141,7 +144,7 @@ def _snapshot_entity_block(source: SourceConfig, entity, num_partitions: int) ->
 
 
 def generate_snapshot_dag_source(
-    source: SourceConfig, pipeline: PipelineManifest, entity,
+    source: SourceConfig, pipeline: PipelineManifest, entity: IncrementalEntityConfig,
     pipeline_name: str | None = None, num_partitions: int | None = None,
 ) -> str:
     """Render the snapshot DAG module source for one incremental entity."""

@@ -3,9 +3,10 @@
 import json
 import os
 from pathlib import Path
+from typing import NoReturn
 
 
-def main():
+def main() -> NoReturn:
     """Write the runtime password file without embedding credentials in the image."""
     path = Path(os.environ["AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE"])
     path.write_text(json.dumps({os.environ["STAND_USER"]: os.environ["STAND_PASSWORD"]}))

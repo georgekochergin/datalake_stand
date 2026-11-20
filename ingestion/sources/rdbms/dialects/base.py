@@ -24,11 +24,11 @@ class RdbmsDialect:
         """Render a parsed schema.table reference quoted for the source dialect."""
         return ".".join(self.quote_identifier(name) for name, _ in parts)
 
-    def position_kind(self, type_name, precision, scale) -> str:
+    def position_kind(self, type_name: str, precision: int | None, scale: int | None) -> str:
         """Map JDBC source type metadata to the persisted position contract."""
         raise NotImplementedError
 
-    def position_literal(self, canonical_text, kind: str) -> str:
+    def position_literal(self, canonical_text: str | None, kind: str) -> str:
         """Render an already canonicalized position as a typed SQL literal."""
         if canonical_text is None:
             return "NULL"
@@ -57,12 +57,12 @@ class RdbmsDialect:
         """Render the calendar-day number of a temporal column reference."""
         raise NotImplementedError
 
-    def reader_options(self) -> dict:
+    def reader_options(self) -> dict[str, str]:
         """JDBC reader options required by the engine."""
         return {"preferTimestampNTZ": "true"}
 
 
-def normalize_type_name(type_name) -> str:
+def normalize_type_name(type_name: str) -> str:
     """Uppercase and collapse whitespace in a JDBC TYPE_NAME."""
     if not isinstance(type_name, str):
         raise ValueError("JDBC type name must be a string")
@@ -74,14 +74,14 @@ def integer_kind(name: str) -> str:
     return {"INT": "integer", "INTEGER": "integer"}.get(name, name.lower())
 
 
-def decimal_kind(precision, scale) -> str:
+def decimal_kind(precision: int | None, scale: int | None) -> str:
     """Return decimal(p,0): only integral decimals are valid positions."""
     if isinstance(precision, bool) or not isinstance(precision, int) or not 1 <= precision <= 38 or isinstance(scale, bool) or scale != 0:
         raise ValueError("Only decimal(p,0), 1 <= p <= 38, is supported")
     return f"decimal({precision},0)"
 
 
-def fractional_kind(fractional, limit: int) -> int:
+def fractional_kind(fractional: int | None, limit: int) -> int:
     """Validate the JDBC timestamp fractional precision against the engine limit."""
     if isinstance(fractional, bool) or not isinstance(fractional, int) or not 0 <= fractional <= limit:
         raise ValueError("Unsupported JDBC timestamp fractional precision")

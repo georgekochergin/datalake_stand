@@ -10,8 +10,12 @@ whole-table reads pass none. Pure helpers import without Spark; the args
 namespace of each application carries the JDBC credentials.
 """
 
+import argparse
 import logging
+from collections.abc import Sequence
+from datetime import date
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from ingestion.logging import log_sql, log_step
 
@@ -20,11 +24,17 @@ from ingestion.sources.rdbms import jdbc_partitioning
 from ingestion.sources.rdbms import positions
 from ingestion.sources.rdbms import registry as dialects
 from ingestion.sources.rdbms.contracts import parse_source_table
+from ingestion.sources.rdbms.dialects.base import RdbmsDialect
+
+if TYPE_CHECKING:
+    from pyspark.sql import DataFrame, DataFrameReader, SparkSession
+
+_PartitionBound = int | Decimal | date | None
 
 LOGGER = logging.getLogger(__name__)
 
 
-def render_source_table(dialect, source_table: str) -> str:
+def render_source_table(dialect: RdbmsDialect, source_table: str) -> str:
     """Render a schema.table reference quoted for the source dialect.
 
     Every part of the reference is quoted per dialect (Oracle double quotes,
@@ -34,7 +44,7 @@ def render_source_table(dialect, source_table: str) -> str:
     return dialect.render_table(parse_source_table(source_table))
 
 
-def jdbc_reader(spark, args, read_query):
+def jdbc_reader(spark: "SparkSession", args: argparse.Namespace, read_query: str) -> "DataFrameReader":
     """Build the JDBC reader with driver and engine options from the dialect."""
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     reader = (
@@ -50,7 +60,7 @@ def jdbc_reader(spark, args, read_query):
     return reader
 
 
-def bound_literal(value) -> str:
+def bound_literal(value: object) -> str:
     """Render a JDBC partition bound; integral Decimals collapse to plain integers.
 
     Oracle NUMBER bounds arrive as Decimal('1.0000000000'), which the JDBC
@@ -62,7 +72,7 @@ def bound_literal(value) -> str:
     return str(value)
 
 
-def long_representable(*values) -> bool:
+def long_representable(*values: int | Decimal) -> bool:
     """Check numeric partition bounds fit the signed 64-bit Spark bound parsing.
 
     Spark's JDBC partitioning parses lowerBound/upperBound of numeric
@@ -72,7 +82,9 @@ def long_representable(*values) -> bool:
     return all(-(2 ** 63) <= int(value) <= 2 ** 63 - 1 for value in values)
 
 
-def read_bounds(spark, args, read_query, column, *, scope="read_query") -> tuple:
+def read_bounds(
+    spark: "SparkSession", args: argparse.Namespace, read_query: str, column: str, *, scope: str = "read_query",
+) -> tuple[_PartitionBound, _PartitionBound]:
     """Read MIN/MAX of the partition column over the read query (one-row JDBC read)."""
     column_ref = dialects.by_jdbc_url(args.jdbc_url).quote_identifier(column)
     query = (
@@ -87,7 +99,9 @@ def read_bounds(spark, args, read_query, column, *, scope="read_query") -> tuple
     return row[0], row[1]
 
 
-def build_extract_query(source_table, projection, filters=(), extra_select=""):
+def build_extract_query(
+    source_table: str, projection: Sequence[str] | None, filters: Sequence[str] = (), extra_select: str = "",
+) -> str:
     """Assemble the wrapping JDBC read query: projection, extra columns, filters."""
     select = "extract_source.*"
     if projection is not None:
@@ -102,7 +116,10 @@ def build_extract_query(source_table, projection, filters=(), extra_select=""):
     )
 
 
-def apply_partition_options(spark, args, reader, query, partition, *, scope):
+def apply_partition_options(
+    spark: "SparkSession", args: argparse.Namespace, reader: "DataFrameReader", query: str,
+    partition: jdbc_partitioning.PartitionChoice | None, *, scope: str,
+) -> tuple["DataFrameReader", _PartitionBound, _PartitionBound]:
     """Probe MIN/MAX of the partition column and enable parallel ranges.
 
     Returns (reader, low, high): the reader carries the partition options
@@ -133,7 +150,10 @@ def apply_partition_options(spark, args, reader, query, partition, *, scope):
     return reader, low, high
 
 
-def read_extract_frame(spark, args, filters=(), extra_select="", *, detailed_metadata=True):
+def read_extract_frame(
+    spark: "SparkSession", args: argparse.Namespace, filters: Sequence[str] = (), extra_select: str = "",
+    *, detailed_metadata: bool = True,
+) -> "DataFrame":
     """Read the source over JDBC into a cached frame with explicit predicates.
 
     Catalog metadata (columns, keys, indexes) is always required: it feeds

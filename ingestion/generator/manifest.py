@@ -2,8 +2,13 @@
 
 import re
 from dataclasses import dataclass, field
+from os import PathLike
+from typing import TYPE_CHECKING
 
 from ingestion.generator import naming
+
+if TYPE_CHECKING:
+    from ingestion.sources.rdbms.incremental_config import IncrementalConfig
 
 _ALLOWED_SOURCE_KEYS = frozenset({"type", "airflow_conn_id"})
 _ALLOWED_PIPELINE_KEYS = frozenset({"source_id", "schedule", "catchup", "tags", "entities"})
@@ -73,7 +78,7 @@ class FullEntityConfig(EntityConfig):
 class IncrementalEntityConfig(EntityConfig):
     """Entity loaded as a fixed incremental window through the pg-meta registry."""
 
-    incremental_config: dict
+    incremental_config: "IncrementalConfig"
     act_snap: ActSnapConfig = field(default_factory=ActSnapConfig)
 
     @property
@@ -98,7 +103,7 @@ class PipelineManifest(DagConfig):
     entities: tuple[EntityConfig, ...]
 
 
-def _read_yaml(path) -> object:
+def _read_yaml(path: str | PathLike[str]) -> object:
     """Load a YAML file, importing yaml lazily so the module imports without PyYAML."""
     import yaml
 
@@ -106,7 +111,7 @@ def _read_yaml(path) -> object:
         return yaml.safe_load(stream)
 
 
-def _strict_object(value, allowed: set[str], label: str) -> dict:
+def _strict_object(value: object, allowed: set[str], label: str) -> dict[str, object]:
     """Validate a nested configuration object and reject unknown keys.
 
     Enforces that value is a dict with only keys from the allowlist.
@@ -119,14 +124,14 @@ def _strict_object(value, allowed: set[str], label: str) -> dict:
     return value
 
 
-def _positive_integer(value, label: str) -> int:
+def _positive_integer(value: object, label: str) -> int:
     """Reject booleans and non-positive integers."""
     if type(value) is not int or value <= 0:
         raise ValueError(f"{label}: must be a positive integer")
     return value
 
 
-def load_settings(path) -> IngestionSettings:
+def load_settings(path: str | PathLike[str]) -> IngestionSettings:
     """Load strict, explicit JDBC execution defaults."""
     raw = _strict_object(_read_yaml(path), {"spark"}, "settings")
     spark = _strict_object(raw.get("spark"), {"jdbc"}, "settings.spark")
@@ -201,7 +206,7 @@ def temporal_lookback_default(schedule: str | None) -> tuple[int, str]:
     return (3, "h") if len(minutes) * len(hours) >= 2 else (3, "d")
 
 
-def _parse_dag_fields(raw: dict, label: str) -> dict:
+def _parse_dag_fields(raw: dict[str, object], label: str) -> dict[str, str | tuple[str, ...] | None]:
     """Validate common DAG fields without widening either YAML allowlist."""
     schedule = raw.get("schedule")
     if schedule is not None:
@@ -214,7 +219,7 @@ def _parse_dag_fields(raw: dict, label: str) -> dict:
     return {"schedule": schedule, "tags": tuple(tags)}
 
 
-def _parse_load_options(raw: dict, label: str) -> tuple[SparkConfig, AirflowConfig]:
+def _parse_load_options(raw: dict[str, object], label: str) -> tuple[SparkConfig, AirflowConfig]:
     """Parse the same nested YAML paths for entity and snapshot load settings."""
     spark = _strict_object(raw.get("spark", {}), {"jdbc_partitioning"}, f"{label}.spark")
     partitioning = spark.get("jdbc_partitioning", True)
@@ -230,7 +235,7 @@ def _parse_load_options(raw: dict, label: str) -> tuple[SparkConfig, AirflowConf
     )
 
 
-def _parse_act_snap(raw) -> ActSnapConfig:
+def _parse_act_snap(raw: object) -> ActSnapConfig:
     """Parse an independent snapshot DAG contract, rejecting unsupported fields."""
     label = "incremental.act_snap"
     raw = _strict_object(raw, {"schedule", "tags", "spark", "airflow"}, label)
@@ -238,7 +243,7 @@ def _parse_act_snap(raw) -> ActSnapConfig:
     return ActSnapConfig(**_parse_dag_fields(raw, label), spark=spark, airflow=airflow)
 
 
-def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]) -> EntityConfig:
+def _parse_entity(entity: dict[str, object], position: int, temporal_default: tuple[int, str]) -> EntityConfig:
     """Parse and validate a single entity from a pipeline manifest.
 
     Args:
@@ -316,7 +321,7 @@ def _parse_entity(entity: dict, position: int, temporal_default: tuple[int, str]
     )
 
 
-def load_sources(path) -> dict[str, SourceConfig]:
+def load_sources(path: str | PathLike[str]) -> dict[str, SourceConfig]:
     """Load and validate the sources registry (ingestion/conf/sources.yaml)."""
     raw = _read_yaml(path)
     if not isinstance(raw, dict) or not raw:
@@ -345,7 +350,7 @@ def load_sources(path) -> dict[str, SourceConfig]:
     return sources
 
 
-def load_pipeline(path) -> PipelineManifest:
+def load_pipeline(path: str | PathLike[str]) -> PipelineManifest:
     """Load and validate one pipeline from the recursive ingestion/conf/pipelines tree."""
     raw = _read_yaml(path)
     if not isinstance(raw, dict):

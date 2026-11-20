@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Iterable, Iterator
 
 SQL_RELAY_ENV = "INGESTION_SQL_LOG_RELAY"
 _SQL_FRAME = "INGESTION_SQL_LOG "
@@ -18,7 +19,7 @@ _SQL_PART = re.compile(
 )
 
 
-def format_sql_for_log(sql):
+def format_sql_for_log(sql: str) -> str:
     """Lay out generated SQL without splitting quoted values or function arguments."""
     depth = 0
     create_table = re.match(r"\s*CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\b", sql, re.IGNORECASE)
@@ -30,7 +31,7 @@ def format_sql_for_log(sql):
     indent = 0
     lines = []
 
-    def flush(end, next_indent):
+    def flush(end: int, next_indent: int) -> None:
         """Keep the original SQL fragment and update its display indentation."""
         nonlocal offset, indent
         part = sql[offset:end].strip()
@@ -69,14 +70,14 @@ def format_sql_for_log(sql):
     return "\n".join(lines)
 
 
-def log_sql(logger, label, sql):
+def log_sql(logger: logging.Logger, label: str, sql: str) -> None:
     """Send one SQL record, framed only when the Airflow relay is enabled."""
     if logger.isEnabledFor(logging.INFO):
         block = f"{label}:\n" + "\n".join("  " + line for line in format_sql_for_log(sql).splitlines())
         logger.info("%s", _SQL_FRAME + json.dumps(block) if os.environ.get(SQL_RELAY_ENV) == "1" else block)
 
 
-def restore_sql_blocks(lines):
+def restore_sql_blocks(lines: Iterable[str]) -> Iterator[str]:
     """Restore framed SQL records before the provider splits them into log events."""
     for line in lines:
         prefix, marker, payload = line.partition(_SQL_FRAME)
@@ -92,14 +93,14 @@ def restore_sql_blocks(lines):
         yield line
 
 
-def log_step(logger, title):
+def log_step(logger: logging.Logger, title: str) -> None:
     """Emit a single record with a visually distinct phase heading."""
     heading = f"== {title} =="
     border = "=" * len(heading)
     logger.info("\n%s\n%s\n%s", border, heading, border)
 
 
-def configure_driver_logging():
+def configure_driver_logging() -> None:
     """Enable application INFO records without overriding Spark JVM logging."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger("ingestion").setLevel(logging.INFO)

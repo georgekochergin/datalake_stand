@@ -13,6 +13,7 @@ import argparse
 import json
 import logging
 import os
+from typing import TYPE_CHECKING
 
 from ingestion.logging import configure_driver_logging, log_sql, log_step
 
@@ -24,6 +25,12 @@ from ingestion.spark.raw.rdbms.reader import render_source_table
 from ingestion.sources.rdbms import jdbc
 from ingestion.sources.rdbms import positions
 from ingestion.sources.rdbms import registry as dialects
+
+if TYPE_CHECKING:
+    from psycopg2.extensions import connection as Psycopg2Connection
+    from pyspark.sql import SparkSession
+
+    from ingestion.meta import DbConnect, DbRow
 
 LOGGER = logging.getLogger(__name__)
 
@@ -76,7 +83,7 @@ def main(argv: list[str] | None = None) -> None:
         spark.stop()
 
 
-def empty_incremental_window(batch) -> bool:
+def empty_incremental_window(batch: "DbRow") -> bool:
     """True when persisted bounds prove the strict window contains no rows.
 
     Only a zero-lookback regular batch with equal typed bounds reaches this
@@ -91,7 +98,7 @@ def empty_incremental_window(batch) -> bool:
     )
 
 
-def source_kind(spark, args):
+def source_kind(spark: "SparkSession", args: argparse.Namespace) -> str:
     """Validate the incremental column contract against JDBC catalog metadata."""
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     keys = jdbc.key_metadata(
@@ -118,7 +125,7 @@ def source_kind(spark, args):
     return kind
 
 
-def source_position(spark, args):
+def source_position(spark: "SparkSession", args: argparse.Namespace) -> tuple[str, str | None, bool, bool]:
     """Inspect original JDBC type and obtain exact MAX plus NULL/empty diagnostics."""
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     column = dialect.quote_identifier(args.incremental_column)
@@ -137,7 +144,7 @@ def source_position(spark, args):
     return kind, upper, count == 0, count != nonnull
 
 
-def _plan_batch(spark, args, connect):
+def _plan_batch(spark: "SparkSession", args: argparse.Namespace, connect: "DbConnect") -> "DbRow | None":
     """Resolve this execution's persisted batch or plan a fresh one with frozen bounds.
 
     The batch identity is (process_id, source_id, entity_fqn). A retry
@@ -179,7 +186,7 @@ def _plan_batch(spark, args, connect):
     LOGGER.info("incremental config: kind=%s lookback_size=%s lookback_unit=%s", kind, size, unit)
     positions.window_bounds(upper, kind, size, unit)
 
-    def calculate_lower(value):
+    def calculate_lower(value: str | None) -> tuple[str | None, str]:
         """Reject source resets before persisting an incremental window."""
         if value is not None:
             if empty or positions.maximum(value, upper, kind) != upper:
@@ -200,13 +207,13 @@ def _plan_batch(spark, args, connect):
     )
 
 
-def managed_load(spark, args):
+def managed_load(spark: "SparkSession", args: argparse.Namespace) -> None:
     """Execute a persisted batch with at-least-once append and atomic pg-meta finalization."""
     import psycopg2
 
     from ingestion.meta import registry
 
-    def connect():
+    def connect() -> "Psycopg2Connection":
         """Open the registry connection from the operator-provided DSN."""
         dsn = os.environ.get("INGESTION_META_DSN")
         if not dsn:

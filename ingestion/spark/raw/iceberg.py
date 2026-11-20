@@ -1,6 +1,10 @@
 """Target-side raw-layer Iceberg DDL: technical columns, quoting, and first-load DDL."""
 
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pyspark.sql.types import DataType, StructType
 
 CATALOG = "raw"
 METADATA_DTTM = "__load_dttm"
@@ -53,7 +57,7 @@ def build_create_table_sql(target: str, columns: list[tuple[str, str]]) -> str:
     )
 
 
-def schema_columns(schema) -> list[tuple[str, str]]:
+def schema_columns(schema: "StructType") -> list[tuple[str, str]]:
     """Map a PySpark schema to (column name, DDL type) pairs."""
     from pyspark.sql.types import (
         BinaryType,
@@ -71,7 +75,7 @@ def schema_columns(schema) -> list[tuple[str, str]]:
         TimestampType,
     )
 
-    def ddl_type(data_type):
+    def ddl_type(data_type: "DataType") -> str:
         if isinstance(data_type, StringType):
             return "string"
         if isinstance(data_type, BooleanType):
