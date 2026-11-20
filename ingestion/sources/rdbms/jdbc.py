@@ -7,13 +7,18 @@ executes JDBC operations and owns resource lifecycles.
 """
 
 import logging
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ingestion.logging import log_step
 
-from .contracts import parse_source_table
-from .dialects.base import normalize_type_name
+from .contracts import MetadataLocation, parse_source_table
+from .dialects.base import RdbmsDialect, normalize_type_name
+
+if TYPE_CHECKING:
+    from py4j.java_gateway import JavaObject, JVMView
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,7 +44,7 @@ class KeyMetadata:
 
 
 @contextmanager
-def connection(jvm, jdbc_url, user, password):
+def connection(jvm: "JVMView", jdbc_url: str, user: str, password: str) -> Iterator["JavaObject"]:
     """Own a short JDBC connection and close it."""
     jdbc_connection = jvm.java.sql.DriverManager.getConnection(jdbc_url, user, password)
     try:
@@ -48,7 +53,7 @@ def connection(jvm, jdbc_url, user, password):
         jdbc_connection.close()
 
 
-def first_row(jdbc_connection, sql) -> list[str]:
+def first_row(jdbc_connection: "JavaObject", sql: str) -> list[str | None]:
     """Execute a query and return its first row rendered as strings."""
     jdbc_statement = jdbc_connection.createStatement()
     try:
@@ -62,12 +67,12 @@ def first_row(jdbc_connection, sql) -> list[str]:
         jdbc_statement.close()
 
 
-def _row_size(result) -> int:
+def _row_size(result: "JavaObject") -> int:
     """Return the result set column count."""
     return result.getMetaData().getColumnCount()
 
 
-def column_position_kind(dialect, info: ColumnMeta) -> str | None:
+def column_position_kind(dialect: RdbmsDialect, info: ColumnMeta) -> str | None:
     """Canonical kind of a catalog column, or None when the dialect rejects it.
 
     Drivers decorate catalog type names with engine specifics (MSSQL appends
@@ -87,7 +92,7 @@ def column_position_kind(dialect, info: ColumnMeta) -> str | None:
     return None
 
 
-def compatibility_projection(dialect, keys: KeyMetadata) -> list[str] | None:
+def compatibility_projection(dialect: RdbmsDialect, keys: KeyMetadata) -> list[str] | None:
     """Build projected select items when the dialect rewrites special columns.
 
     Column facts come from the JDBC catalog (getColumns), the same source as
@@ -109,7 +114,10 @@ def compatibility_projection(dialect, keys: KeyMetadata) -> list[str] | None:
     return projected if rewrote else None
 
 
-def key_metadata(jvm, dialect, jdbc_url, user, password, source_table, *, detailed=True) -> KeyMetadata:
+def key_metadata(
+    jvm: "JVMView", dialect: RdbmsDialect, jdbc_url: str, user: str, password: str,
+    source_table: str, *, detailed: bool = True,
+) -> KeyMetadata:
     """Catalog column facts with best-effort keys for the partitioning heuristic.
 
     Columns are the required part: when they are unavailable the caller
@@ -151,7 +159,7 @@ def key_metadata(jvm, dialect, jdbc_url, user, password, source_table, *, detail
         return KeyMetadata((), (), {})
 
 
-def _degraded_metadata(label: str, lookup):
+def _degraded_metadata(label: str, lookup: Callable[[], tuple[str, ...]]) -> tuple[str, ...]:
     """Run one optional catalog lookup, degrading to empty on failure."""
     try:
         return lookup()
@@ -162,7 +170,7 @@ def _degraded_metadata(label: str, lookup):
         return ()
 
 
-def _primary_key(metadata, location, *, level=logging.INFO) -> tuple[str, ...]:
+def _primary_key(metadata: "JavaObject", location: MetadataLocation, *, level: int = logging.INFO) -> tuple[str, ...]:
     """Primary-key column names in KEY_SEQ order."""
     pairs: list[tuple[int, str]] = []
     args = (location.catalog, location.schema, location.table)
@@ -178,7 +186,9 @@ def _primary_key(metadata, location, *, level=logging.INFO) -> tuple[str, ...]:
     return tuple(name for _, name in sorted(pairs))
 
 
-def _unique_single_columns(metadata, location, *, level=logging.INFO) -> tuple[str, ...]:
+def _unique_single_columns(
+    metadata: "JavaObject", location: MetadataLocation, *, level: int = logging.INFO,
+) -> tuple[str, ...]:
     """Columns covered alone by a unique, unfiltered, non-functional index.
 
     Composite indexes contribute nothing: rows group by index name and only
@@ -208,13 +218,13 @@ def _unique_single_columns(metadata, location, *, level=logging.INFO) -> tuple[s
     return tuple(names)
 
 
-def _optional_int(result, label) -> int | None:
+def _optional_int(result: "JavaObject", label: str) -> int | None:
     """Read an int column of a JDBC result set treating SQL NULL as None."""
     value = result.getInt(label)
     return None if result.wasNull() else value
 
 
-def _exact_pattern(metadata, name: str) -> str:
+def _exact_pattern(metadata: "JavaObject", name: str) -> str:
     """Render an exact identifier as a JDBC metadata pattern.
 
     getColumns treats `_` and `%` in its schema and table arguments as
@@ -231,7 +241,9 @@ def _exact_pattern(metadata, name: str) -> str:
     )
 
 
-def _column_metadata(metadata, location, *, level=logging.INFO) -> dict[str, ColumnMeta]:
+def _column_metadata(
+    metadata: "JavaObject", location: MetadataLocation, *, level: int = logging.INFO,
+) -> dict[str, ColumnMeta]:
     """Map lowercased column names to type facts for one table location."""
     result: dict[str, ColumnMeta] = {}
     args = (

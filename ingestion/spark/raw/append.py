@@ -5,6 +5,10 @@ types or load modes.
 """
 
 import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pyspark.sql import DataFrame, SparkSession
 
 from ingestion.logging import log_sql, log_step
 
@@ -20,7 +24,7 @@ from ingestion.spark.raw.iceberg import (
 LOGGER = logging.getLogger(__name__)
 
 
-def append_raw(spark, target_table, frame, rows, process_id):
+def append_raw(spark: "SparkSession", target_table: str, frame: "DataFrame", rows: int, process_id: int) -> None:
     """Append a counted, cleaned frame to the raw table.
 
     The target table is created on first load from the actually read schema;

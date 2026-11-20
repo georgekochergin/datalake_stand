@@ -4,29 +4,34 @@ Knows nothing about source types, load modes, or data layers.
 """
 
 import logging
+from collections.abc import Mapping
 from functools import partial
+from typing import TYPE_CHECKING, Any
 
 from airflow.sdk import BaseOperator
 
 from ingestion import meta
 
+if TYPE_CHECKING:
+    from airflow.sdk import Context
+
 LOG = logging.getLogger(__name__)
 
 
-def _meta_connect(pg_conn_id: str = "ingestion_meta"):
+def _meta_connect(pg_conn_id: str = "ingestion_meta") -> meta.DbConnection:
     """Open a pg-meta connection through the Airflow Postgres provider."""
     from airflow.providers.postgres.hooks.postgres import PostgresHook
 
     return PostgresHook(postgres_conn_id=pg_conn_id).get_conn()
 
 
-def _pull_process_id(context) -> int | None:
+def _pull_process_id(context: Mapping[str, Any]) -> int | None:
     """Pull the run's process_id from the generate_process_id task, if present."""
     value = context["ti"].xcom_pull(task_ids="generate_process_id")
     return _validate_process_id(value) if value is not None else None
 
 
-def _validate_process_id(value) -> int:
+def _validate_process_id(value: object) -> int:
     """Require a positive integral process ID, including rendered XCom strings."""
     if type(value) is int and value > 0:
         return value
@@ -36,7 +41,7 @@ def _validate_process_id(value) -> int:
 
 
 def log_task_event(
-    context,
+    context: "Context",
     source_id: str,
     entity_fqn: str,
     datalake_table: str,
@@ -74,11 +79,11 @@ class GenerateProcessIdOperator(BaseOperator):
     process_id: a retried task reuses the value from XCom instead.
     """
 
-    def __init__(self, task_id="generate_process_id", pg_conn_id="ingestion_meta", **kwargs):
+    def __init__(self, task_id: str = "generate_process_id", pg_conn_id: str = "ingestion_meta", **kwargs: Any) -> None:
         super().__init__(task_id=task_id, **kwargs)
         self.pg_conn_id = pg_conn_id
 
-    def execute(self, context):
+    def execute(self, context: "Context") -> int:
         dag_run = context["dag_run"]
         return meta.allocate_process_id(
             dag_id=dag_run.dag_id, run_id=dag_run.run_id,
@@ -87,7 +92,7 @@ class GenerateProcessIdOperator(BaseOperator):
         )
 
 
-def _dagrun_event(status: str, context) -> None:
+def _dagrun_event(status: str, context: "Context") -> None:
     """Append a dagrun END/FAILED event for the run's allocated process_id."""
     dag_run = context["dag_run"]
     connect = partial(_meta_connect, "ingestion_meta")
@@ -104,11 +109,11 @@ def _dagrun_event(status: str, context) -> None:
     )
 
 
-def dagrun_success_callback(context) -> None:
+def dagrun_success_callback(context: "Context") -> None:
     """DAG-level success callback: append the dagrun END event."""
     _dagrun_event("END", context)
 
 
-def dagrun_failure_callback(context) -> None:
+def dagrun_failure_callback(context: "Context") -> None:
     """DAG-level failure callback: append the dagrun FAILED event."""
     _dagrun_event("FAILED", context)

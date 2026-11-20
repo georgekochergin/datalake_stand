@@ -7,10 +7,14 @@ entities only — full-slice loads and snapshot flows never call it.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
+from typing import Literal
 
-from . import LOG, _execute, _operation, _row
+from . import LOG, DbConnect, DbCursor, DbRow, _execute, _operation, _row
+
+_CalculateLower = Callable[[str | None], tuple[str | None, str]]
+_ComparePositions = Callable[[str, str | None], int]
 
 
 @dataclass(frozen=True)
@@ -21,17 +25,17 @@ class _IncrementalConfig:
     type: str | None
     lookback_size: int
     lookback_unit: str | None
-    calculate_lower: Callable | None
-    compare_positions: Callable | None
+    calculate_lower: _CalculateLower | None
+    compare_positions: _ComparePositions | None
 
 
-def _check_contract(state, column, incremental_type):
+def _check_contract(state: DbRow, column: str | None, incremental_type: str | None) -> None:
     """Reject contract changes until an audited migration is applied."""
     if (state["incremental_column"], state["incremental_type"]) != (column, incremental_type):
         raise ValueError("Incremental contract changed; stop executors and migrate incremental_state")
 
 
-def _check_batch(state, batch):
+def _check_batch(state: DbRow, batch: DbRow) -> None:
     """Fence stale executors while permitting an already-successful retry."""
     if batch["status"] == "SUCCEEDED":
         return
@@ -40,7 +44,7 @@ def _check_batch(state, batch):
         raise ValueError("Incremental revision mismatch; stale batch cannot be reused")
 
 
-def _lock_state(cur, source_id, entity_fqn):
+def _lock_state(cur: DbCursor, source_id: str, entity_fqn: str) -> DbRow:
     """Acquire the first lock in the shared state-then-batch lock order."""
     _execute(cur,
         "SELECT * FROM ingestion.incremental_state "
@@ -52,7 +56,7 @@ def _lock_state(cur, source_id, entity_fqn):
     return state
 
 
-def _lock_batch(cur, process_id, source_id, entity_fqn):
+def _lock_batch(cur: DbCursor, process_id: int, source_id: str, entity_fqn: str) -> tuple[DbRow, DbRow]:
     """Lock state and the process's batch, in the shared lock order."""
     state = _lock_state(cur, source_id, entity_fqn)
     _execute(cur,
@@ -67,7 +71,7 @@ def _lock_batch(cur, process_id, source_id, entity_fqn):
     return state, batch
 
 
-def get_batch(*, process_id, source_id, entity_fqn, db_connect):
+def get_batch(*, process_id: int, source_id: str, entity_fqn: str, db_connect: DbConnect) -> DbRow | None:
     """Return the process's revision-validated batch, or None before planning."""
     with _operation(db_connect, "get_batch", process_id=process_id, source_id=source_id,
                     entity_fqn=entity_fqn) as (cur, _):
@@ -84,7 +88,7 @@ def get_batch(*, process_id, source_id, entity_fqn, db_connect):
         return batch
 
 
-def _batch_reason(watermark):
+def _batch_reason(watermark: str | None) -> Literal["bootstrap", "regular"]:
     """Map the watermark onto the batch reason.
 
     Bootstrap is the opening phase of the incremental stream: a NULL
@@ -94,7 +98,10 @@ def _batch_reason(watermark):
     return "bootstrap" if watermark is None else "regular"
 
 
-def _incremental_bounds(watermark, upper_bound, empty_at_plan, incremental_config):
+def _incremental_bounds(
+    watermark: str | None, upper_bound: str | None, empty_at_plan: bool,
+    incremental_config: _IncrementalConfig,
+) -> tuple[str | None, str, str | None, bool, int, str | None]:
     """Compute window bounds with the actually applied lower operator.
 
     Returns (lower, lower_op, upper_bound, empty_at_plan, lookback_size,
@@ -115,11 +122,13 @@ def _incremental_bounds(watermark, upper_bound, empty_at_plan, incremental_confi
         incremental_config.lookback_size, incremental_config.lookback_unit
 
 
-def plan_batch(*, process_id, dag_id, run_id, source_id,
-               entity_fqn, target_table, incremental_column, incremental_type,
-               upper_bound, empty_at_plan, lookback_size=0,
-               lookback_unit=None, calculate_lower=None,
-               compare_positions=None, db_connect):
+def plan_batch(
+    *, process_id: int, dag_id: str, run_id: str, source_id: str,
+    entity_fqn: str, target_table: str, incremental_column: str, incremental_type: str,
+    upper_bound: str | None, empty_at_plan: bool, lookback_size: int = 0,
+    lookback_unit: str | None = None, calculate_lower: _CalculateLower | None = None,
+    compare_positions: _ComparePositions | None = None, db_connect: DbConnect,
+) -> DbRow | None:
     """Persist fixed bounds once and return the original batch on retry.
 
     The registry serves incremental entities only; full-slice loads and
@@ -184,7 +193,7 @@ def plan_batch(*, process_id, dag_id, run_id, source_id,
         return batch
 
 
-def start_batch(*, process_id, source_id, entity_fqn, db_connect):
+def start_batch(*, process_id: int, source_id: str, entity_fqn: str, db_connect: DbConnect) -> DbRow | None:
     """Start an attempt after the caller has ensured no live executor remains."""
     with _operation(db_connect, "start_batch", process_id=process_id, source_id=source_id,
                     entity_fqn=entity_fqn) as (cur, changes):
@@ -206,9 +215,11 @@ def start_batch(*, process_id, source_id, entity_fqn, db_connect):
 _UNSET = object()
 
 
-def finalize_batch(*, process_id, source_id, entity_fqn, row_count, observed_max=None,
-                   compare_positions=None, watermark_after=_UNSET,
-                   db_connect):
+def finalize_batch(
+    *, process_id: int, source_id: str, entity_fqn: str, row_count: int,
+    observed_max: str | None = None, compare_positions: _ComparePositions | None = None,
+    watermark_after: object = _UNSET, db_connect: DbConnect,
+) -> DbRow | None:
     """Atomically finish a batch and CAS the state revision.
 
     compare_positions(left, right) returns a negative/zero/positive typed
@@ -257,7 +268,7 @@ def finalize_batch(*, process_id, source_id, entity_fqn, row_count, observed_max
         return finalized
 
 
-def fail_batch(*, process_id, source_id, entity_fqn, db_connect):
+def fail_batch(*, process_id: int, source_id: str, entity_fqn: str, db_connect: DbConnect) -> DbRow | None:
     """Record a failed attempt without changing extraction state."""
     with _operation(db_connect, "fail_batch", process_id=process_id, source_id=source_id,
                     entity_fqn=entity_fqn) as (cur, changes):

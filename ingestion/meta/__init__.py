@@ -8,16 +8,30 @@ lives in ingestion.meta.registry.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import logging
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 from ingestion.logging import log_sql, log_step
+
+if TYPE_CHECKING:
+    from psycopg import Connection, Cursor
+    from psycopg2.extensions import connection as Psycopg2Connection
+    from psycopg2.extensions import cursor as Psycopg2Cursor
+
+DbConnection: TypeAlias = "Connection | Psycopg2Connection"
+DbCursor: TypeAlias = "Cursor | Psycopg2Cursor"
+DbConnect: TypeAlias = Callable[[], DbConnection]
+DbRow: TypeAlias = dict[str, Any]
+_RowChange: TypeAlias = tuple[str, DbRow | None, DbRow | None]
 
 LOG = logging.getLogger(__name__)
 
 
 @contextmanager
-def connection(db_connect):
+def connection(db_connect: DbConnect) -> Iterator[DbConnection]:
     """Own a short DB-API transaction and close its connection."""
     conn = db_connect()
     try:
@@ -34,20 +48,20 @@ def connection(db_connect):
         conn.close()
 
 
-def _row(cursor):
+def _row(cursor: DbCursor) -> DbRow | None:
     """Decode ordinary DB-API rows using cursor metadata."""
     row = cursor.fetchone()
     return dict(zip((column[0] for column in cursor.description), row)) if row is not None else None
 
 
-def _execute(cursor, sql, params):
+def _execute(cursor: DbCursor, sql: str, params: tuple[object, ...]) -> None:
     """Log only application-owned SQL and its operational parameters."""
     if LOG.isEnabledFor(logging.INFO):
         _log_statement(cursor, sql, params)
     cursor.execute(sql, params)
 
 
-def _log_statement(cursor, sql, params):
+def _log_statement(cursor: DbCursor, sql: str, params: tuple[object, ...]) -> None:
     """Adapt bind values for display only, independently of execution."""
     try:
         mogrify = getattr(cursor, "mogrify", None)
@@ -72,7 +86,9 @@ def _log_statement(cursor, sql, params):
 
 
 @contextmanager
-def _operation(db_connect, name, **key):
+def _operation(
+    db_connect: DbConnect, name: str, **key: object,
+) -> Iterator[tuple[DbCursor, list[_RowChange]]]:
     """Publish changes only after the owning transaction has committed."""
     log_step(LOG, f"pg-meta: {name}")
     LOG.info("pg-meta begin operation=%s key=%r", name, key)
@@ -104,7 +120,10 @@ def _operation(db_connect, name, **key):
         LOG.info("pg-meta no writes operation=%s key=%r", name, key)
 
 
-def allocate_process_id(dag_id=None, run_id=None, execution_date=None, *, db_connect):
+def allocate_process_id(
+    dag_id: str | None = None, run_id: str | None = None,
+    execution_date: datetime | None = None, *, db_connect: DbConnect,
+) -> int:
     """Insert a START event and return its fresh process_id.
 
     Every execution of the generating task allocates its own identifier;
@@ -123,7 +142,10 @@ def allocate_process_id(dag_id=None, run_id=None, execution_date=None, *, db_con
         return int(row["process_id"])
 
 
-def log_dagrun(process_id, dag_id, run_id, execution_date, status, *, db_connect):
+def log_dagrun(
+    process_id: int, dag_id: str, run_id: str, execution_date: datetime | None,
+    status: str, *, db_connect: DbConnect,
+) -> None:
     """Append a DagRun lifecycle event, ignoring duplicate start events."""
     with _operation(db_connect, "log_dagrun", process_id=process_id, status=status) as (cur, changes):
         _execute(cur,
@@ -135,7 +157,10 @@ def log_dagrun(process_id, dag_id, run_id, execution_date, status, *, db_connect
         changes.append(("airflow_dagruns_log", None, _row(cur)))
 
 
-def log_task(process_id, source_id, entity_fqn, datalake_table, status, *, db_connect):
+def log_task(
+    process_id: int, source_id: str, entity_fqn: str, datalake_table: str,
+    status: str, *, db_connect: DbConnect,
+) -> None:
     """Append a task lifecycle event."""
     with _operation(db_connect, "log_task", process_id=process_id, status=status) as (cur, changes):
         _execute(cur,
@@ -147,7 +172,7 @@ def log_task(process_id, source_id, entity_fqn, datalake_table, status, *, db_co
         changes.append(("airflow_tasks_log", None, _row(cur)))
 
 
-def find_process_id(dag_id, run_id, *, db_connect):
+def find_process_id(dag_id: str, run_id: str, *, db_connect: DbConnect) -> int | None:
     """Find an identifier already assigned to a DagRun."""
     with _operation(db_connect, "find_process_id", dag_id=dag_id, run_id=run_id) as (cur, _):
         _execute(cur,

@@ -29,7 +29,7 @@ class OracleDialect(RdbmsDialect):
         """Double-quote an identifier, doubling embedded quotes."""
         return '"%s"' % name.replace('"', '""')
 
-    def position_kind(self, type_name, precision, scale) -> str:
+    def position_kind(self, type_name: str, precision: int | None, scale: int | None) -> str:
         """Map Oracle JDBC types onto the persisted position contract."""
         name = normalize_type_name(type_name)
         if name in ("SMALLINT", "INT", "INTEGER", "BIGINT"):

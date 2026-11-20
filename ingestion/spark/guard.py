@@ -1,8 +1,9 @@
 """Master-only Spark application admission guard, independent of Airflow."""
 
 import json
+from collections.abc import Iterator, Mapping, Set
 from contextlib import contextmanager
-from http.client import HTTPConnection, HTTPSConnection
+from http.client import HTTPConnection, HTTPResponse, HTTPSConnection
 import logging
 import time
 from urllib.parse import urlencode, urlsplit
@@ -12,12 +13,13 @@ HTTP_TIMEOUT = 5
 POLL_INTERVAL = 2
 LOG = logging.getLogger(__name__)
 
+_ApplicationInventory = Mapping[str, Mapping[str, str]]
 
 class SparkGuardError(RuntimeError):
     """Refuse submission when the master cannot prove safe admission."""
 
 
-def _remaining(deadline):
+def _remaining(deadline: float) -> float:
     """Return the remaining monotonic budget or refuse admission."""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -26,7 +28,7 @@ def _remaining(deadline):
 
 
 @contextmanager
-def _request(method, url, deadline, data=None):
+def _request(method: str, url: str, deadline: float, data: bytes | None = None) -> Iterator[HTTPResponse]:
     """Open one bounded HTTP request and always close its connection."""
     request_deadline = min(deadline, time.monotonic() + HTTP_TIMEOUT)
     parsed = urlsplit(url)
@@ -50,7 +52,7 @@ def _request(method, url, deadline, data=None):
         connection.close()
 
 
-def _get_master_state(master, deadline):
+def _get_master_state(master: str, deadline: float) -> object:
     """Fetch and decode the master application inventory through GET /json/."""
     with _request("GET", master + "/json/", deadline) as response:
         if response.status != 200:
@@ -62,7 +64,7 @@ def _get_master_state(master, deadline):
         raise SparkGuardError("Invalid Spark master JSON; submit prohibited") from None
 
 
-def _kill_application(master, application_id, deadline):
+def _kill_application(master: str, application_id: str, deadline: float) -> None:
     """POST one kill command without following the UI redirect or reading state."""
     data = urlencode({"id": application_id, "terminate": "true"}).encode("ascii")
     with _request("POST", master + "/app/kill/", deadline, data=data) as response:
@@ -70,7 +72,7 @@ def _kill_application(master, application_id, deadline):
             raise SparkGuardError("Spark master kill request failed; submit prohibited")
 
 
-def _applications(snapshot):
+def _applications(snapshot: object) -> tuple[_ApplicationInventory, _ApplicationInventory]:
     """Validate the complete application inventory before using it as evidence."""
     if not isinstance(snapshot, dict):
         raise SparkGuardError("Invalid Spark master JSON; submit prohibited")
@@ -95,7 +97,10 @@ def _applications(snapshot):
     return inventories["activeapps"], inventories["completedapps"]
 
 
-def _all_applications_completed(active, completed, original_ids, target_table):
+def _all_applications_completed(
+    active: _ApplicationInventory, completed: _ApplicationInventory,
+    original_ids: Set[str], target_table: str,
+) -> bool:
     """Require completion evidence for every original ID and reject new target IDs."""
     current_ids = {key for key, app in active.items() if app["name"] == target_table}
     if current_ids - original_ids:
@@ -120,7 +125,7 @@ def _all_applications_completed(active, completed, original_ids, target_table):
     return all_completed
 
 
-def guard_spark_submit(master, target_table):
+def guard_spark_submit(master: str, target_table: str) -> list[str]:
     """Kill original target applications once and require master completion evidence."""
     deadline = time.monotonic() + GUARD_TIMEOUT
     active, _ = _applications(_get_master_state(master, deadline))

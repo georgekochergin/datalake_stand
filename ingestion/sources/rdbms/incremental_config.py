@@ -1,11 +1,33 @@
 """Validation of the resolved incremental loading configuration."""
 
 import re
+from typing import TypedDict, cast
 
 from . import positions
 
 
-def validate(config):
+class _Contract(TypedDict):
+    """Validated source position definition."""
+
+    source_column: str
+    position_type: str
+
+
+class _Lookback(TypedDict):
+    """Resolved lookback size and optional time unit."""
+
+    size: int
+    unit: str | None
+
+
+class IncrementalConfig(TypedDict):
+    """Validated incremental contract with resolved lookback."""
+
+    contract: _Contract
+    lookback: _Lookback
+
+
+def validate(config: object) -> IncrementalConfig:
     """Return a validated contract and concrete lookback without runtime defaults."""
     if not isinstance(config, dict) or set(config) != {"contract", "lookback"}:
         raise ValueError("incremental config requires exactly contract and lookback")
@@ -26,4 +48,4 @@ def validate(config):
     if size == 0 and unit is not None:
         raise ValueError("Zero lookback requires null unit")
     positions.window_bounds(None, kind, size, unit)
-    return config
+    return cast(IncrementalConfig, config)

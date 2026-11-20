@@ -9,6 +9,7 @@ import re
 from datetime import date, datetime
 from decimal import Decimal
 
+PositionValue = str | int | Decimal | date | None
 
 _NS = 1_000_000_000
 _DAY = 86400 * _NS
@@ -25,7 +26,7 @@ _RANGES = {
 }
 
 
-def kind_info(kind):
+def kind_info(kind: str) -> tuple[str, int, tuple[int, int] | None]:
     """Return family, fractional precision, and signed numeric bounds."""
     if not isinstance(kind, str):
         raise ValueError("Position kind must be a string")
@@ -43,7 +44,7 @@ def kind_info(kind):
     raise ValueError(f"Unsupported position kind: {kind!r}")
 
 
-def _parse(value, kind):
+def _parse(value: PositionValue, kind: str) -> int | None:
     """Parse into integer values, ordinal days, or ordinal nanoseconds."""
     family, precision, bounds = kind_info(kind)
     if value is None:
@@ -102,7 +103,7 @@ def _parse(value, kind):
     return result
 
 
-def _format(value, kind):
+def _format(value: int | None, kind: str) -> str | None:
     """Render a parsed position at exactly the declared precision."""
     if value is None:
         return None
@@ -121,12 +122,14 @@ def _format(value, kind):
     return result + ("Z" if family == "instant" else "")
 
 
-def canonical(value, kind):
+def canonical(value: PositionValue, kind: str) -> str | None:
     """Normalize a position without rounding, or preserve NULL."""
     return _format(_parse(value, kind), kind)
 
 
-def window_bounds(watermark, kind, size=0, unit=None):
+def window_bounds(
+    watermark: PositionValue, kind: str, size: int = 0, unit: str | None = None,
+) -> tuple[str | None, str]:
     """Subtract lookback with hour/day alignment; return (lower, op).
 
     The lower bound is the start of the hour (unit h) or day (unit d) reached
@@ -161,7 +164,7 @@ def window_bounds(watermark, kind, size=0, unit=None):
     return _format(aligned, kind), op
 
 
-def resolve_lookback(kind, size, unit, specified):
+def resolve_lookback(kind: str, size: int, unit: str | None, specified: bool) -> tuple[int, str | None]:
     """Resolve a schedule-derived default for the declared canonical position type.
 
     The manifest parser resolves the temporal default (3 h or 3 d by schedule)
@@ -180,7 +183,7 @@ def resolve_lookback(kind, size, unit, specified):
     return size, unit
 
 
-def maximum(previous, observed, kind):
+def maximum(previous: PositionValue, observed: PositionValue, kind: str) -> str | None:
     """Return typed maximum, ignoring NULL positions."""
     values = [_parse(value, kind) for value in (previous, observed)]
     values = [value for value in values if value is not None]

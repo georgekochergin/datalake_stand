@@ -30,7 +30,7 @@ class MssqlDialect(RdbmsDialect):
         """Bracket-quote an identifier, doubling embedded brackets."""
         return "[%s]" % name.replace("]", "]]")
 
-    def position_kind(self, type_name, precision, scale) -> str:
+    def position_kind(self, type_name: str, precision: int | None, scale: int | None) -> str:
         """Map MSSQL JDBC types onto the persisted position contract."""
         name = normalize_type_name(type_name)
         if name in ("SMALLINT", "INT", "INTEGER", "BIGINT"):

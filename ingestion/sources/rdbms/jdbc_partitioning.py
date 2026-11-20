@@ -9,10 +9,12 @@ jdbc.py owns the metadata access.
 """
 
 import logging
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 
 from . import jdbc
 from . import positions
+from .dialects.base import RdbmsDialect
 from ingestion.logging import log_step
 
 LOGGER = logging.getLogger(__name__)
@@ -42,7 +44,7 @@ def partition_name(choice: PartitionChoice) -> str:
     return DAY_ALIAS if choice.derived else choice.column
 
 
-def day_expression(dialect, keys, choice: PartitionChoice) -> str:
+def day_expression(dialect: RdbmsDialect, keys: jdbc.KeyMetadata, choice: PartitionChoice) -> str:
     """Render the calendar-day derivative of the chosen timestamp column.
 
     Time-zone types derive from the dialect's UTC projection, mirroring the
@@ -54,13 +56,15 @@ def day_expression(dialect, keys, choice: PartitionChoice) -> str:
     return dialect.day_expression(projected or reference)
 
 
-def _family(dialect, info) -> str | None:
+def _family(dialect: RdbmsDialect, info: jdbc.ColumnMeta) -> str | None:
     """Position family of a column, or None when unsupported."""
     kind = jdbc.column_position_kind(dialect, info)
     return positions.kind_info(kind)[0] if kind is not None else None
 
 
-def _first_candidate(dialect, infos, families):
+def _first_candidate(
+    dialect: RdbmsDialect, infos: Iterable[jdbc.ColumnMeta], families: Collection[str],
+) -> jdbc.ColumnMeta | None:
     """First NOT NULL column of a family in stable normalized-name order."""
     matched = [
         info for info in infos
@@ -69,7 +73,7 @@ def _first_candidate(dialect, infos, families):
     return min(matched, key=lambda info: info.name.lower()) if matched else None
 
 
-def no_candidate_reason(dialect, keys) -> str:
+def no_candidate_reason(dialect: RdbmsDialect, keys: jdbc.KeyMetadata) -> str:
     """Render the observed metadata that produced an empty heuristic result.
 
     Every column is listed with its type, heuristic family and nullability,
@@ -87,7 +91,7 @@ def no_candidate_reason(dialect, keys) -> str:
     )
 
 
-def choose(dialect, keys) -> PartitionChoice | None:
+def choose(dialect: RdbmsDialect, keys: jdbc.KeyMetadata) -> PartitionChoice | None:
     """Pick the partition column with one heuristic shared by every load mode.
 
     Steps, in order: a single-column primary key of integral type; an
@@ -118,7 +122,9 @@ def choose(dialect, keys) -> PartitionChoice | None:
     return None
 
 
-def plan(dialect, keys, source_table):
+def plan(
+    dialect: RdbmsDialect, keys: jdbc.KeyMetadata, source_table: str,
+) -> tuple[PartitionChoice | None, str | None]:
     """Compose the partitioning decision for one read over observed metadata.
 
     Returns (partition, extra_select): partition is None when the heuristic

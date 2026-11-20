@@ -8,11 +8,15 @@ execution is the only load path; no pg-meta state is planned or finalized.
 
 import argparse
 import logging
+from typing import TYPE_CHECKING
 
 from ingestion.spark.raw import append
 from ingestion.spark.raw.iceberg import validate_target_table
 from ingestion.spark.raw.rdbms import reader
 from ingestion.logging import configure_driver_logging
+
+if TYPE_CHECKING:
+    from pyspark.sql import SparkSession
 
 LOGGER = logging.getLogger(__name__)
 
@@ -40,7 +44,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def managed_load(spark, args):
+def managed_load(spark: "SparkSession", args: argparse.Namespace) -> None:
     """Read the whole source frame and append it to the raw table."""
     frame = reader.read_extract_frame(spark, args)
     try:

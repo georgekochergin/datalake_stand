@@ -12,6 +12,7 @@ version. Airflow independently checks committed rows before publishing the Asset
 import argparse
 import logging
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from ingestion.logging import configure_driver_logging, log_sql, log_step
 
@@ -25,6 +26,9 @@ from ingestion.spark.raw.iceberg import (
     validate_target_table,
 )
 from ingestion.spark.raw.rdbms.reader import read_extract_frame
+
+if TYPE_CHECKING:
+    from pyspark.sql import DataFrame, SparkSession
 
 SNAPSHOT_SOURCE_VIEW = "snapshot_source"
 LOGGER = logging.getLogger(__name__)
@@ -51,7 +55,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def current_snapshot_author(spark, target: str) -> int | None:
+def current_snapshot_author(spark: "SparkSession", target: str) -> int | None:
     """Process id that published the current table version, None if never published."""
     if not spark.catalog.tableExists(target):
         return None
@@ -73,7 +77,9 @@ def build_rtas_sql(target: str, process_id: int, columns: list[str]) -> str:
     )
 
 
-def _overwrite_snapshot(spark, args, frame, load_dttm) -> None:
+def _overwrite_snapshot(
+    spark: "SparkSession", args: argparse.Namespace, frame: "DataFrame", load_dttm: datetime,
+) -> None:
     """Replace the snapshot table with the whole read frame in one atomic commit."""
     import pyspark.sql.functions as F
 
@@ -93,7 +99,7 @@ def _overwrite_snapshot(spark, args, frame, load_dttm) -> None:
     spark.sql(replace_sql)
 
 
-def managed_snapshot(spark, args) -> None:
+def managed_snapshot(spark: "SparkSession", args: argparse.Namespace) -> None:
     """Read the whole source and atomically replace the snapshot table.
 
     A retry first checks the publishing property: when the current version of
