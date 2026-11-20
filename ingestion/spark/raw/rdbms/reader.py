@@ -10,8 +10,8 @@ whole-table reads pass none. Pure helpers import without Spark; the args
 namespace of each application carries the JDBC credentials.
 """
 
+import argparse
 import logging
-from argparse import Namespace
 from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
@@ -44,7 +44,7 @@ def render_source_table(dialect: RdbmsDialect, source_table: str) -> str:
     return dialect.render_table(parse_source_table(source_table))
 
 
-def jdbc_reader(spark: "SparkSession", args: Namespace, read_query: str) -> "DataFrameReader":
+def jdbc_reader(spark: "SparkSession", args: argparse.Namespace, read_query: str) -> "DataFrameReader":
     """Build the JDBC reader with driver and engine options from the dialect."""
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     reader = (
@@ -83,7 +83,7 @@ def long_representable(*values: int | Decimal) -> bool:
 
 
 def read_bounds(
-    spark: "SparkSession", args: Namespace, read_query: str, column: str, *, scope: str = "read_query",
+    spark: "SparkSession", args: argparse.Namespace, read_query: str, column: str, *, scope: str = "read_query",
 ) -> tuple[_PartitionBound, _PartitionBound]:
     """Read MIN/MAX of the partition column over the read query (one-row JDBC read)."""
     column_ref = dialects.by_jdbc_url(args.jdbc_url).quote_identifier(column)
@@ -117,7 +117,7 @@ def build_extract_query(
 
 
 def apply_partition_options(
-    spark: "SparkSession", args: Namespace, reader: "DataFrameReader", query: str,
+    spark: "SparkSession", args: argparse.Namespace, reader: "DataFrameReader", query: str,
     partition: jdbc_partitioning.PartitionChoice | None, *, scope: str,
 ) -> tuple["DataFrameReader", _PartitionBound, _PartitionBound]:
     """Probe MIN/MAX of the partition column and enable parallel ranges.
@@ -151,7 +151,7 @@ def apply_partition_options(
 
 
 def read_extract_frame(
-    spark: "SparkSession", args: Namespace, filters: Sequence[str] = (), extra_select: str = "",
+    spark: "SparkSession", args: argparse.Namespace, filters: Sequence[str] = (), extra_select: str = "",
     *, detailed_metadata: bool = True,
 ) -> "DataFrame":
     """Read the source over JDBC into a cached frame with explicit predicates.

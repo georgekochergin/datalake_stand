@@ -15,6 +15,7 @@ LOG = logging.getLogger(__name__)
 
 _ApplicationInventory = Mapping[str, Mapping[str, str]]
 
+
 class SparkGuardError(RuntimeError):
     """Refuse submission when the master cannot prove safe admission."""
 

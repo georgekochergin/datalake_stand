@@ -1,7 +1,7 @@
 # Graph Report - datalake_stand  (2026-11-20)
 
 ## Corpus Check
-- 183 files · ~155,821 words
+- 183 files · ~155,825 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 14 file(s) not represented in the graph (top: (none) 9, .properties 3, .conf 1)
 
@@ -11,7 +11,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `a68b0169`
+- Built from commit: `556df18b`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -871,7 +871,7 @@ Nodes (3): Журнал, Модель данных, Содержание
   .specify/templates/tasks-template.md · relation: references
 
 ## Knowledge Gaps
-- **104 isolated node(s):** `TEST_FAILURE_LOG_DIR`, `conf/spark/spark-defaults.conf`, `conf/airflow/requirements.txt`, `conf/spark/Dockerfile`, `ingestion/generator/requirements.txt` (+99 more)
+- **104 isolated node(s):** `TEST_FAILURE_LOG_DIR`, `conf/spark/spark-defaults.conf`, `$speckit-github-taskstoissues (github extension)`, `pg-catalog — база метаданных Nessie`, `GenerateProcessIdOperator` (+99 more)
   These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 1498 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
 - **44 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
@@ -879,15 +879,15 @@ Nodes (3): Журнал, Модель данных, Содержание
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `AGENTS.md — инструкции проекта datalake_stand` connect `README — стенд хранилища и озера данных` to `speckit.taskstoissues.md`, `Architecture Documentation`, `Dev Tooling Documentation`, `extending.md`, `constitution.md`?**
-  _High betweenness centrality (0.133) - this node is a cross-community bridge._
+  _High betweenness centrality (0.145) - this node is a cross-community bridge._
 - **Are the 28 inferred relationships involving `RdbmsDialect` (e.g. with `Контекст` and `Предпочтительный путь решения`) actually correct?**
   _`RdbmsDialect` has 28 INFERRED edges - model-reasoned connections that need verification._
-- **What connects `TEST_FAILURE_LOG_DIR`, `conf/spark/spark-defaults.conf`, `conf/airflow/requirements.txt` to the rest of the system?**
+- **What connects `TEST_FAILURE_LOG_DIR`, `conf/spark/spark-defaults.conf`, `$speckit-github-taskstoissues (github extension)` to the rest of the system?**
   _104 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `keys` be split into smaller, more focused modules?**
   _Cohesion score 0.07337662337662337 - nodes in this community are weakly interconnected._
 - **Why does `services` connect `Docker Compose Layout` to `Sydafa Service Compose`, `Nessie Catalog Config`, `Compose Environment Vars`, `Init Services Compose`, `spark-worker`, `Airflow Services Compose`, `Postgres Services Compose`, `Test Runner Service`, `Silo Service Compose`?**
-  _High betweenness centrality (0.110) - this node is a cross-community bridge._
+  _High betweenness centrality (0.111) - this node is a cross-community bridge._
 - **Are the 2 inferred relationships involving `generate_all()` (e.g. with `IncrementalEntityConfig` and `SourceConfig`) actually correct?**
   _`generate_all()` has 2 INFERRED edges - model-reasoned connections that need verification._
 

@@ -206,7 +206,7 @@ def temporal_lookback_default(schedule: str | None) -> tuple[int, str]:
     return (3, "h") if len(minutes) * len(hours) >= 2 else (3, "d")
 
 
-def _parse_dag_fields(raw: dict, label: str) -> dict:
+def _parse_dag_fields(raw: dict[str, object], label: str) -> dict[str, str | tuple[str, ...] | None]:
     """Validate common DAG fields without widening either YAML allowlist."""
     schedule = raw.get("schedule")
     if schedule is not None:

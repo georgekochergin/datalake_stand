@@ -57,7 +57,7 @@ class RdbmsDialect:
         """Render the calendar-day number of a temporal column reference."""
         raise NotImplementedError
 
-    def reader_options(self) -> dict:
+    def reader_options(self) -> dict[str, str]:
         """JDBC reader options required by the engine."""
         return {"preferTimestampNTZ": "true"}
 

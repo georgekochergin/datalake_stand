@@ -1,6 +1,6 @@
 """Window preparation for the incremental flow: frozen predicates and the exact position."""
 
-from argparse import Namespace
+import argparse
 from typing import TYPE_CHECKING
 
 from ingestion.sources.rdbms import positions
@@ -35,7 +35,7 @@ def position_select(dialect: RdbmsDialect, kind: str, incremental_column: str) -
 
 
 def read_window_frame(
-    spark: "SparkSession", args: Namespace, batch: "DbRow", kind: str, *, detailed_metadata: bool = True,
+    spark: "SparkSession", args: argparse.Namespace, batch: "DbRow", kind: str, *, detailed_metadata: bool = True,
 ) -> "DataFrame":
     """Read the frozen batch window into a cached frame via the shared JDBC reader."""
     dialect = dialects.by_jdbc_url(args.jdbc_url)
