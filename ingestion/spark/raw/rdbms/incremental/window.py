@@ -14,15 +14,18 @@ if TYPE_CHECKING:
     from ingestion.meta import DbRow
 
 
+def position_filter(dialect: RdbmsDialect, column: str, op: str, value: str, kind: str) -> str:
+    """Render a bound against an already quoted incremental column."""
+    return f"{column} {op} {dialect.position_literal(positions.canonical(value, kind), kind)}"
+
+
 def window_filters(dialect: RdbmsDialect, batch: "DbRow", kind: str, incremental_column: str) -> list[str]:
     """SQL predicates of the frozen batch window over the incremental column."""
     column = dialect.quote_identifier(incremental_column)
     filters = []
     for key, op in (("lower_bound", batch["lower_bound_op"]), ("upper_bound", "<=")):
         if batch[key] is not None:
-            filters.append(
-                f"{column} {op} {dialect.position_literal(positions.canonical(batch[key], kind), kind)}"
-            )
+            filters.append(position_filter(dialect, column, op, batch[key], kind))
     if batch["empty_at_plan"]:
         filters.append("1=0")
     return filters
@@ -36,13 +39,17 @@ def position_select(dialect: RdbmsDialect, kind: str, incremental_column: str) -
 
 def read_window_frame(
     spark: "SparkSession", args: argparse.Namespace, batch: "DbRow", kind: str, *, detailed_metadata: bool = True,
+    source: reader.ReadSource | None = None,
+    bounds: tuple[reader.PartitionBound, reader.PartitionBound] | None = None,
 ) -> "DataFrame":
     """Read the frozen batch window into a cached frame via the shared JDBC reader."""
     dialect = dialects.by_jdbc_url(args.jdbc_url)
-    filters = window_filters(dialect, batch, kind, args.incremental_column)
-    extra_select = position_select(dialect, kind, args.incremental_column)
+    info = source.keys.columns.get(args.incremental_column.lower()) if source is not None else None
+    column = info.name if info is not None else args.incremental_column
+    filters = window_filters(dialect, batch, kind, column)
+    extra_select = position_select(dialect, kind, column)
     return reader.read_extract_frame(spark, args, filters=filters, extra_select=extra_select,
-                                     detailed_metadata=detailed_metadata)
+                                     detailed_metadata=detailed_metadata, source=source, bounds=bounds)
 
 
 def window_summary(frame: "DataFrame", kind: str) -> tuple[int, str | None, "DataFrame"]:

@@ -53,10 +53,6 @@ class RdbmsDialect:
         """Return a source-side read expression for special types, else None."""
         return None
 
-    def day_expression(self, reference: str) -> str:
-        """Render the calendar-day number of a temporal column reference."""
-        raise NotImplementedError
-
     def reader_options(self) -> dict[str, str]:
         """JDBC reader options required by the engine."""
         return {"preferTimestampNTZ": "true"}

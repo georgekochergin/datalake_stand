@@ -2,10 +2,7 @@
 
 Pure strategy over JDBC key metadata: no Spark imports and no SQL predicate
 construction — Spark's partitionColumn mode builds the range predicates
-itself. The module owns the four-step column heuristic, the calendar-day
-derivative of timestamp columns, its read alias and the plan() composition
-of the decision for one read; dialects own the SQL rendering rules, and
-jdbc.py owns the metadata access.
+itself. The module owns the three-step column heuristic.
 """
 
 import logging
@@ -22,11 +19,6 @@ LOGGER = logging.getLogger(__name__)
 STEP_PRIMARY_KEY = "primary_key"
 STEP_UNIQUE_INTEGER = "unique_integer"
 STEP_DATE = "date"
-STEP_TIMESTAMP_DAY = "timestamp_day"
-
-DAY_ALIAS = "__jdbc_day"
-
-TIMESTAMP_FAMILIES = ("local", "instant")
 
 
 @dataclass(frozen=True)
@@ -36,24 +28,6 @@ class PartitionChoice:
     column: str
     kind: str
     step: str
-    derived: bool
-
-
-def partition_name(choice: PartitionChoice) -> str:
-    """The partitionColumn option value: the day alias or the column itself."""
-    return DAY_ALIAS if choice.derived else choice.column
-
-
-def day_expression(dialect: RdbmsDialect, keys: jdbc.KeyMetadata, choice: PartitionChoice) -> str:
-    """Render the calendar-day derivative of the chosen timestamp column.
-
-    Time-zone types derive from the dialect's UTC projection, mirroring the
-    position expression; every other type derives straight from the column.
-    """
-    info = keys.columns[choice.column.lower()]
-    reference = f"extract_source.{dialect.quote_identifier(info.name)}"
-    projected = dialect.column_projection(info.type_name, reference)
-    return dialect.day_expression(projected or reference)
 
 
 def _family(dialect: RdbmsDialect, info: jdbc.ColumnMeta) -> str | None:
@@ -96,44 +70,34 @@ def choose(dialect: RdbmsDialect, keys: jdbc.KeyMetadata) -> PartitionChoice | N
 
     Steps, in order: a single-column primary key of integral type; an
     integral NOT NULL column backed by a single-column unique index; a NOT
-    NULL date column; a NOT NULL timestamp column partitioned by its
-    calendar-day derivative. Candidates inside a step are interchangeable,
+    NULL date column. Candidates inside a step are interchangeable,
     so the first in normalized-name order wins and JDBC-driver row order
     never decides. No candidate means a single-threaded read.
     """
     if len(keys.primary_key) == 1:
         info = keys.columns.get(keys.primary_key[0].lower())
         if info is not None and _family(dialect, info) == "integral":
-            return PartitionChoice(info.name, jdbc.column_position_kind(dialect, info), STEP_PRIMARY_KEY, False)
+            return PartitionChoice(info.name, jdbc.column_position_kind(dialect, info), STEP_PRIMARY_KEY)
     LOGGER.info("jdbc partitioning: step=%s rejected; requires a single integral PK", STEP_PRIMARY_KEY)
     unique_infos = [
         keys.columns[name.lower()] for name in keys.unique_columns
         if name.lower() in keys.columns
     ]
-    for step, infos, families, derived in (
-        (STEP_UNIQUE_INTEGER, unique_infos, ("integral",), False),
-        (STEP_DATE, keys.columns.values(), ("date",), False),
-        (STEP_TIMESTAMP_DAY, keys.columns.values(), TIMESTAMP_FAMILIES, True),
+    for step, infos, families in (
+        (STEP_UNIQUE_INTEGER, unique_infos, ("integral",)),
+        (STEP_DATE, keys.columns.values(), ("date",)),
     ):
         info = _first_candidate(dialect, infos, families)
         if info is not None:
-            return PartitionChoice(info.name, jdbc.column_position_kind(dialect, info), step, derived)
+            return PartitionChoice(info.name, jdbc.column_position_kind(dialect, info), step)
         LOGGER.info("jdbc partitioning: step=%s rejected; no NOT NULL candidate of family %s", step, families)
     return None
 
 
 def plan(
     dialect: RdbmsDialect, keys: jdbc.KeyMetadata, source_table: str,
-) -> tuple[PartitionChoice | None, str | None]:
-    """Compose the partitioning decision for one read over observed metadata.
-
-    Returns (partition, extra_select): partition is None when the heuristic
-    found no candidate (a warning names the table and lists the observed
-    metadata) or when a source column collides with the day alias (a
-    warning names the alias); the extra_select fragment carries the derived
-    day expression appended to the read query. The caller owns the
-    partitioning switch and the metadata access.
-    """
+) -> PartitionChoice | None:
+    """Choose a partition column and log the result of the heuristic."""
     log_step(LOGGER, "choose JDBC partition column")
     partition = choose(dialect, keys)
     if partition is None:
@@ -143,20 +107,7 @@ def plan(
                 "single-threaded read; %s",
                 source_table, no_candidate_reason(dialect, keys),
             )
-        return None, None
-    LOGGER.info("jdbc partitioning: selected column=%s step=%s kind=%s derived=%s tie_break=normalized_name",
-                partition.column, partition.step, partition.kind, partition.derived)
-    if not partition.derived:
-        return partition, None
-    if DAY_ALIAS in keys.columns:
-        LOGGER.warning(
-            "jdbc partitioning: source column %s collides with the day alias;"
-            " single-threaded read",
-            DAY_ALIAS,
-        )
-        return None, None
-    day_select = (
-        f", {day_expression(dialect, keys, partition)}"
-        f" AS {dialect.quote_identifier(DAY_ALIAS)}"
-    )
-    return partition, day_select
+        return None
+    LOGGER.info("jdbc partitioning: selected column=%s step=%s kind=%s tie_break=normalized_name",
+                partition.column, partition.step, partition.kind)
+    return partition

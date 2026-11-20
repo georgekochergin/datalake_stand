@@ -8,25 +8,13 @@ entities only — full-slice loads and snapshot flows never call it.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Literal
 
 from . import LOG, DbConnect, DbCursor, DbRow, _execute, _operation, _row
 
 _CalculateLower = Callable[[str | None], tuple[str | None, str]]
+_ProbeUpper = Callable[[str | None, str], str | None]
 _ComparePositions = Callable[[str, str | None], int]
-
-
-@dataclass(frozen=True)
-class _IncrementalConfig:
-    """Configuration for incremental extraction bounds computation."""
-
-    column: str | None
-    type: str | None
-    lookback_size: int
-    lookback_unit: str | None
-    calculate_lower: _CalculateLower | None
-    compare_positions: _ComparePositions | None
 
 
 def _check_contract(state: DbRow, column: str | None, incremental_type: str | None) -> None:
@@ -98,58 +86,26 @@ def _batch_reason(watermark: str | None) -> Literal["bootstrap", "regular"]:
     return "bootstrap" if watermark is None else "regular"
 
 
-def _incremental_bounds(
-    watermark: str | None, upper_bound: str | None, empty_at_plan: bool,
-    incremental_config: _IncrementalConfig,
-) -> tuple[str | None, str, str | None, bool, int, str | None]:
-    """Compute window bounds with the actually applied lower operator.
-
-    Returns (lower, lower_op, upper_bound, empty_at_plan, lookback_size,
-    lookback_unit). Raises ValueError on source regression or configuration
-    errors. calculate_lower(watermark) returns the (lower, op) pair, with
-    None as the lower bound on underflow.
-    """
-    if upper_bound is not None and incremental_config.compare_positions is not None and \
-            incremental_config.compare_positions(upper_bound, watermark) < 0:
-        raise ValueError("Source maximum regressed below the committed watermark")
-    if incremental_config.calculate_lower is None:
-        if incremental_config.lookback_size:
-            raise ValueError("Nonzero lookback requires calculate_lower")
-        return watermark, ">", upper_bound, empty_at_plan, \
-            incremental_config.lookback_size, incremental_config.lookback_unit
-    lower, op = incremental_config.calculate_lower(watermark)
-    return lower, op, upper_bound, empty_at_plan, \
-        incremental_config.lookback_size, incremental_config.lookback_unit
-
-
 def plan_batch(
     *, process_id: int, dag_id: str, run_id: str, source_id: str,
     entity_fqn: str, target_table: str, incremental_column: str, incremental_type: str,
-    upper_bound: str | None, empty_at_plan: bool, lookback_size: int = 0,
+    upper_bound: str | None = None, empty_at_plan: bool = False, lookback_size: int = 0,
     lookback_unit: str | None = None, calculate_lower: _CalculateLower | None = None,
-    compare_positions: _ComparePositions | None = None, db_connect: DbConnect,
+    probe_upper: _ProbeUpper | None = None, db_connect: DbConnect,
 ) -> DbRow | None:
     """Persist fixed bounds once and return the original batch on retry.
 
     The registry serves incremental entities only; full-slice loads and
     snapshot flows never call it. The batch identity is (process_id,
     source_id, entity_fqn): retries of one execution replan into the same
-    frozen window, a fresh execution plans a fresh batch. calculate_lower is
-    described in _incremental_bounds. Call get_batch before querying a new
-    source maximum.
+    frozen window, a fresh execution plans a fresh batch. The optional source
+    probe receives the actual lower predicate under the state lock so its
+    result and the frozen lower bound always use the same revision.
     """
     if incremental_column is None or incremental_type is None:
         raise ValueError("The incremental registry requires an incremental column and type")
     if type(lookback_size) is not int or not 0 <= lookback_size <= 10**38 - 1:
         raise ValueError("lookback_size must be a nonnegative integer of at most 38 digits")
-    incremental_config = _IncrementalConfig(
-        column=incremental_column,
-        type=incremental_type,
-        lookback_size=lookback_size,
-        lookback_unit=lookback_unit,
-        calculate_lower=calculate_lower,
-        compare_positions=compare_positions,
-    )
     with _operation(db_connect, "plan_batch", process_id=process_id, source_id=source_id,
                     entity_fqn=entity_fqn) as (cur, changes):
         _execute(cur,
@@ -175,9 +131,15 @@ def plan_batch(
             return batch
         watermark = state["watermark"]
         reason = _batch_reason(watermark)
-        lower, lower_op, upper_bound, empty_at_plan, lookback_size, lookback_unit = _incremental_bounds(
-            watermark, upper_bound, empty_at_plan, incremental_config
-        )
+        if calculate_lower is None:
+            if lookback_size:
+                raise ValueError("Nonzero lookback requires calculate_lower")
+            lower, lower_op = watermark, ">"
+        else:
+            lower, lower_op = calculate_lower(watermark)
+        if probe_upper is not None:
+            upper_bound = probe_upper(lower, lower_op)
+            empty_at_plan = upper_bound is None
         _execute(cur,
             "INSERT INTO ingestion.incremental_batches "
             "(process_id, dag_id, run_id, source_id, entity_fqn, target_table, reason, "

@@ -9,6 +9,7 @@ entities:
       contract:
         source_column: _batch_id
         position_type: decimal(19,0)
+        check_not_null: false
       act_snap:
         airflow:
           pool:
