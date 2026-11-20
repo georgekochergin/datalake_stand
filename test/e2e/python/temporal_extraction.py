@@ -3,7 +3,6 @@
 
 import importlib.util
 import os
-import re
 from argparse import ArgumentParser, Namespace
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
@@ -33,7 +32,7 @@ def unregister_virtual(fqn):
 
 
 @contextmanager
-def virtual_sources(*modules):
+def virtual_sources():
     """Let the unchanged loader read virtual fixtures through their stable FQNs.
 
     The loader resolves sources strictly through schema.table FQNs; registered
@@ -59,8 +58,6 @@ def virtual_sources(*modules):
     with ExitStack() as stack:
         stack.enter_context(patch.object(reader_pkg, "render_source_table", render))
         stack.enter_context(patch.object(jdbc_pkg, "key_metadata", keys))
-        for module in modules:
-            stack.enter_context(patch.object(module, "render_source_table", render))
         yield
 
 
@@ -69,7 +66,7 @@ def render_source_reference(dialect, source_table):
     fixture = VIRTUAL_SOURCES.get(source_table)
     if fixture:
         return fixture["sql"]
-    reader = load_module("reader", "/opt/spark-jobs/raw/rdbms/reader.py")
+    from ingestion.spark.raw.rdbms import reader
     return reader.render_source_table(dialect, source_table)
 
 
@@ -144,28 +141,35 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
         no_jdbc_partitioning=True, num_partitions=1,
         dag_id="e2e_temporal_extraction", run_id=None,
         process_id=None, lookback_size=0, lookback_unit=None,
-        position_type=expected_kind,
+        position_type=expected_kind, check_not_null=False,
     )
     if fixture is not None:
         register_virtual(table, *fixture)
     try:
-        with virtual_sources(load_entity):
+        with virtual_sources():
             require(metadata_row(hook, "incremental_state", args.source_id, table) is None,
                     target + " starts with fresh isolated metadata")
             require(not spark.catalog.tableExists(args.target_table), target + " starts with fresh raw table")
-            kind, upper, empty, has_null = load_entity.source_position(spark, args)
-            require(kind == expected_kind, f"{target} exact JDBC kind is {expected_kind}, got {kind}")
+            from ingestion.spark.raw.rdbms import reader
+
+            read_source = reader.inspect_source(spark, args)
+            info = load_entity.source_column(read_source, args, check_not_null=False)
+            kind = expected_kind
+            upper, _ = reader.probe_bounds(
+                spark, args, read_source, [f"{read_source.dialect.quote_identifier(info.name)} IS NOT NULL"],
+                scope=reader.JdbcReadScope.SOURCE_TABLE, incremental=(info.name, kind),
+            )
             declared = args.position_type
             args.position_type = "bigint"
             try:
-                load_entity.source_kind(spark, args)
+                load_entity.source_column(read_source, args, check_not_null=False)
             except ValueError as error:
                 require("Incremental type mismatch" in str(error), target + " rejects wrong declared type")
             else:
                 raise AssertionError(target + " accepted a wrong declared type")
             finally:
                 args.position_type = declared
-            require(not empty and not has_null and upper is not None, target + " has non-null temporal data")
+            require(upper is not None, target + " has non-null temporal data")
             if expected_upper is not None:
                 require(upper == expected_upper, target + " source MAX preserves full fractional precision")
                 digits = upper.removesuffix("Z")
@@ -203,7 +207,7 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
                 require(batch["finished_at"] is not None, label + " finalized cleanly")
                 require(batch["incremental_type"] == kind and state["incremental_type"] == kind,
                         label + " persists original JDBC kind")
-                require(batch["lower_bound"] == lower and batch["upper_bound"] == bound,
+                require(batch["lower_bound"] == lower and batch["upper_bound"] == (bound if expected_count else None),
                         label + " frozen exact lower/upper bounds")
                 require(batch["lower_bound_op"] == lower_op, label + " persisted applied lower operator")
                 require(batch["watermark_before"] == watermark, label + " retains previous watermark")
@@ -286,12 +290,12 @@ def check_post_append_retry(spark, hook, jdbc, token):
         run_id=token, process_id=meta.allocate_process_id(
             dag_id="e2e_post_append_retry", run_id=token, db_connect=hook.get_conn),
         lookback_size=0, lookback_unit=None,
-        position_type="bigint",
+        position_type="bigint", check_not_null=True,
     )
     register_virtual(args.source_table, "(SELECT CAST(1 AS bigint) AS position) retry_fixture",
                      {"position": jdbc_pkg.ColumnMeta("position", "BIGINT", 19, 0, True)})
     try:
-        with virtual_sources(load_entity):
+        with virtual_sources():
             with patch.object(registry, "finalize_batch", side_effect=RuntimeError("injected metadata failure")):
                 try:
                     load_entity.managed_load(spark, args)
@@ -334,7 +338,7 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
         source_id=f"e2e_snapshot_{source}", incremental_column="position",
         no_jdbc_partitioning=True, num_partitions=1, dag_id="e2e_snapshot_recovery",
         run_id=token, process_id=None, lookback_size=2, lookback_unit=None,
-        position_type="decimal(18,0)" if source == "broker" else "bigint",
+        position_type="decimal(18,0)" if source == "broker" else "bigint", check_not_null=True,
     )
 
     def allocate():
@@ -349,7 +353,7 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
         sql_type = "NUMBER(18,0)" if source == "broker" else "bigint"
         alias = '"position"' if source == "broker" else "position"
         query = " UNION ALL ".join(
-            f"SELECT CAST({value} AS {sql_type}) AS {alias}{suffix}"
+            f"SELECT CAST({value if value is not None else 'NULL'} AS {sql_type}) AS {alias}{suffix}"
             for value in values or (0,))
         if not values:
             query += " WHERE 1 = 0"
@@ -373,13 +377,13 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
     from ingestion.sources.rdbms import jdbc as jdbc_pkg
 
     sql_type, precision = ("NUMBER", 18) if source == "broker" else ("BIGINT", 19)
-    position_columns = {"position": jdbc_pkg.ColumnMeta("position", sql_type, precision, 0, True)}
+    position_columns = {"position": jdbc_pkg.ColumnMeta("position", sql_type, precision, 0, False)}
     register_virtual(args.source_table, projection(()), position_columns)
 
     def incremental(values):
         """Execute the unchanged loader with controlled JDBC source visibility."""
         register_virtual(args.source_table, projection(values), position_columns)
-        with virtual_sources(load_entity):
+        with virtual_sources():
             load_entity.managed_load(spark, args)
 
     snapshot_args = Namespace(**vars(args))
@@ -422,20 +426,29 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
     require(load_act_snap.current_snapshot_author(spark, snapshot_args.target_table) == args.process_id,
             f"{source}: first empty publication has an Iceberg author")
     allocate()
-    incremental(())
+    try:
+        incremental((None,))
+    except ValueError as error:
+        require("does not confirm NOT NULL" in str(error), f"{source}: strict contract rejects nullable metadata")
+    else:
+        raise AssertionError("strict contract accepted a nullable incremental column")
+    args.check_not_null = False
+    incremental((None,))
     require(metadata_row(hook, "incremental_state", args.source_id, args.source_table)["watermark"] is None,
             f"{source}: empty bootstrap preserves NULL watermark after snapshot")
     allocate()
-    incremental((12,))
+    incremental((None, 12))
     require(metadata_row(hook, "incremental_state", args.source_id, args.source_table)["watermark"] == "12",
             f"{source}: nonempty bootstrap advances watermark")
     allocate()
-    incremental((9, 11, 12))
+    incremental((9, 11))
     values = {int(row[0]) for row in spark.table(target).select("position").collect()}
     require(values == {11, 12}, f"{source}: late row inside lookback arrives, outside row is missed")
     batch = metadata_row(hook, "incremental_batches", args.source_id, args.source_table)
     require(batch["reason"] == "regular" and batch["lower_bound"] == "10",
             f"{source}: post-bootstrap execution uses the regular lookback window")
+    require(batch["upper_bound"] == "11" and batch["watermark_after"] == "12",
+            f"{source}: reads a slice below the watermark without moving it back")
     allocate()
     try:
         snapshot((9, 11, 12), crash=True)
@@ -502,117 +515,13 @@ def jdbc_count(spark, args, query):
         connection.close()
 
 
-def derived_day_frame(spark, reader, dialect, args, source_sql, info, kind):
-    """Read one temporal column through a partitioned calendar-day derivative."""
-    from ingestion.sources.rdbms import jdbc, jdbc_partitioning
-
-    choice = jdbc_partitioning.PartitionChoice(
-        info.name, kind, jdbc_partitioning.STEP_TIMESTAMP_DAY, True)
-    keys = jdbc.KeyMetadata((), (), {info.name.lower(): info})
-    expression = jdbc_partitioning.day_expression(dialect, keys, choice)
-    column = dialect.quote_identifier(info.name)
-    reference = f"extract_source.{column}"
-    projected = dialect.column_projection(info.type_name, reference) or reference
-    alias = dialect.quote_identifier(jdbc_partitioning.DAY_ALIAS)
-    query = (
-        f"(SELECT {projected} AS {column}, {expression} AS {alias} "
-        f"FROM (SELECT * FROM {source_sql}) extract_source) day_probe"
-    )
-    jdbc_reader = reader.jdbc_reader(spark, args, query)
-    low, high = reader.read_bounds(spark, args, query, jdbc_partitioning.DAY_ALIAS)
-    require(low is not None and high is not None and low != high,
-            f"derived day bounds of {info.name} span multiple calendar days")
-    return (jdbc_reader.option("partitionColumn", jdbc_partitioning.DAY_ALIAS)
-            .option("lowerBound", reader.bound_literal(low))
-            .option("upperBound", reader.bound_literal(high))
-            .option("numPartitions", 4).load())
-
-
-def check_partitioning(spark, source_jdbc):
-    """Prove heuristic metadata choice and real partitioned reads per engine."""
-    reader = load_module("reader", "/opt/spark-jobs/raw/rdbms/reader.py")
-    from ingestion.sources.rdbms import jdbc, jdbc_partitioning
-    from ingestion.sources.rdbms import registry as dialects
-
-    fixtures = (
-        ("bank", "retail_bank.transactions", "posting_date", "DATETIMEOFFSET",
-         "(SELECT CAST('2026-06-14T12:00:00+02:00' AS datetimeoffset) AS ts"
-         " UNION ALL SELECT CAST('2026-06-15T12:00:00+02:00' AS datetimeoffset) AS ts) zone_fixture",
-         7),
-        ("broker", "trading_core.transactions", "posting_date", "TIMESTAMP(6) WITH TIME ZONE",
-         '(SELECT CAST(TO_TIMESTAMP_TZ(\'2026-06-14T12:00:00\', \'YYYY-MM-DD"T"HH24:MI:SS\')'
-         ' AS TIMESTAMP(6) WITH TIME ZONE) AS "ts" FROM dual'
-         " UNION ALL"
-         ' SELECT CAST(TO_TIMESTAMP_TZ(\'2026-06-15T12:00:00\', \'YYYY-MM-DD"T"HH24:MI:SS\')'
-         ' AS TIMESTAMP(6) WITH TIME ZONE) AS "ts" FROM dual) zone_fixture',
-         None),
-    )
-    for source, table, column, zone_type, zone_sql, zone_scale in fixtures:
-        if source not in source_jdbc:
-            continue
-        jdbc_url, user, password = source_jdbc[source]
-        dialect = dialects.by_jdbc_url(jdbc_url)
-        args = Namespace(jdbc_url=jdbc_url, jdbc_user=user,
-                         jdbc_password=password, source_table=table)
-        keys = jdbc.key_metadata(spark._jvm, dialect, jdbc_url, user, password, table)
-        require(keys.primary_key == ("transaction_id",) and "transaction_id" in keys.columns,
-                f"{source}: JDBC metadata reports the single-column integer primary key")
-        choice = jdbc_partitioning.choose(dialect, keys)
-        require(choice is not None and choice.column == "transaction_id"
-                and choice.step == jdbc_partitioning.STEP_PRIMARY_KEY,
-                f"{source}: heuristic picks the primary key")
-        table_sql = reader.render_source_table(dialect, table)
-        total = jdbc_count(spark, args, table_sql)
-        require(total > 0, f"{source}: source table has rows")
-        day_info = keys.columns[column.lower()]
-        require(day_info is not None,
-                f"{source}: temporal column {column} present in metadata")
-        day_kind = dialect.position_kind(day_info.type_name, day_info.precision, day_info.scale)
-        day_frame = derived_day_frame(spark, reader, dialect, args, table_sql, day_info, day_kind)
-        simple = day_frame.schema[jdbc_partitioning.DAY_ALIAS].dataType.simpleString()
-        require(simple in ("int", "bigint") or re.fullmatch(r"decimal\(\d+,0\)", simple),
-                f"{source}: derived day column is integral in Spark ({simple})")
-        require(day_frame.count() == total,
-                f"{source}: derived-day partitioned read returns every row exactly once")
-        zone_info = jdbc.ColumnMeta("ts", zone_type, None, zone_scale, True)
-        zone_kind = dialect.position_kind(zone_info.type_name, zone_info.precision, zone_info.scale)
-        require(zone_kind.startswith("timestamp_instant"),
-                f"{source}: zone fixture column classifies as an instant")
-        zone_frame = derived_day_frame(spark, reader, dialect, args, zone_sql,
-                                       zone_info, zone_kind)
-        require(zone_frame.count() == 2,
-                f"{source}: time-zone derived-day partitioned read returns both fixture rows")
-        require(zone_frame.select(jdbc_partitioning.DAY_ALIAS).distinct().count() == 2,
-                f"{source}: fixture days map to distinct day numbers")
-        if source == "bank":
-            date_column = dialect.quote_identifier(column)
-            date_query = (
-                f"(SELECT extract_source.{date_column} AS {date_column} "
-                f"FROM (SELECT * FROM {table_sql}) extract_source) date_probe"
-            )
-            jdbc_reader = reader.jdbc_reader(spark, args, date_query)
-            low, high = reader.read_bounds(spark, args, date_query, column)
-            require(low is not None and high is not None and low != high,
-                    "bank: date column bounds span multiple days")
-            date_frame = (jdbc_reader.option("partitionColumn", column)
-                          .option("lowerBound", reader.bound_literal(low))
-                          .option("upperBound", reader.bound_literal(high))
-                          .option("numPartitions", 4).load())
-            require(date_frame.schema[column].dataType.simpleString() == "date",
-                    "bank: MSSQL date column reads as Spark DateType")
-            require(date_frame.count() == total,
-                    "bank: direct date partitioned read returns every row exactly once")
-
-
 def check_partitioned_load_path(spark, source_jdbc):
-    """Run the real read-and-append path with a forced date or timestamp step."""
-    reader = load_module("reader", "/opt/spark-jobs/raw/rdbms/reader.py")
+    """Run the real read-and-append path with a forced date or timestamp-only schema."""
+    from ingestion.spark.raw.rdbms import reader
     append = load_module("append", "/opt/spark-jobs/raw/append.py")
     from ingestion.sources.rdbms import jdbc, jdbc_partitioning
     from ingestion.sources.rdbms import registry as dialects
 
-    expected_steps = {"bank": jdbc_partitioning.STEP_DATE,
-                      "broker": jdbc_partitioning.STEP_TIMESTAMP_DAY}
     for source, table, column in (("bank", "retail_bank.transactions", "posting_date"),
                                    ("broker", "trading_core.transactions", "posting_date")):
         if source not in source_jdbc:
@@ -626,18 +535,22 @@ def check_partitioned_load_path(spark, source_jdbc):
         require(not spark.catalog.tableExists(target),
                 f"{source}: day-partition path starts with a fresh raw table")
         real_keys = jdbc.key_metadata(spark._jvm, dialect, jdbc_url, user, password, table)
-        forced_columns = dict(real_keys.columns)
-        original = forced_columns[column.lower()]
-        forced_columns[column.lower()] = jdbc.ColumnMeta(
-            original.name, original.type_name, original.precision, original.scale, True)
-        forced = jdbc.KeyMetadata((), (), forced_columns)
+        require(jdbc_partitioning.choose(dialect, real_keys).column == "transaction_id",
+                f"{source}: the real integer primary key wins")
+        original = real_keys.columns[column]
+        forced = jdbc.KeyMetadata((), (), {column: jdbc.ColumnMeta(
+            original.name, original.type_name, original.precision, original.scale, True)})
         choice = jdbc_partitioning.choose(dialect, forced)
-        require(choice is not None and choice.step == expected_steps[source],
-                f"{source}: without keys, with a NOT NULL {column}, the heuristic"
-                f" picks the {expected_steps[source]} step")
+        if source == "bank":
+            require(choice is not None and choice.step == jdbc_partitioning.STEP_DATE,
+                    "bank: date remains a partition candidate")
+        else:
+            require(choice is None, "broker: Oracle DATE carries time and is not a partition candidate")
         with patch.object(reader.jdbc, "key_metadata", return_value=forced):
             frame = reader.read_extract_frame(spark, args)
             try:
+                partitions = frame.rdd.getNumPartitions()
+                require((partitions > 1) == (source == "bank"), f"{source}: expected JDBC partition count")
                 rows = frame.count()
                 append.append_raw(spark, args.target_table, frame, rows, args.process_id)
             finally:
@@ -645,7 +558,7 @@ def check_partitioned_load_path(spark, source_jdbc):
         total = jdbc_count(spark, args, reader.render_source_table(dialect, table))
         require(rows == total, f"{source}: partitioned full-slice append writes every source row")
         schema_names = {field.name for field in spark.table(target).schema.fields}
-        require(jdbc_partitioning.DAY_ALIAS not in schema_names,
+        require("__jdbc_day" not in schema_names,
                 f"{source}: the day alias never reaches the raw schema")
         require(spark.table(target).count() == total,
                 f"{source}: raw rows match the source after the partitioned append")
@@ -685,7 +598,6 @@ def main():
             check_post_append_retry(spark, hook, source_jdbc["bank"], token)
         for source, jdbc in source_jdbc.items():
             check_snapshot_recovery(spark, hook, source, jdbc, token)
-        check_partitioning(spark, source_jdbc)
         check_partitioned_load_path(spark, source_jdbc)
         for source, table, kind in (
             ("bank", "retail_bank.transactions", "date"),

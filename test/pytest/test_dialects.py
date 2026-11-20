@@ -253,19 +253,6 @@ class TestMetadataLocation(unittest.TestCase):
 
 
 
-class TestDayExpression(unittest.TestCase):
-    """The calendar-day derivative rendering belongs to each dialect."""
-
-    def test_each_engine_renders_numeric_day(self):
-        expected = {"oracle": "CAST(TO_NUMBER(TO_CHAR(x, 'J')) AS NUMBER(10,0))",
-                    "mssql": "DATEDIFF(day, 0, x)"}
-        for dialect in registry.all_dialects():
-            with self.subTest(dialect=dialect.conn_type_aliases):
-                self.assertEqual(
-                    dialect.day_expression("x"), expected[dialect.conn_type_aliases[0]]
-                )
-
-
 class TestOracleIntegerKinds(unittest.TestCase):
     """Oracle integer type names map onto the persisted integral kinds."""
 
@@ -289,7 +276,6 @@ class TestBaseDialectContract(unittest.TestCase):
             lambda: dialect.quote_identifier("c"),
             lambda: dialect.position_kind("INT", 10, 0),
             lambda: dialect._typed_literal("2026-01-01", "date", 0),
-            lambda: dialect.day_expression("c"),
         ):
             with self.assertRaises(NotImplementedError):
                 call()

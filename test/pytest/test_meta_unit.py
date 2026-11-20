@@ -274,6 +274,19 @@ class TestPlanBatch(BatchTestCase):
         batch = self.plan(process_id=2, run_id="run2")
         self.assertEqual((batch["lower_bound"], batch["lower_bound_op"]), ("10", ">"))
 
+    def test_empty_probe_freezes_lower_bound_and_is_not_repeated(self):
+        self.finish(self.plan())
+        probes = []
+
+        def empty(lower, op):
+            probes.append((lower, op))
+            return None
+
+        first = self.plan(process_id=2, probe_upper=empty)
+        self.assertEqual(self.plan(process_id=2, probe_upper=empty), first)
+        self.assertEqual(probes, [("10", ">")])
+        self.assertEqual((first["upper_bound"], first["empty_at_plan"]), (None, True))
+
     def test_registry_serves_incremental_entities_only(self):
         for changes in ({"incremental_column": None}, {"incremental_type": None}):
             with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "requires an incremental"):
@@ -506,40 +519,9 @@ class TestProcessAndEvents(unittest.TestCase):
 class TestPureHelpers(unittest.TestCase):
     """Reason and bounds computation without a database."""
 
-    def config(self, **changes):
-        """Build the incremental config with overrides."""
-        values = dict(column="id", type="bigint", lookback_size=0, lookback_unit=None,
-                      calculate_lower=None, compare_positions=None)
-        values.update(changes)
-        return registry._IncrementalConfig(**values)
-
     def test_reason_matrix(self):
         self.assertEqual(registry._batch_reason(None), "bootstrap")
         self.assertEqual(registry._batch_reason("5"), "regular")
-
-    def test_incremental_bounds_regular(self):
-        bounds = registry._incremental_bounds("5", "10", False, self.config())
-        self.assertEqual(bounds, ("5", ">", "10", False, 0, None))
-
-    def test_incremental_bounds_lookback(self):
-        bounds = registry._incremental_bounds(
-            "5", "10", False,
-            self.config(lookback_size=2, lookback_unit=None,
-                        calculate_lower=lambda value: (str(int(value) - 2), ">=")),
-        )
-        self.assertEqual(bounds, ("3", ">=", "10", False, 2, None))
-
-    def test_incremental_bounds_regression_rejected(self):
-        with self.assertRaisesRegex(ValueError, "regressed"):
-            registry._incremental_bounds(
-                "10", "9", False,
-                self.config(compare_positions=lambda left, right: int(left) - int(right)),
-            )
-
-    def test_incremental_bounds_lookback_needs_calculator(self):
-        with self.assertRaisesRegex(ValueError, "calculate_lower"):
-            registry._incremental_bounds("5", "10", False, self.config(lookback_size=1))
-
 
 if __name__ == "__main__":
     unittest.main()

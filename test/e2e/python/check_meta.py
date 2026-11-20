@@ -173,14 +173,14 @@ class PostgresTests(unittest.TestCase):
                         "WHERE dag_id = %s AND run_id = %s AND status = 'START'", (self.source, "run"))
             self.assertEqual(cur.fetchone()[0], 2)
 
-    def test_regressed_source_maximum_is_rejected(self):
-        """Typed source regression rejects planning without creating a batch."""
+    def test_lower_source_maximum_keeps_watermark(self):
+        """An overlapping slice below the watermark may be committed without moving it back."""
         self.finish(self.plan())
-        with self.assertRaisesRegex(ValueError, "regressed"):
-            self.plan(process_id=2, run_id="run2", upper_bound="9",
-                      compare_positions=lambda left, right: int(left) - int(right))
-        self.assertIsNone(registry.get_batch(process_id=2, source_id=self.source,
-                                         entity_fqn="s.t", db_connect=self.connect))
+        batch = self.plan(process_id=2, run_id="run2", lookback_size=2,
+                          calculate_lower=lambda watermark: (str(int(watermark) - 2), ">"),
+                          probe_upper=lambda lower, op: "9")
+        self.assertEqual((batch["lower_bound"], batch["upper_bound"]), ("8", "9"))
+        self.assertEqual(self.finish(batch, observed="9")["watermark_after"], "10")
 
     def test_last_process_fk_rejects_unknown_batch(self):
         """The deferred composite FK rejects pointers to unknown batches at commit."""

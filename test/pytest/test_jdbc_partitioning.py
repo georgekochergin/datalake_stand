@@ -40,7 +40,7 @@ class StubKindDialect(RdbmsDialect):
 
 
 class TestChoose(unittest.TestCase):
-    """The four-step heuristic shared by every load mode."""
+    """The three-step heuristic shared by every load mode."""
 
     def choose(self, dialect, key_metadata):
         return jdbc_partitioning.choose(dialect, key_metadata)
@@ -50,8 +50,8 @@ class TestChoose(unittest.TestCase):
             primary_key=("transaction_id",),
             columns=[("transaction_id", "bigint"), ("updated_at", "datetime2")],
         ))
-        self.assertEqual((choice.column, choice.step, choice.derived),
-                         ("transaction_id", jdbc_partitioning.STEP_PRIMARY_KEY, False))
+        self.assertEqual((choice.column, choice.step),
+                         ("transaction_id", jdbc_partitioning.STEP_PRIMARY_KEY))
 
     def test_composite_pk_falls_through(self):
         choice = self.choose(MSSQL, keys(
@@ -59,8 +59,7 @@ class TestChoose(unittest.TestCase):
             columns=[("code", "nvarchar"), ("num", "bigint"),
                      ("updated_at", "datetime2", None, 7)],
         ))
-        self.assertEqual((choice.column, choice.step, choice.derived),
-                         ("updated_at", jdbc_partitioning.STEP_TIMESTAMP_DAY, True))
+        self.assertIsNone(choice)
 
     def test_non_integer_pk_falls_through(self):
         choice = self.choose(MSSQL, keys(
@@ -123,18 +122,15 @@ class TestChoose(unittest.TestCase):
             columns=[("maybe_date", "date", None, None, False),
                      ("updated_at", "datetime2", None, 7)],
         ))
-        self.assertEqual((choice.column, choice.step),
-                         ("updated_at", jdbc_partitioning.STEP_TIMESTAMP_DAY))
+        self.assertIsNone(choice)
 
-    def test_timestamp_step_is_derived(self):
+    def test_timestamp_is_not_a_candidate(self):
         choice = self.choose(ORACLE, keys(columns=[("updated_at", "TIMESTAMP(6) WITH TIME ZONE")]))
-        self.assertEqual((choice.column, choice.step, choice.derived),
-                         ("updated_at", jdbc_partitioning.STEP_TIMESTAMP_DAY, True))
+        self.assertIsNone(choice)
 
-    def test_oracle_date_is_timestamp_step(self):
+    def test_oracle_date_is_datetime_and_not_a_candidate(self):
         choice = self.choose(ORACLE, keys(columns=[("posting_date", "DATE")]))
-        self.assertEqual((choice.column, choice.step, choice.derived),
-                         ("posting_date", jdbc_partitioning.STEP_TIMESTAMP_DAY, True))
+        self.assertIsNone(choice)
 
     def test_oracle_number_with_scale_zero_is_integral(self):
         choice = self.choose(ORACLE, keys(primary_key=("id",),
@@ -190,60 +186,6 @@ class TestNoCandidateReason(unittest.TestCase):
         )
 
 
-class TestDayExpression(unittest.TestCase):
-    """Dialect rendering of the calendar-day derivative."""
-
-    def test_mssql_datediff_on_plain_column(self):
-        expression = jdbc_partitioning.day_expression(
-            MSSQL, keys(columns=[("updated_at", "datetime2")]),
-            jdbc_partitioning.PartitionChoice(
-                "updated_at", "timestamp_local(7)",
-                jdbc_partitioning.STEP_TIMESTAMP_DAY, True),
-        )
-        self.assertEqual(expression, "DATEDIFF(day, 0, extract_source.[updated_at])")
-
-    def test_mssql_datetimeoffset_partitioned_by_column_itself(self):
-        expression = jdbc_partitioning.day_expression(
-            MSSQL, keys(columns=[("stamp", "datetimeoffset")]),
-            jdbc_partitioning.PartitionChoice(
-                "stamp", "timestamp_instant(7)",
-                jdbc_partitioning.STEP_TIMESTAMP_DAY, True),
-        )
-        self.assertEqual(expression, "DATEDIFF(day, 0, extract_source.[stamp])")
-
-    def test_oracle_julian_day_on_plain_column(self):
-        expression = jdbc_partitioning.day_expression(
-            ORACLE, keys(columns=[("updated_at", "TIMESTAMP(6)")]),
-            jdbc_partitioning.PartitionChoice(
-                "updated_at", "timestamp_local(6)",
-                jdbc_partitioning.STEP_TIMESTAMP_DAY, True),
-        )
-        self.assertEqual(
-            expression,
-            'CAST(TO_NUMBER(TO_CHAR(extract_source."updated_at", \'J\')) AS NUMBER(10,0))',
-        )
-
-    def test_oracle_time_zone_derives_from_utc_projection(self):
-        expression = jdbc_partitioning.day_expression(
-            ORACLE, keys(columns=[("updated_at", "TIMESTAMP(6) WITH TIME ZONE")]),
-            jdbc_partitioning.PartitionChoice(
-                "updated_at", "timestamp_instant(6)",
-                jdbc_partitioning.STEP_TIMESTAMP_DAY, True),
-        )
-        self.assertEqual(
-            expression,
-            'CAST(TO_NUMBER(TO_CHAR(SYS_EXTRACT_UTC(extract_source."updated_at"), \'J\'))'
-            ' AS NUMBER(10,0))',
-        )
-
-    def test_partition_name_direct_and_derived(self):
-        direct = jdbc_partitioning.PartitionChoice("id", "bigint", jdbc_partitioning.STEP_PRIMARY_KEY, False)
-        derived = jdbc_partitioning.PartitionChoice("ts", "timestamp_local(0)",
-                                                    jdbc_partitioning.STEP_TIMESTAMP_DAY, True)
-        self.assertEqual(jdbc_partitioning.partition_name(direct), "id")
-        self.assertEqual(jdbc_partitioning.partition_name(derived), jdbc_partitioning.DAY_ALIAS)
-
-
 class TestPlan(unittest.TestCase):
     """Composition of the partitioning decision for one read."""
 
@@ -253,25 +195,16 @@ class TestPlan(unittest.TestCase):
         self.dialect = registry.by_conn_type("mssql")
         self.oracle = registry.by_conn_type("oracle")
 
-    def test_plain_column_has_no_extra_select(self):
+    def test_plan_returns_direct_column(self):
         metadata = keys(primary_key=["id"], columns=[("id", "int")])
-        partition, extra_select = jdbc_partitioning.plan(self.dialect, metadata, "s.t")
+        partition = jdbc_partitioning.plan(self.dialect, metadata, "s.t")
         self.assertEqual((partition.column, partition.step), ("id", jdbc_partitioning.STEP_PRIMARY_KEY))
-        self.assertIsNone(extra_select)
-
-    def test_derived_day_appends_select_fragment(self):
-        metadata = keys(columns=[("updated_at", "TIMESTAMP(6)")])
-        partition, extra_select = jdbc_partitioning.plan(self.oracle, metadata, "s.t")
-        self.assertEqual(partition.step, jdbc_partitioning.STEP_TIMESTAMP_DAY)
-        self.assertIn("TO_NUMBER(TO_CHAR", extra_select)
-        self.assertIn(f'AS "{jdbc_partitioning.DAY_ALIAS}"', extra_select)
 
     def test_no_candidate_warns_with_table_and_metadata(self):
         metadata = keys(primary_key=["code", "num"], columns=[("code", "nvarchar"), ("num", "int")])
         with self.assertLogs(jdbc_partitioning.LOGGER, level="WARNING") as logs:
-            partition, extra_select = jdbc_partitioning.plan(self.dialect, metadata, "retail_bank.clients")
+            partition = jdbc_partitioning.plan(self.dialect, metadata, "retail_bank.clients")
         self.assertIsNone(partition)
-        self.assertIsNone(extra_select)
         self.assertTrue(any(
             "no partition column found for retail_bank.clients" in line
             and "code nvarchar unsupported" in line
@@ -280,17 +213,8 @@ class TestPlan(unittest.TestCase):
 
     def test_unavailable_metadata_is_silent(self):
         with self.assertNoLogs(jdbc_partitioning.LOGGER, level="WARNING"):
-            partition, extra_select = jdbc_partitioning.plan(self.dialect, keys(), "s.t")
+            partition = jdbc_partitioning.plan(self.dialect, keys(), "s.t")
         self.assertIsNone(partition)
-
-    def test_day_alias_collision_warns_and_disables(self):
-        metadata = keys(columns=[("updated_at", "TIMESTAMP(6)"), ("__jdbc_day", "NUMBER", 10, 0)])
-        with self.assertLogs(jdbc_partitioning.LOGGER, level="WARNING") as logs:
-            partition, extra_select = jdbc_partitioning.plan(self.oracle, metadata, "s.t")
-        self.assertIsNone(partition)
-        self.assertIsNone(extra_select)
-        self.assertTrue(any("collides with the day alias" in line for line in logs.output), logs.output)
-
 
 if __name__ == "__main__":
     unittest.main()

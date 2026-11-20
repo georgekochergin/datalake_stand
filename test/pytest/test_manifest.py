@@ -301,6 +301,17 @@ class TestLoadPipeline(unittest.TestCase):
                 )
 
     @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
+    def test_check_not_null_requires_yaml_boolean(self):
+        template = (
+            "source_id: bank\nentities:\n  - fqn: retail_bank.transactions\n"
+            "    incremental: {contract: {source_column: id, position_type: bigint, check_not_null: %s}}\n"
+        )
+        entity = manifest.load_pipeline(write_temp_yaml(template % "false")).entities[0]
+        self.assertIs(entity.incremental_config["contract"]["check_not_null"], False)
+        with self.assertRaisesRegex(ValueError, "check_not_null must be a boolean"):
+            manifest.load_pipeline(write_temp_yaml(template % "'false'"))
+
+    @unittest.skipUnless(YAML_AVAILABLE, "PyYAML is not installed")
     def test_explicit_lookback_replaces_default_entirely(self):
         entity = manifest.load_pipeline(write_temp_yaml(
             "source_id: bank\nschedule: '*/15 * * * *'\nentities:\n"
