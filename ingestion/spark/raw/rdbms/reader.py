@@ -15,6 +15,7 @@ import logging
 from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
+from enum import Enum
 from typing import TYPE_CHECKING
 
 from ingestion.logging import log_sql, log_step
@@ -32,6 +33,20 @@ if TYPE_CHECKING:
 _PartitionBound = int | Decimal | date | None
 
 LOGGER = logging.getLogger(__name__)
+
+
+class JdbcReadScope(Enum):
+    """Describe the query context in JDBC logs without changing the read.
+
+    BATCH_WINDOW marks an extract with caller-supplied filters or additional
+    select expressions. SOURCE_TABLE marks an extract without either, even
+    when JDBC partitioning adds its own select expression. READ_QUERY marks
+    a standalone bounds probe with no extract context.
+    """
+
+    BATCH_WINDOW = "batch_window"
+    SOURCE_TABLE = "source_table"
+    READ_QUERY = "read_query"
 
 
 def render_source_table(dialect: RdbmsDialect, source_table: str) -> str:
@@ -82,8 +97,14 @@ def long_representable(*values: int | Decimal) -> bool:
     return all(-(2 ** 63) <= int(value) <= 2 ** 63 - 1 for value in values)
 
 
+def _integral_bounds_out_of_long_range(kind: str, low: int | Decimal, high: int | Decimal) -> bool:
+    """Check whether an integral partition exceeds Spark's signed 64-bit bound range."""
+    return positions.kind_info(kind)[0] == "integral" and not long_representable(low, high)
+
+
 def read_bounds(
-    spark: "SparkSession", args: argparse.Namespace, read_query: str, column: str, *, scope: str = "read_query",
+    spark: "SparkSession", args: argparse.Namespace, read_query: str, column: str,
+    *, scope: JdbcReadScope = JdbcReadScope.READ_QUERY,
 ) -> tuple[_PartitionBound, _PartitionBound]:
     """Read MIN/MAX of the partition column over the read query (one-row JDBC read)."""
     column_ref = dialects.by_jdbc_url(args.jdbc_url).quote_identifier(column)
@@ -92,7 +113,7 @@ def read_bounds(
         f"FROM {read_query}) bounds"
     )
     log_step(LOGGER, "probe JDBC partition bounds")
-    log_sql(LOGGER, f"JDBC SQL scope={scope} operation=partition_bounds", query)
+    log_sql(LOGGER, f"JDBC SQL scope={scope.value} operation=partition_bounds", query)
     frame = jdbc_reader(spark, args, query).load()
     row = frame.collect()[0]
     LOGGER.info("JDBC result operation=partition_bounds lower_bound=%s upper_bound=%s", row[0], row[1])
@@ -118,7 +139,7 @@ def build_extract_query(
 
 def apply_partition_options(
     spark: "SparkSession", args: argparse.Namespace, reader: "DataFrameReader", query: str,
-    partition: jdbc_partitioning.PartitionChoice | None, *, scope: str,
+    partition: jdbc_partitioning.PartitionChoice | None, *, scope: JdbcReadScope,
 ) -> tuple["DataFrameReader", _PartitionBound, _PartitionBound]:
     """Probe MIN/MAX of the partition column and enable parallel ranges.
 
@@ -132,7 +153,8 @@ def apply_partition_options(
     reference = jdbc_partitioning.partition_name(partition)
     low, high = read_bounds(spark, args, query, reference, scope=scope)
     parallel = low is not None and high is not None and low != high
-    if parallel and positions.kind_info(partition.kind)[0] == "integral" and not long_representable(low, high):
+    out_of_long_range = parallel and _integral_bounds_out_of_long_range(partition.kind, low, high)
+    if out_of_long_range:
         LOGGER.warning(
             "jdbc partitioning: bounds of %s [%s..%s] exceed the signed 64-bit"
             " range Spark parses for partition bounds; single-threaded read",
@@ -144,9 +166,12 @@ def apply_partition_options(
                     "null_bounds" if low is None or high is None else
                     "equal_bounds" if low == high else "out_of_long_range")
         return reader, low, high
-    reader = reader.option("partitionColumn", reference).option(
-        "lowerBound", bound_literal(low)).option("upperBound", bound_literal(high)).option(
-        "numPartitions", args.num_partitions)
+    reader = (
+        reader.option("partitionColumn", reference)
+        .option("lowerBound", bound_literal(low))
+        .option("upperBound", bound_literal(high))
+        .option("numPartitions", args.num_partitions)
+    )
     return reader, low, high
 
 
@@ -163,7 +188,7 @@ def read_extract_frame(
     passes the frozen-window predicates and the exact typed extraction
     position as extra_select.
     """
-    scope = "batch_window" if filters or extra_select else "source_table"
+    scope = JdbcReadScope.BATCH_WINDOW if filters or extra_select else JdbcReadScope.SOURCE_TABLE
     dialect = dialects.by_jdbc_url(args.jdbc_url)
     source_table = render_source_table(dialect, args.source_table)
     keys = jdbc.key_metadata(
@@ -184,7 +209,7 @@ def read_extract_frame(
     reader = jdbc_reader(spark, args, query)
     reader, low, high = apply_partition_options(spark, args, reader, query, partition, scope=scope)
     log_step(LOGGER, "read JDBC source")
-    log_sql(LOGGER, f"JDBC dbtable scope={scope}", query)
+    log_sql(LOGGER, f"JDBC dbtable scope={scope.value}", query)
     if partition is None:
         LOGGER.info("JDBC partition bounds skipped reason=%s",
                     "disabled" if args.no_jdbc_partitioning else "no_partition_column")
