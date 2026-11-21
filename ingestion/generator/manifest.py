@@ -280,7 +280,7 @@ def _parse_entity(entity: dict[str, object], position: int, temporal_default: tu
         from ingestion.sources.rdbms import positions
 
         incremental = _strict_object(entity["incremental"], {"contract", "lookback", "act_snap"}, "incremental")
-        contract = _strict_object(incremental.get("contract"), {"source_column", "position_type"}, "incremental.contract")
+        contract = _strict_object(incremental.get("contract"), {"source_column", "position_type", "check_not_null"}, "incremental.contract")
         incremental_column = contract.get("source_column")
         if not isinstance(incremental_column, str) or not _COLUMN_PATTERN.fullmatch(incremental_column):
             raise ValueError("incremental.source_column must be a lowercase identifier")

@@ -1,5 +1,6 @@
 """Focused lossless position codec and lookback tests."""
 
+import re
 import sys
 import unittest
 from datetime import date, datetime, timezone
@@ -140,15 +141,17 @@ class TestPositions(unittest.TestCase):
         self.assertIsNone(positions.canonical(None, "date"))
         self.assertEqual(positions.maximum("2026-01-01T00:00:00.123456788", "2026-01-01T00:00:00.123456789", "timestamp_local(9)"), "2026-01-01T00:00:00.123456789")
 
-    def test_minimum_underflow_and_large_lookback(self):
+    def test_unrepresentable_lower_bound_fails(self):
         for value, kind, unit in (
             ("-32768", "smallint", None),
             ("0001-01-01", "date", "d"),
             ("0001-01-01T00:00:00.000000000", "timestamp_local(9)", "h"),
             ("0001-01-01T00:00:00Z", "timestamp_instant(0)", "d"),
         ):
-            self.assertEqual(positions.window_bounds(value, kind, 1, unit), (None, ">=" if unit else ">"))
-            self.assertEqual(positions.window_bounds(value, kind, 10**38 - 1, unit), (None, ">=" if unit else ">"))
+            for size in (1, 10**38 - 1):
+                message = f"Lower bound is outside the {kind} range: watermark={value}, lookback={size}{unit or ''}"
+                with self.subTest(kind=kind, size=size), self.assertRaisesRegex(ValueError, re.escape(message)):
+                    positions.window_bounds(value, kind, size, unit)
             self.assertEqual(positions.window_bounds(value, kind), (value, ">"))
         self.assertEqual(positions.window_bounds("-32767", "smallint", 1), ("-32768", ">"))
         self.assertEqual(positions.window_bounds("2024-03-01", "date", 1, "d"), ("2024-02-29", ">="))

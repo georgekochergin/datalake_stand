@@ -487,31 +487,35 @@ def check_load_trace(task_id, log, incremental, *, regular=False):
         and len(lifecycle_sql[0].splitlines()) > 1 and "%s" not in lifecycle_sql[0]
         and "'START'" in lifecycle_sql[0]), True)
     if incremental:
-        expected += [f"JDBC SQL scope={scope} operation=partition_bounds:", "jdbc partitioning: selected column=",
-                     "JDBC result operation=partition_bounds lower_bound=",
-                     "JDBC result operation=source_position max_increment_col=", "count_all=", "count_increment_col=",
+        probe_scope = "batch_window" if regular else "source_table"
+        expected += [f"JDBC SQL scope={probe_scope} operation=combined_bounds:", "jdbc partitioning: selected column=",
+                     "Get the incremental maximum and JDBC partition bounds",
+                     "JDBC result operation=combined_bounds max_increment_col=",
                      "INSERT INTO ingestion.incremental_batches", "UPDATE ingestion.incremental_state",
                      "pg-meta committed operation=finalize_batch table=ingestion.incremental_state",
                      "pg-meta committed operation=finalize_batch table=ingestion.incremental_batches",
                      f"reason={'regular' if regular else 'bootstrap'!r}", "→'SUCCEEDED'",
-                     "JDBC metadata refreshed source_table=", "JDBCRelation: Number of partitions:"]
+                     "JDBCRelation: Number of partitions:"]
         check(f"{task_id}: JDBC metadata detail appears once", log.count("JDBC DatabaseMetaData.getColumns"), 1)
         check(f"{task_id}: Spark SQL block retains logger name", bool(re.search(
-            r"INFO [\w.]+: JDBC SQL scope=batch_window operation=partition_bounds:\n", log)), True)
-        source_sql = next(iter(logged_sql(log, "operation=source_position")), "")
-        check(f"{task_id}: MAX/COUNT scans whole source", bool(source_sql and
-              "COUNT(*)" in source_sql and not re.search(r"\bWHERE\b", source_sql)
-              and len(source_sql.splitlines()) > 1), True)
-        bounds_sql = next(iter(logged_sql(log, "operation=partition_bounds")), "")
-        check(f"{task_id}: partition probe uses the frozen window", bool(bounds_sql and
-              re.search(r"(?m)^\s+WHERE\b", bounds_sql) and " <= " in bounds_sql
-              and (not regular or " > " in bounds_sql)), True)
+            rf"INFO [\w.]+: JDBC SQL scope={probe_scope} operation=combined_bounds:\n", log)), True)
+        probes = logged_sql(log, "operation=combined_bounds")
+        check(f"{task_id}: exactly one combined probe", len(probes), 1)
+        check(f"{task_id}: exactly one result with all bounds", len(re.findall(
+            r"JDBC result operation=combined_bounds max_increment_col=\S+ lower_bound=\S+ upper_bound=\S+", log)), 1)
+        for operation in ("source_position", "partition_bounds"):
+            check(f"{task_id}: no separate {operation}", f"operation={operation}" in log, False)
+        source_sql = probes[0] if probes else ""
+        check(f"{task_id}: combined probe uses the lower predicate without counts", bool(
+            "max_increment_col" in source_sql and "MIN(" in source_sql and "upper_bound" in source_sql
+            and "COUNT(" not in source_sql and " <= " not in source_sql
+            and (not regular or (re.search(r"\bWHERE\b", source_sql) and " > " in source_sql))), True)
         check(f"{task_id}: rendered Spark pg-meta SQL", any(
             "SELECT 1" in sql and "FROM ingestion.incremental_batches" in sql and "%s" not in sql
             for sql in lifecycle_sql), True)
     else:
-        expected += ["--no-jdbc-partitioning", "JDBC partition bounds skipped reason=disabled"]
-        for marker in ("operation=source_position", "operation=partition_bounds",
+        expected += ["--no-jdbc-partitioning", "JDBC partition bounds skipped: JDBC partitioning is disabled. reason=disabled"]
+        for marker in ("operation=source_position", "operation=partition_bounds", "operation=combined_bounds",
                        "ingestion.incremental_state", "ingestion.incremental_batches"):
             check(f"{task_id}: full load does not emit {marker}", marker in log, False)
         check(f"{task_id}: disabled partitioning does not report requested partitions",
@@ -858,7 +862,9 @@ def validate_manifests_and_dags() -> None:
         entities = pipeline.get("entities", [])
         transactions = [entity for entity in entities if entity.get("fqn", "").endswith(".transactions")]
         expected_type = "bigint" if source == "bank" else "decimal(19,0)"
-        check(source + " transactions uses structured incremental config", len(transactions) == 1 and transactions[0].get("incremental", {}).get("contract") == {"source_column": "_batch_id", "position_type": expected_type}, True)
+        expected_contract = {"source_column": "_batch_id", "position_type": expected_type, "check_not_null": False}
+        check(source + " transactions uses structured incremental config", len(transactions) == 1 and
+              transactions[0].get("incremental", {}).get("contract") == expected_contract, True)
         check(source + " main has no legacy incremental keys", all("incremental_column" not in entity and "incremental_lookback" not in entity for entity in entities), True)
 
     generated = generate_all(

@@ -135,33 +135,40 @@ def window_bounds(
     The lower bound is the start of the hour (unit h) or day (unit d) reached
     by the subtraction, computed in the value's own calendar: instants align
     on the UTC grid, local positions on the wall-clock grid of their naive
-    digits. Underflow below the type minimum drops the lower filter (None).
+    digits. Only a missing watermark omits the lower filter.
     op is '>=' for an aligned temporal lookback and '>' otherwise; at size 0
     the unit is ignored entirely, without validation.
     """
-    family, _, bounds = kind_info(kind)
+    family, _, _ = kind_info(kind)
     if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= 10**38 - 1:
         raise ValueError("Lookback size must be an integer in 0..10^38-1")
     if family == "integral":
         if unit is not None and size:
             raise ValueError("Integral lookback forbids a unit")
-        step, delta, minimum, op = 1, size, bounds[0], ">"
+        step, delta, op = 1, size, ">"
     elif family == "date":
         if size and unit != "d":
             raise ValueError("Temporal lookback requires a valid unit")
-        step, delta, minimum, op = 1, size, 1, ">=" if size else ">"
+        step, delta, op = 1, size, ">=" if size else ">"
     else:
         if size and unit not in ("h", "d"):
             raise ValueError("Temporal lookback requires a valid unit")
         step = _DAY if unit == "d" else 3600 * _NS
-        delta, minimum, op = size * step, 0, ">=" if size else ">"
+        delta, op = size * step, ">=" if size else ">"
     parsed = _parse(watermark, kind)
-    if parsed is None or parsed - delta < minimum:
+    if parsed is None:
         return None, op
     aligned = parsed - delta
     if size and step > 1:
         aligned -= aligned % step
-    return _format(aligned, kind), op
+    try:
+        lower = canonical(aligned, kind) if family == "integral" else _format(aligned, kind)
+    except (ValueError, OverflowError) as exc:
+        lookback = str(size) if unit is None else f"{size}{unit}"
+        raise ValueError(
+            f"Lower bound is outside the {kind} range: watermark={watermark}, lookback={lookback}. {exc}"
+        ) from exc
+    return lower, op
 
 
 def resolve_lookback(kind: str, size: int, unit: str | None, specified: bool) -> tuple[int, str | None]:

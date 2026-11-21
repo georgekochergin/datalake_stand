@@ -133,22 +133,42 @@ class TestJdbcReader(unittest.TestCase):
         self.assertEqual(reader_double.options["driver"], "oracle.jdbc.OracleDriver")
 
 
-class TestReadBounds(unittest.TestCase):
-    """MIN/MAX probing over the read query."""
+class TestProbeBounds(unittest.TestCase):
+    """One statement for the requested aggregate set, none for a plain read."""
 
-    def test_query_shape_and_tuple(self):
-        spark = MagicMock()
-        reader_double = RecordingReader(collected=[(1, 100)])
-        with patch.object(reader, "jdbc_reader", return_value=reader_double) as builder:
-            self.assertEqual(
-                reader.read_bounds(spark, make_args(), "(SELECT 1) q", "client_id"), (1, 100)
-            )
-        query = builder.call_args.args[2]
-        self.assertEqual(
-            query,
-            "(SELECT MIN([client_id]) AS lower_bound, MAX([client_id]) AS upper_bound "
-            "FROM (SELECT 1) q) bounds",
-        )
+    def test_four_modes(self):
+        dialect = reader.dialects.by_jdbc_url(make_args().jdbc_url)
+        partition = jdbc_partitioning.PartitionChoice("id", "integer", jdbc_partitioning.STEP_PRIMARY_KEY)
+        for incremental in (None, ("position", "bigint")):
+            for choice in (None, partition):
+                with self.subTest(incremental=incremental, partition=choice):
+                    source = reader.ReadSource(dialect, "[s].[t]", jdbc.KeyMetadata((), (), {}), choice)
+                    sql_row = (["97"] if incremental else []) + (["2", "6"] if choice else [])
+                    filters = ["[position] > 90"] if incremental else []
+                    with patch.object(jdbc, "connection"), patch.object(
+                        jdbc, "first_row", return_value=sql_row
+                    ) as sql, patch.object(reader, "log_sql") as sql_log, patch.object(reader.LOGGER, "info") as info:
+                        result = reader.probe_bounds(MagicMock(), make_args(), source, filters,
+                                                     scope=reader.JdbcReadScope.BATCH_WINDOW, incremental=incremental)
+                    self.assertEqual(result, ("97" if incremental else None, (2, 6) if choice else (None, None)))
+                    self.assertEqual(sql.call_count, int(bool(incremental or choice)))
+                    if sql.called:
+                        query = sql.call_args.args[1]
+                        self.assertEqual("MAX([position])" in query, bool(incremental))
+                        self.assertEqual("MIN([id])" in query and "MAX([id])" in query, bool(choice))
+                        self.assertEqual(query.endswith("WHERE [position] > 90"), bool(incremental))
+                        self.assertNotIn("COUNT(", query)
+                        operation = {
+                            (True, True): "combined_bounds",
+                            (True, False): "source_position",
+                            (False, True): "partition_bounds",
+                        }[bool(incremental), bool(choice)]
+                        self.assertTrue(sql_log.call_args.args[1].endswith(f"operation={operation}"))
+                        result_logs = [call.args for call in info.call_args_list if call.args[0].startswith("JDBC result")]
+                        self.assertEqual(len(result_logs), 1)
+                        self.assertEqual(result_logs[0][1], operation)
+                    else:
+                        sql_log.assert_not_called()
 
 
 class TestReadExtractFrame(unittest.TestCase):
@@ -176,7 +196,7 @@ class TestReadExtractFrame(unittest.TestCase):
         reader_double = reader_double if reader_double is not None else RecordingReader(partitions=partitions)
         with patch.object(reader.jdbc, "compatibility_projection", return_value=projection), patch.object(
             reader.jdbc, "key_metadata", return_value=keys or self.key_metadata()
-        ) as key_call, patch.object(reader, "read_bounds", return_value=bounds) as probe, patch.object(
+        ) as key_call, patch.object(reader, "probe_bounds", return_value=(None, bounds)), patch.object(
             reader, "jdbc_reader", return_value=reader_double
         ) as builder:
             result = reader.read_extract_frame(self.spark, args, filters=filters, extra_select=extra_select)
@@ -212,38 +232,26 @@ class TestReadExtractFrame(unittest.TestCase):
         self.assertIn(', [_batch_id] AS "__extract_position"', query)
         self.assertEqual(reader_double.options["partitionColumn"], "transaction_id")
 
-    def test_timestamp_column_partitions_by_derived_day(self):
+    def test_precomputed_bounds_do_not_trigger_another_query(self):
+        args = make_args()
+        keys = self.key_metadata(primary_key=["client_id"], columns=[("client_id", "int")])
+        source = reader.ReadSource(reader.dialects.by_jdbc_url(args.jdbc_url), "[s].[t]", keys,
+                                   jdbc_partitioning.PartitionChoice("client_id", "integer", "primary_key"))
+        jdbc_reader = RecordingReader()
+        with patch.object(reader, "jdbc_reader", return_value=jdbc_reader) as build, patch.object(
+            reader, "probe_bounds"
+        ) as probe:
+            reader.read_extract_frame(self.spark, args, filters=("[position] <= 97",), source=source, bounds=(2, 6))
+        probe.assert_not_called()
+        self.assertIn("[position] <= 97", build.call_args.args[2])
+        self.assertEqual(jdbc_reader.options["upperBound"], "6")
+
+    def test_timestamp_column_does_not_partition(self):
         keys = self.key_metadata(columns=[("updated_at", "TIMESTAMP(9) WITH TIME ZONE")])
-        result, reader_double, query, _ = self.frame(
-            make_args(jdbc_url=ORACLE_URL), keys=keys, partitions=4)
-        self.assertIn(
-            'CAST(TO_NUMBER(TO_CHAR(SYS_EXTRACT_UTC(extract_source."updated_at"), \'J\'))'
-            ' AS NUMBER(10,0)) AS "__jdbc_day"',
-            query,
-        )
-        self.assertEqual(reader_double.options["partitionColumn"], "__jdbc_day")
-        self.assertIs(result, reader_double)
-        self.assertEqual(reader_double.dropped, ["__jdbc_day"])
-
-    def test_day_alias_dropped_even_without_parallel(self):
-        keys = self.key_metadata(columns=[("updated_at", "DATE")])
-        _, reader_double, query, _ = self.frame(
-            make_args(jdbc_url=ORACLE_URL), keys=keys, bounds=(None, None))
-        self.assertIn('"__jdbc_day"', query)
-        self.assertNotIn("partitionColumn", reader_double.options)
-        self.assertEqual(reader_double.dropped, ["__jdbc_day"])
-
-    def test_day_alias_collision_skips_derived_partitioning(self):
-        keys = self.key_metadata(
-            columns=[("updated_at", "TIMESTAMP(6)"), ("__jdbc_day", "NUMBER", 10, 0)]
-        )
-        with self.assertLogs(jdbc_partitioning.LOGGER, level="WARNING") as logs:
-            _, reader_double, query, _ = self.frame(make_args(jdbc_url=ORACLE_URL), keys=keys)
-        self.assertNotIn('TO_NUMBER(TO_CHAR', query)
+        _, reader_double, query, _ = self.frame(make_args(jdbc_url=ORACLE_URL), keys=keys)
+        self.assertNotIn("__jdbc_day", query)
         self.assertNotIn("partitionColumn", reader_double.options)
         self.assertEqual(reader_double.dropped, [])
-        self.assertTrue(any("collides with the day alias" in line for line in logs.output), logs.output)
-        self.assertFalse(any("no partition column found" in line for line in logs.output))
 
     def test_date_column_partitions_directly(self):
         keys = self.key_metadata(columns=[("posting_date", "date")])
@@ -291,11 +299,18 @@ class TestReadExtractFrame(unittest.TestCase):
             "window=[11..12] partitions=1 of 4 requested" in line for line in logs.output
         ), logs.output)
 
+    def test_single_requested_partition_has_its_own_reason(self):
+        keys = self.key_metadata(primary_key=["id"], columns=[("id", "int")])
+        with self.assertLogs(reader.LOGGER, level="INFO") as logs:
+            self.frame(make_args(num_partitions=1), keys=keys)
+        self.assertTrue(any("Only one JDBC partition was requested. reason=single_partition" in line
+                            for line in logs.output), logs.output)
+
     def test_disabled_partitioning_still_requires_metadata(self):
         keys = self.key_metadata()
         with patch.object(reader, "jdbc_reader", return_value=RecordingReader()), patch.object(
             reader.jdbc, "key_metadata", return_value=keys
-        ) as key_call, patch.object(reader, "read_bounds") as probe:
+        ) as key_call, patch.object(reader, "probe_bounds") as probe:
             reader.read_extract_frame(self.spark, make_args(no_jdbc_partitioning=True))
         key_call.assert_called_once()
         probe.assert_not_called()

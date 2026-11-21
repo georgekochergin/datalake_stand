@@ -86,8 +86,14 @@ class TestAppendRaw(unittest.TestCase):
         self.assertTrue(all("CREATE TABLE" not in sql for sql in executed))
 
     def test_zero_rows_verify_schema_without_write(self):
-        frame = self.append(["client_id"], exists=True, rows=0)
+        with self.assertLogs(append_module.LOGGER, level="INFO") as logs:
+            frame = self.append(["client_id"], exists=True, rows=0)
         frame.withColumn.assert_not_called()
+        self.assertTrue(any(
+            "No source rows were read for this load. Iceberg append skipped. "
+            "target_table=raw.bank.retail_bank__clients row_count=0 reason=no_rows" in line
+            for line in logs.output
+        ), logs.output)
 
     def test_metadata_collision_rejected(self):
         with self.assertRaisesRegex(ValueError, "collides"):

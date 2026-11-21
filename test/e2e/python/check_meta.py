@@ -125,8 +125,10 @@ class PostgresTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires an incremental"):
             self.plan(incremental_type=None)
 
-    def test_empty_bootstrap_and_lower_underflow(self):
-        """Empty bootstrap is explicit and typed underflow removes the lower filter."""
+    def test_empty_bootstrap_and_invalid_lower_bound(self):
+        """An invalid lower bound aborts planning before querying the source."""
+        from ingestion.sources.rdbms import positions
+
         batch = self.plan(upper_bound=None, empty_at_plan=True)
         self.assertTrue(batch["empty_at_plan"])
         self.finish(batch, count=0, observed=None)
@@ -134,10 +136,18 @@ class PostgresTests(unittest.TestCase):
         batch = self.plan(process_id=2, run_id="run2")
         self.assertEqual(batch["reason"], "bootstrap")
         self.finish(batch)
-        batch = self.plan(process_id=3, run_id="run3", lookback_size=20,
-                          calculate_lower=lambda value: (None, ">="))
-        self.assertIsNone(batch["lower_bound"])
-        self.assertEqual(batch["lower_bound_op"], ">=")
+        def unexpected_probe(lower, op):
+            self.fail("Source bounds must not be probed with an invalid lower bound")
+
+        previous = self.state()
+        size = 10**20
+        with self.assertRaisesRegex(ValueError, f"Lower bound is outside the bigint range: watermark=10, lookback={size}"):
+            self.plan(process_id=3, run_id="run3", lookback_size=size,
+                      calculate_lower=lambda value: positions.window_bounds(value, "bigint", size),
+                      probe_upper=unexpected_probe)
+        self.assertEqual(self.state(), previous)
+        self.assertIsNone(registry.get_batch(process_id=3, source_id=self.source,
+                                             entity_fqn="s.t", db_connect=self.connect))
 
     def test_contract_and_revision_rejected_without_partial_success(self):
         """Old batches cannot read or finalize after state revision changes."""
@@ -173,14 +183,14 @@ class PostgresTests(unittest.TestCase):
                         "WHERE dag_id = %s AND run_id = %s AND status = 'START'", (self.source, "run"))
             self.assertEqual(cur.fetchone()[0], 2)
 
-    def test_regressed_source_maximum_is_rejected(self):
-        """Typed source regression rejects planning without creating a batch."""
+    def test_lower_source_maximum_keeps_watermark(self):
+        """An overlapping slice below the watermark may be committed without moving it back."""
         self.finish(self.plan())
-        with self.assertRaisesRegex(ValueError, "regressed"):
-            self.plan(process_id=2, run_id="run2", upper_bound="9",
-                      compare_positions=lambda left, right: int(left) - int(right))
-        self.assertIsNone(registry.get_batch(process_id=2, source_id=self.source,
-                                         entity_fqn="s.t", db_connect=self.connect))
+        batch = self.plan(process_id=2, run_id="run2", lookback_size=2,
+                          calculate_lower=lambda watermark: (str(int(watermark) - 2), ">"),
+                          probe_upper=lambda lower, op: "9")
+        self.assertEqual((batch["lower_bound"], batch["upper_bound"]), ("8", "9"))
+        self.assertEqual(self.finish(batch, observed="9")["watermark_after"], "10")
 
     def test_last_process_fk_rejects_unknown_batch(self):
         """The deferred composite FK rejects pointers to unknown batches at commit."""

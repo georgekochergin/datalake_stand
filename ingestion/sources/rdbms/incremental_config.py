@@ -1,7 +1,7 @@
 """Validation of the resolved incremental loading configuration."""
 
 import re
-from typing import TypedDict, cast
+from typing import NotRequired, TypedDict, cast
 
 from . import positions
 
@@ -11,6 +11,7 @@ class _Contract(TypedDict):
 
     source_column: str
     position_type: str
+    check_not_null: NotRequired[bool]
 
 
 class _Lookback(TypedDict):
@@ -32,8 +33,11 @@ def validate(config: object) -> IncrementalConfig:
     if not isinstance(config, dict) or set(config) != {"contract", "lookback"}:
         raise ValueError("incremental config requires exactly contract and lookback")
     contract, lookback = config["contract"], config["lookback"]
-    if not isinstance(contract, dict) or set(contract) != {"source_column", "position_type"}:
-        raise ValueError("incremental.contract requires source_column and position_type")
+    required = {"source_column", "position_type"}
+    if not isinstance(contract, dict) or not required <= set(contract) <= required | {"check_not_null"}:
+        raise ValueError("incremental.contract requires source_column and position_type, with optional check_not_null")
+    if type(contract.get("check_not_null", True)) is not bool:
+        raise ValueError("incremental.contract.check_not_null must be a boolean")
     column, kind = contract["source_column"], contract["position_type"]
     if not isinstance(column, str) or not re.fullmatch(r"[a-z_][a-z0-9_]*", column):
         raise ValueError("incremental.contract.source_column must be a lowercase identifier")

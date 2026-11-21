@@ -15,16 +15,14 @@ import logging
 import os
 from typing import TYPE_CHECKING
 
-from ingestion.logging import configure_driver_logging, log_sql, log_step
+from ingestion.logging import configure_driver_logging, log_step
 
 from ingestion.spark.raw import append
 from ingestion.spark.raw.iceberg import validate_target_table
 from ingestion.spark.raw.rdbms import reader
 from ingestion.spark.raw.rdbms.incremental import window
-from ingestion.spark.raw.rdbms.reader import render_source_table
 from ingestion.sources.rdbms import jdbc
 from ingestion.sources.rdbms import positions
-from ingestion.sources.rdbms import registry as dialects
 
 if TYPE_CHECKING:
     from psycopg2.extensions import connection as Psycopg2Connection
@@ -62,6 +60,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args.incremental_config = config
     args.incremental_column = config["contract"]["source_column"]
     args.position_type = config["contract"]["position_type"]
+    args.check_not_null = config["contract"].get("check_not_null", True)
     args.lookback_size = config["lookback"]["size"]
     args.lookback_unit = config["lookback"]["unit"]
     return args
@@ -84,33 +83,22 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def empty_incremental_window(batch: "DbRow") -> bool:
-    """True when persisted bounds prove the strict window contains no rows.
-
-    Only a zero-lookback regular batch with equal typed bounds reaches this
-    state: lower = watermark - 0 and upper = source MAX = watermark. With a
-    nonzero lookback the window is always read, even when the bounds are
-    equal: the aligned inclusive operator covers the range between them.
-    """
-    return (
-        not batch["lookback_size"]
-        and batch["upper_bound"] is not None
+    """Recognize an empty probe or an empty strict window from an older planner."""
+    return batch["empty_at_plan"] or (
+        batch["lower_bound_op"] == ">" and batch["upper_bound"] is not None
         and batch["lower_bound"] == batch["upper_bound"]
     )
 
 
-def source_kind(spark: "SparkSession", args: argparse.Namespace) -> str:
+def source_column(source: reader.ReadSource, args: argparse.Namespace, *, check_not_null: bool) -> jdbc.ColumnMeta:
     """Validate the incremental column contract against JDBC catalog metadata."""
-    dialect = dialects.by_jdbc_url(args.jdbc_url)
-    keys = jdbc.key_metadata(
-        spark._jvm, dialect, args.jdbc_url, args.jdbc_user, args.jdbc_password, args.source_table
-    )
-    info = keys.columns.get(args.incremental_column.lower())
+    info = source.keys.columns.get(args.incremental_column.lower())
     if info is None:
         raise ValueError(
             f"Incremental column {args.incremental_column!r} not found in JDBC metadata for "
             f"{args.source_id}.{args.source_table}"
         )
-    kind = jdbc.column_position_kind(dialect, info)
+    kind = jdbc.column_position_kind(source.dialect, info)
     if kind is None:
         raise ValueError(
             f"Unsupported JDBC type of incremental column "
@@ -122,36 +110,21 @@ def source_kind(spark: "SparkSession", args: argparse.Namespace) -> str:
             f"Incremental type mismatch for {args.source_id}.{args.source_table}.{args.incremental_column}: "
             f"expected={args.position_type} actual={kind} JDBC={info.type_name} precision={info.precision} scale={info.scale}"
         )
-    return kind
+    if check_not_null and not info.not_null:
+        raise ValueError(f"JDBC metadata does not confirm NOT NULL for incremental column {args.source_table}.{info.name}")
+    return info
 
 
-def source_position(spark: "SparkSession", args: argparse.Namespace) -> tuple[str, str | None, bool, bool]:
-    """Inspect original JDBC type and obtain exact MAX plus NULL/empty diagnostics."""
-    dialect = dialects.by_jdbc_url(args.jdbc_url)
-    column = dialect.quote_identifier(args.incremental_column)
-    table = render_source_table(dialect, args.source_table)
-    kind = source_kind(spark, args)
-    log_step(LOGGER, "probe source incremental position")
-    expression = dialect.position_expression(f"MAX({column})", kind)
-    sql = f"SELECT {expression}, COUNT(*), COUNT({column}) FROM {table}"
-    log_sql(LOGGER, "JDBC SQL scope=source_table operation=source_position", sql)
-    with jdbc.connection(spark._jvm, args.jdbc_url, args.jdbc_user, args.jdbc_password) as connection:
-        row = jdbc.first_row(connection, sql)
-    upper = positions.canonical(row[0], kind)
-    count, nonnull = int(row[1]), int(row[2])
-    LOGGER.info("JDBC result operation=source_position max_increment_col=%s count_all=%s count_increment_col=%s",
-                upper, count, nonnull)
-    return kind, upper, count == 0, count != nonnull
-
-
-def _plan_batch(spark: "SparkSession", args: argparse.Namespace, connect: "DbConnect") -> "DbRow | None":
+def _plan_batch(spark: "SparkSession", args: argparse.Namespace, connect: "DbConnect") -> tuple[
+    "DbRow", reader.ReadSource | None, tuple[reader.PartitionBound, reader.PartitionBound] | None,
+]:
     """Resolve this execution's persisted batch or plan a fresh one with frozen bounds.
 
     The batch identity is (process_id, source_id, entity_fqn). A retry
     replays the same frozen window with metadata-only type verification: bounds, the
     position kind and empty_at_plan are already fixed in the batch, and a
     SUCCEEDED batch returns as a no-op with its recorded result logged.
-    Source aggregates run only when a new batch is being planned.
+    A retry may probe partition bounds but does not probe the incremental maximum.
     """
     from ingestion.meta import registry
 
@@ -160,7 +133,8 @@ def _plan_batch(spark: "SparkSession", args: argparse.Namespace, connect: "DbCon
     batch = registry.get_batch(process_id=args.process_id, source_id=args.source_id,
                            entity_fqn=args.source_table, db_connect=connect)
     if batch is not None:
-        LOGGER.info("JDBC source position probe skipped reason=persisted_batch")
+        reason = reader.JdbcReason.PERSISTED_BATCH
+        LOGGER.info("JDBC incremental maximum not recalculated: %s. reason=%s", reason.text, reason.code)
         if batch["target_table"] != args.target_table:
             raise ValueError("Persisted batch target does not match")
         if batch["incremental_column"] != args.incremental_column:
@@ -176,35 +150,43 @@ def _plan_batch(spark: "SparkSession", args: argparse.Namespace, connect: "DbCon
                 "entity_fqn=%s row_count=%s finished_at=%s",
                 args.process_id, args.source_table, batch["row_count"], batch["finished_at"],
             )
-        else:
-            source_kind(spark, args)
-        return batch
-    kind, upper, empty, has_null = source_position(spark, args)
-    if has_null:
-        raise ValueError("NULL incremental value in source")
+            return batch, None, None
+        source = reader.inspect_source(spark, args, detailed=False)
+        source_column(source, args, check_not_null=False)
+        return batch, source, None
+    source = reader.inspect_source(spark, args)
+    info = source_column(source, args, check_not_null=args.check_not_null)
+    kind = args.position_type
     size, unit = args.lookback_size, args.lookback_unit
     LOGGER.info("incremental config: kind=%s lookback_size=%s lookback_unit=%s", kind, size, unit)
-    positions.window_bounds(upper, kind, size, unit)
+    bounds = None
 
     def calculate_lower(value: str | None) -> tuple[str | None, str]:
-        """Reject source resets before persisting an incremental window."""
-        if value is not None:
-            if empty or positions.maximum(value, upper, kind) != upper:
-                raise ValueError("SOURCE_POSITION_REGRESSION: explicit reset/bootstrap required")
+        """Use the committed watermark to compute the shared lower predicate."""
         return positions.window_bounds(value, kind, size, unit)
 
-    return registry.plan_batch(
+    def probe_upper(lower: str | None, op: str) -> str | None:
+        """Probe the maximum and any partition bounds over the same source rows."""
+        nonlocal bounds
+        column = source.dialect.quote_identifier(info.name)
+        filters = [window.position_filter(source.dialect, column, op, lower, kind)] if lower is not None else (
+            [f"{column} IS NOT NULL"] if not info.not_null else []
+        )
+        upper, bounds = reader.probe_bounds(
+            spark, args, source, filters,
+            scope=reader.JdbcReadScope.BATCH_WINDOW if lower is not None else reader.JdbcReadScope.SOURCE_TABLE,
+            incremental=(info.name, kind),
+        )
+        return upper
+
+    batch = registry.plan_batch(
         process_id=args.process_id, dag_id=args.dag_id, run_id=args.run_id,
         source_id=args.source_id, entity_fqn=args.source_table, target_table=args.target_table,
         incremental_column=args.incremental_column, incremental_type=kind,
-        upper_bound=upper, empty_at_plan=empty,
         lookback_size=size, lookback_unit=unit, db_connect=connect,
-        calculate_lower=calculate_lower,
-        compare_positions=lambda left, right: (
-            0 if positions.canonical(left, kind) == positions.canonical(right, kind)
-            else 1 if positions.maximum(left, right, kind) == positions.canonical(left, kind) else -1
-        ),
+        calculate_lower=calculate_lower, probe_upper=probe_upper,
     )
+    return batch, source, bounds
 
 
 def managed_load(spark: "SparkSession", args: argparse.Namespace) -> None:
@@ -223,19 +205,21 @@ def managed_load(spark: "SparkSession", args: argparse.Namespace) -> None:
         return psycopg2.connect(dsn)
 
     log_step(LOGGER, "resolve incremental batch")
-    batch = _plan_batch(spark, args, connect)
+    batch, read_source, bounds = _plan_batch(spark, args, connect)
     if batch["status"] == "SUCCEEDED":
         return
     key = dict(process_id=args.process_id, source_id=args.source_id,
                entity_fqn=args.source_table, db_connect=connect)
     kind = batch["incremental_type"]
     if empty_incremental_window(batch):
-        LOGGER.info("JDBC batch read and Iceberg append skipped reason=empty_window")
+        reason = reader.JdbcReason.EMPTY_WINDOW
+        LOGGER.info("%s. JDBC read and Iceberg append skipped. No raw table created by this attempt. "
+                    "target_table=%s reason=%s", reason.text, args.target_table, reason.code)
         registry.finalize_batch(row_count=0, observed_max=None, **key)
         return
     registry.start_batch(**key)
     try:
-        source = window.read_window_frame(spark, args, batch, kind, detailed_metadata=False)
+        source = window.read_window_frame(spark, args, batch, kind, source=read_source, bounds=bounds)
         try:
             log_step(LOGGER, "summarize batch window")
             rows, observed, clean = window.window_summary(source, kind)
