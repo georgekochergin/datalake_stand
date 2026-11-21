@@ -1,5 +1,6 @@
 """Focused lossless position codec and lookback tests."""
 
+import re
 import sys
 import unittest
 from datetime import date, datetime, timezone
@@ -148,7 +149,8 @@ class TestPositions(unittest.TestCase):
             ("0001-01-01T00:00:00Z", "timestamp_instant(0)", "d"),
         ):
             for size in (1, 10**38 - 1):
-                with self.subTest(kind=kind, size=size), self.assertRaises((ValueError, OverflowError)):
+                message = f"Lower bound is outside the {kind} range: watermark={value}, lookback={size}{unit or ''}"
+                with self.subTest(kind=kind, size=size), self.assertRaisesRegex(ValueError, re.escape(message)):
                     positions.window_bounds(value, kind, size, unit)
             self.assertEqual(positions.window_bounds(value, kind), (value, ">"))
         self.assertEqual(positions.window_bounds("-32767", "smallint", 1), ("-32768", ">"))

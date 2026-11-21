@@ -141,7 +141,7 @@ class PostgresTests(unittest.TestCase):
 
         previous = self.state()
         size = 10**20
-        with self.assertRaisesRegex(ValueError, "outside its numeric type range"):
+        with self.assertRaisesRegex(ValueError, f"Lower bound is outside the bigint range: watermark=10, lookback={size}"):
             self.plan(process_id=3, run_id="run3", lookback_size=size,
                       calculate_lower=lambda value: positions.window_bounds(value, "bigint", size),
                       probe_upper=unexpected_probe)

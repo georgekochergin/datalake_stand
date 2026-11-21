@@ -213,7 +213,8 @@ def managed_load(spark: "SparkSession", args: argparse.Namespace) -> None:
     kind = batch["incremental_type"]
     if empty_incremental_window(batch):
         reason = reader.JdbcReason.EMPTY_WINDOW
-        LOGGER.info("%s. JDBC read and Iceberg append skipped. reason=%s", reason.text, reason.code)
+        LOGGER.info("%s. JDBC read and Iceberg append skipped. No raw table created by this attempt. "
+                    "target_table=%s reason=%s", reason.text, args.target_table, reason.code)
         registry.finalize_batch(row_count=0, observed_max=None, **key)
         return
     registry.start_batch(**key)

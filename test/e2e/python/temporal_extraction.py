@@ -6,6 +6,7 @@ import os
 from argparse import ArgumentParser, Namespace
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
+from unittest import TestCase
 from uuid import uuid4
 from unittest.mock import patch
 
@@ -21,9 +22,9 @@ def load_module(name, path):
 VIRTUAL_SOURCES = {}
 
 
-def register_virtual(fqn, sql, columns):
+def register_virtual(fqn, sql, columns, *, primary_key=()):
     """Bind a synthetic SQL fixture to a stable FQN for the next loader reads."""
-    VIRTUAL_SOURCES[fqn] = {"sql": sql, "columns": columns}
+    VIRTUAL_SOURCES[fqn] = {"sql": sql, "keys": (primary_key, columns)}
 
 
 def unregister_virtual(fqn):
@@ -52,7 +53,8 @@ def virtual_sources():
     def keys(jvm, dialect, jdbc_url, user, password, source_table, *, detailed=True):
         fixture = VIRTUAL_SOURCES.get(source_table)
         if fixture:
-            return jdbc_pkg.KeyMetadata((), (), dict(fixture["columns"]))
+            primary_key, columns = fixture["keys"]
+            return jdbc_pkg.KeyMetadata(primary_key, (), dict(columns))
         return real_keys(jvm, dialect, jdbc_url, user, password, source_table, detailed=detailed)
 
     with ExitStack() as stack:
@@ -275,25 +277,44 @@ def precision_fixtures(source):
 
 
 def check_post_append_retry(spark, hook, jdbc, token):
-    """Inject a real post-append metadata failure and accept a repeated append."""
+    """Repeat a partitioned append with the saved incremental window after a metadata failure."""
     load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/incremental/load_entity.py")
     from ingestion import meta
     from ingestion.meta import registry
     from ingestion.sources.rdbms import jdbc as jdbc_pkg
+    from ingestion.spark.raw.rdbms import reader
 
     args = Namespace(
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
         source_table="fixture.retry_probe",
         target_table="raw.e2e_contract.post_append_retry", source_id="e2e_retry",
-        incremental_column="position", no_jdbc_partitioning=True,
-        num_partitions=1, dag_id="e2e_post_append_retry",
-        run_id=token, process_id=meta.allocate_process_id(
-            dag_id="e2e_post_append_retry", run_id=token, db_connect=hook.get_conn),
+        incremental_column="position", no_jdbc_partitioning=False,
+        num_partitions=2, dag_id="e2e_post_append_retry", run_id=token,
         lookback_size=0, lookback_unit=None,
         position_type="bigint", check_not_null=True,
     )
-    register_virtual(args.source_table, "(SELECT CAST(1 AS bigint) AS position) retry_fixture",
-                     {"position": jdbc_pkg.ColumnMeta("position", "BIGINT", 19, 0, True)})
+    seed_process = meta.allocate_process_id(dag_id=args.dag_id, run_id=token, db_connect=hook.get_conn)
+    seed_key = dict(process_id=seed_process, source_id=args.source_id,
+                    entity_fqn=args.source_table, db_connect=hook.get_conn)
+    registry.plan_batch(**seed_key, dag_id=args.dag_id, run_id=token, target_table=args.target_table,
+                        incremental_column=args.incremental_column, incremental_type=args.position_type,
+                        upper_bound="1")
+    registry.finalize_batch(**seed_key, row_count=1, observed_max="1")
+    args.process_id = meta.allocate_process_id(dag_id=args.dag_id, run_id=token, db_connect=hook.get_conn)
+    columns = {name: jdbc_pkg.ColumnMeta(name, "BIGINT", 19, 0, True) for name in ("id", "position")}
+
+    def source_rows(*rows):
+        """Expose the requested rows in a real MSSQL query."""
+        values = ", ".join(f"({row_id}, {position})" for row_id, position in rows)
+        register_virtual(
+            args.source_table,
+            f"(SELECT CAST(id AS bigint) AS id, CAST([position] AS bigint) AS [position] "
+            f"FROM (VALUES {values}) v(id, [position])) retry_fixture",
+            columns, primary_key=("id",),
+        )
+
+    initial_rows = ((90, 1), (10, 2), (30, 3))
+    source_rows(*initial_rows)
     try:
         with virtual_sources():
             with patch.object(registry, "finalize_batch", side_effect=RuntimeError("injected metadata failure")):
@@ -303,20 +324,37 @@ def check_post_append_retry(spark, hook, jdbc, token):
                     require(str(exc) == "injected metadata failure", "expected post-append failure")
                 else:
                     raise AssertionError("fault injection must fail the first execution")
-            require(spark.table(args.target_table).count() == 1, "first append survives metadata failure")
-            require(metadata_row(hook, "incremental_state", args.source_id, args.source_table)["watermark"] is None,
+            require(spark.table(args.target_table).count() == 2, "first append survives metadata failure")
+            require(metadata_row(hook, "incremental_state", args.source_id, args.source_table)["watermark"] == "1",
                     "metadata failure does not advance watermark")
             failed = metadata_row(hook, "incremental_batches", args.source_id, args.source_table)
             require(failed["status"] == "FAILED", "ordinary failed batch permits retry")
-            load_entity.managed_load(spark, args)
+            source_rows(*initial_rows, (100, 4))
+            with TestCase().assertLogs(reader.LOGGER, level="INFO") as logs, patch.object(
+                jdbc_pkg, "first_row", wraps=jdbc_pkg.first_row
+            ) as probe:
+                load_entity.managed_load(spark, args)
+            probe.assert_called_once()
+            sql = probe.call_args.args[1]
+            require("MIN([id]) AS lower_bound, MAX([id]) AS upper_bound" in sql
+                    and sql.endswith("WHERE [position] > 1 AND [position] <= 3")
+                    and "MAX([position])" not in sql,
+                    "retry probes only partition bounds within both frozen predicates")
+            require(sum("JDBC SQL scope=batch_window operation=partition_bounds:" in line
+                        for line in logs.output) == 1
+                    and not any("operation=combined_bounds" in line or "operation=source_position" in line
+                                for line in logs.output), "retry logs exactly one partition bounds query")
+            require(any("window=[10..30] partitions=2 of 2 requested" in line for line in logs.output),
+                    "retry uses both partitions and excludes IDs outside the frozen window")
             finished = metadata_row(hook, "incremental_batches", args.source_id, args.source_table)
             require(finished["process_id"] == failed["process_id"] and finished["attempt_count"] == 2,
                     "post-append retry retains batch identity")
-            require(finished["status"] == "SUCCEEDED" and finished["row_count"] == 1,
+            require(finished["status"] == "SUCCEEDED" and finished["row_count"] == 2,
                     "post-append retry finalizes latest execution")
-            require(spark.table(args.target_table).count() == 2, "at-least-once retry intentionally appends twice")
-            require(spark.table(args.target_table).select("__process_id").distinct().count() == 1,
-                    "both commits retain the same process identity")
+            rows = spark.table(args.target_table).select("id", "__process_id").collect()
+            require(sorted(row.id for row in rows) == [10, 10, 30, 30],
+                    "at-least-once retry repeats only the rows of the frozen window")
+            require({row[1] for row in rows} == {args.process_id}, "both commits retain the same process identity")
     finally:
         unregister_virtual(args.source_table)
 
@@ -434,6 +472,7 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
         raise AssertionError("strict contract accepted a nullable incremental column")
     args.check_not_null = False
     incremental((None,))
+    require(not spark.catalog.tableExists(target), f"{source}: empty bootstrap does not create the raw table")
     require(metadata_row(hook, "incremental_state", args.source_id, args.source_table)["watermark"] is None,
             f"{source}: empty bootstrap preserves NULL watermark after snapshot")
     allocate()

@@ -161,7 +161,14 @@ def window_bounds(
     aligned = parsed - delta
     if size and step > 1:
         aligned -= aligned % step
-    return (canonical(aligned, kind) if family == "integral" else _format(aligned, kind)), op
+    try:
+        lower = canonical(aligned, kind) if family == "integral" else _format(aligned, kind)
+    except (ValueError, OverflowError) as exc:
+        lookback = str(size) if unit is None else f"{size}{unit}"
+        raise ValueError(
+            f"Lower bound is outside the {kind} range: watermark={watermark}, lookback={lookback}. {exc}"
+        ) from exc
+    return lower, op
 
 
 def resolve_lookback(kind: str, size: int, unit: str | None, specified: bool) -> tuple[int, str | None]:

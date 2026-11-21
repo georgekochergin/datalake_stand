@@ -338,7 +338,8 @@ class TestManagedLoad(unittest.TestCase):
             load_entity.managed_load(self.spark, self.args())
         read_frame.assert_not_called()
         self.assertTrue(any(
-            "No source rows match the incremental window. JDBC read and Iceberg append skipped. reason=empty_window"
+            "No source rows match the incremental window. JDBC read and Iceberg append skipped. "
+            f"No raw table created by this attempt. target_table={self.args().target_table} reason=empty_window"
             in line for line in logs.output
         ), logs.output)
         self.assertEqual(

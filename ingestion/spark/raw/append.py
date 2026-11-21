@@ -5,6 +5,7 @@ types or load modes.
 """
 
 import logging
+from enum import Enum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -22,6 +23,16 @@ from ingestion.spark.raw.iceberg import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+class AppendReason(Enum):
+    """Stable reason codes and readable explanations for Iceberg append."""
+
+    NO_ROWS = ("no_rows", "No source rows were read for this load")
+
+    def __init__(self, code: str, text: str) -> None:
+        self.code = code
+        self.text = text
 
 
 def append_raw(spark: "SparkSession", target_table: str, frame: "DataFrame", rows: int, process_id: int) -> None:
@@ -50,4 +61,6 @@ def append_raw(spark: "SparkSession", target_table: str, frame: "DataFrame", row
         portion.writeTo(target_table).option("mergeSchema", "true").option("check-ordering", "false").append()
         LOGGER.info("Iceberg append committed target=%s process_id=%s row_count=%s", target_table, process_id, rows)
     else:
-        LOGGER.info("Iceberg append skipped reason=no_rows")
+        reason = AppendReason.NO_ROWS
+        LOGGER.info("%s. Iceberg append skipped. target_table=%s row_count=%s reason=%s",
+                    reason.text, target_table, rows, reason.code)

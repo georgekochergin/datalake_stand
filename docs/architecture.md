@@ -1544,7 +1544,7 @@ Iceberg.
 | `lookback_size`, `lookback_unit` | numeric / text | Фактически применённый отступ (в [партию](glossary.md#term-batch) попадают значения после приведения default к фактическому типу колонки) |
 | `lower_bound`, `lower_bound_op` | text | Зафиксированная нижняя граница и оператор (`>` / `>=`). У новой [партии](glossary.md#term-batch) нижняя граница отсутствует только при [bootstrap](glossary.md#term-bootstrap) |
 | `upper_bound` | text | Замороженная верхняя граница [окна](glossary.md#term-window) чтения |
-| `empty_at_plan` | boolean | Вся таблица источника была пуста при предварительной проверке перед созданием [партии](glossary.md#term-batch) (подробнее ниже).<br>Для пустого [bootstrap](glossary.md#term-bootstrap) фиксирует пустую выборку через `WHERE 1=0` |
+| `empty_at_plan` | boolean | Запрос максимума не нашёл подходящих строк в срезе при планировании [партии](glossary.md#term-batch). Чтение среза пропускается |
 | `status` | text | `PLANNED` → `RUNNING` → `SUCCEEDED` / `FAILED` |
 | `attempt_count` | int | Число запусков [исполнения](glossary.md#term-execution) (0 у [партии](glossary.md#term-batch), закрытой без чтения) |
 | `row_count` | bigint | Дописано строк (заполняется при успехе) |
