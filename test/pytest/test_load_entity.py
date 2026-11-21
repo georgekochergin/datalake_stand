@@ -328,13 +328,19 @@ class TestManagedLoad(unittest.TestCase):
         self.source.unpersist.assert_not_called()
 
     def test_provably_empty_window_finalizes_without_reading(self):
-        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.object(
+        with self.assertLogs(load_entity.LOGGER, level="INFO") as logs, patch.dict(
+            sys.modules, {"psycopg2": self.psycopg2}
+        ), patch.object(
             load_entity, "_plan_batch", return_value=(self.batch(upper_bound=None, empty_at_plan=True), None, None)
         ), patch.object(load_entity.reader, "read_extract_frame") as read_frame, patch.object(
             self.registry, "finalize_batch"
         ) as finalize:
             load_entity.managed_load(self.spark, self.args())
         read_frame.assert_not_called()
+        self.assertTrue(any(
+            "No source rows match the incremental window. JDBC read and Iceberg append skipped. reason=empty_window"
+            in line for line in logs.output
+        ), logs.output)
         self.assertEqual(
             (finalize.call_args.kwargs["row_count"], finalize.call_args.kwargs["observed_max"]),
             (0, None),

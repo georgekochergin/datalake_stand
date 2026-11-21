@@ -133,7 +133,8 @@ def _plan_batch(spark: "SparkSession", args: argparse.Namespace, connect: "DbCon
     batch = registry.get_batch(process_id=args.process_id, source_id=args.source_id,
                            entity_fqn=args.source_table, db_connect=connect)
     if batch is not None:
-        LOGGER.info("JDBC source position probe skipped reason=persisted_batch")
+        reason = reader.JdbcReason.PERSISTED_BATCH
+        LOGGER.info("JDBC incremental maximum not recalculated: %s. reason=%s", reason.text, reason.code)
         if batch["target_table"] != args.target_table:
             raise ValueError("Persisted batch target does not match")
         if batch["incremental_column"] != args.incremental_column:
@@ -211,7 +212,8 @@ def managed_load(spark: "SparkSession", args: argparse.Namespace) -> None:
                entity_fqn=args.source_table, db_connect=connect)
     kind = batch["incremental_type"]
     if empty_incremental_window(batch):
-        LOGGER.info("JDBC batch read and Iceberg append skipped reason=empty_window")
+        reason = reader.JdbcReason.EMPTY_WINDOW
+        LOGGER.info("%s. JDBC read and Iceberg append skipped. reason=%s", reason.text, reason.code)
         registry.finalize_batch(row_count=0, observed_max=None, **key)
         return
     registry.start_batch(**key)

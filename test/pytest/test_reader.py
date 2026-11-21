@@ -145,7 +145,9 @@ class TestProbeBounds(unittest.TestCase):
                     source = reader.ReadSource(dialect, "[s].[t]", jdbc.KeyMetadata((), (), {}), choice)
                     sql_row = (["97"] if incremental else []) + (["2", "6"] if choice else [])
                     filters = ["[position] > 90"] if incremental else []
-                    with patch.object(jdbc, "connection"), patch.object(jdbc, "first_row", return_value=sql_row) as sql:
+                    with patch.object(jdbc, "connection"), patch.object(
+                        jdbc, "first_row", return_value=sql_row
+                    ) as sql, patch.object(reader, "log_sql") as sql_log, patch.object(reader.LOGGER, "info") as info:
                         result = reader.probe_bounds(MagicMock(), make_args(), source, filters,
                                                      scope=reader.JdbcReadScope.BATCH_WINDOW, incremental=incremental)
                     self.assertEqual(result, ("97" if incremental else None, (2, 6) if choice else (None, None)))
@@ -156,6 +158,17 @@ class TestProbeBounds(unittest.TestCase):
                         self.assertEqual("MIN([id])" in query and "MAX([id])" in query, bool(choice))
                         self.assertEqual(query.endswith("WHERE [position] > 90"), bool(incremental))
                         self.assertNotIn("COUNT(", query)
+                        operation = {
+                            (True, True): "combined_bounds",
+                            (True, False): "source_position",
+                            (False, True): "partition_bounds",
+                        }[bool(incremental), bool(choice)]
+                        self.assertTrue(sql_log.call_args.args[1].endswith(f"operation={operation}"))
+                        result_logs = [call.args for call in info.call_args_list if call.args[0].startswith("JDBC result")]
+                        self.assertEqual(len(result_logs), 1)
+                        self.assertEqual(result_logs[0][1], operation)
+                    else:
+                        sql_log.assert_not_called()
 
 
 class TestReadExtractFrame(unittest.TestCase):
@@ -285,6 +298,13 @@ class TestReadExtractFrame(unittest.TestCase):
         self.assertTrue(any(
             "window=[11..12] partitions=1 of 4 requested" in line for line in logs.output
         ), logs.output)
+
+    def test_single_requested_partition_has_its_own_reason(self):
+        keys = self.key_metadata(primary_key=["id"], columns=[("id", "int")])
+        with self.assertLogs(reader.LOGGER, level="INFO") as logs:
+            self.frame(make_args(num_partitions=1), keys=keys)
+        self.assertTrue(any("Only one JDBC partition was requested. reason=single_partition" in line
+                            for line in logs.output), logs.output)
 
     def test_disabled_partitioning_still_requires_metadata(self):
         keys = self.key_metadata()

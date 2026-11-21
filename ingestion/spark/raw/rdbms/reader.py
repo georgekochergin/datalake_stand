@@ -47,6 +47,35 @@ class JdbcReadScope(Enum):
     SOURCE_TABLE = "source_table"
 
 
+class JdbcOperation(Enum):
+    """Stable log codes and readable names for source bounds queries."""
+
+    INCREMENTAL_MAX = ("source_position", "Get the incremental maximum")
+    PARTITION_BOUNDS = ("partition_bounds", "Get JDBC partition bounds")
+    COMBINED_BOUNDS = ("combined_bounds", "Get the incremental maximum and JDBC partition bounds")
+
+    def __init__(self, code: str, text: str) -> None:
+        self.code = code
+        self.text = text
+
+
+class JdbcReason(Enum):
+    """Stable log codes and explanations for skipping JDBC work."""
+
+    PERSISTED_BATCH = ("persisted_batch", "The batch already has a saved window")
+    EMPTY_WINDOW = ("empty_window", "No source rows match the incremental window")
+    DISABLED = ("disabled", "JDBC partitioning is disabled")
+    SINGLE_PARTITION = ("single_partition", "Only one JDBC partition was requested")
+    NO_PARTITION_COLUMN = ("no_partition_column", "No suitable JDBC partition column was found")
+    NULL_BOUNDS = ("null_bounds", "At least one JDBC partition bound is missing")
+    EQUAL_BOUNDS = ("equal_bounds", "The JDBC partition bounds are equal")
+    OUT_OF_LONG_RANGE = ("out_of_long_range", "JDBC partition bounds exceed the signed 64-bit range Spark supports")
+
+    def __init__(self, code: str, text: str) -> None:
+        self.code = code
+        self.text = text
+
+
 @dataclass(frozen=True)
 class ReadSource:
     """Catalog facts and partition choice shared by planning and reading."""
@@ -143,19 +172,26 @@ def probe_bounds(
     sql = f"SELECT {', '.join(expressions)} FROM {source.table}"
     if filters:
         sql += " WHERE " + " AND ".join(filters)
-    operation = "source_position" if incremental is not None else "partition_bounds"
-    log_step(LOGGER, "probe JDBC extraction bounds")
-    log_sql(LOGGER, f"JDBC SQL scope={scope.value} operation={operation}", sql)
+    if incremental is None:
+        operation = JdbcOperation.PARTITION_BOUNDS
+    elif partition is None:
+        operation = JdbcOperation.INCREMENTAL_MAX
+    else:
+        operation = JdbcOperation.COMBINED_BOUNDS
+    log_step(LOGGER, operation.text)
+    log_sql(LOGGER, f"JDBC SQL scope={scope.value} operation={operation.code}", sql)
     with jdbc.connection(spark._jvm, args.jdbc_url, args.jdbc_user, args.jdbc_password) as connection:
         row = jdbc.first_row(connection, sql)
     upper = positions.canonical(row[0], kind) if incremental is not None else None
+    low = high = None
+    result_fields = []
     if incremental is not None:
-        LOGGER.info("JDBC result operation=source_position max_increment_col=%s", upper)
-    if partition is None:
-        return upper, (None, None)
-    convert = date.fromisoformat if partition.kind == "date" else Decimal
-    low, high = (convert(value) if value is not None else None for value in row[-2:])
-    LOGGER.info("JDBC result operation=partition_bounds lower_bound=%s upper_bound=%s", low, high)
+        result_fields.append(f"max_increment_col={upper}")
+    if partition is not None:
+        convert = date.fromisoformat if partition.kind == "date" else Decimal
+        low, high = (convert(value) if value is not None else None for value in row[-2:])
+        result_fields.extend((f"lower_bound={low}", f"upper_bound={high}"))
+    LOGGER.info("JDBC result operation=%s %s", operation.code, " ".join(result_fields))
     return upper, (low, high)
 
 
@@ -184,19 +220,17 @@ def apply_partition_options(
     if partition is None:
         return reader
     low, high = bounds
-    parallel = low is not None and high is not None and low != high
-    out_of_long_range = parallel and _integral_bounds_out_of_long_range(partition.kind, low, high)
-    if out_of_long_range:
-        LOGGER.warning(
-            "jdbc partitioning: bounds of %s [%s..%s] exceed the signed 64-bit"
-            " range Spark parses for partition bounds; single-threaded read",
-            partition.column, low, high,
-        )
-        parallel = False
-    if not parallel:
-        LOGGER.info("jdbc partitioning: fallback reason=%s",
-                    "null_bounds" if low is None or high is None else
-                    "equal_bounds" if low == high else "out_of_long_range")
+    reason = None
+    if low is None or high is None:
+        reason = JdbcReason.NULL_BOUNDS
+    elif low == high:
+        reason = JdbcReason.EQUAL_BOUNDS
+    elif _integral_bounds_out_of_long_range(partition.kind, low, high):
+        reason = JdbcReason.OUT_OF_LONG_RANGE
+    if reason is not None:
+        level = logging.WARNING if reason is JdbcReason.OUT_OF_LONG_RANGE else logging.INFO
+        LOGGER.log(level, "Reading with one JDBC partition: %s. column=%s bounds=[%s..%s] reason=%s",
+                   reason.text, partition.column, low, high, reason.code)
         return reader
     return (
         reader.option("partitionColumn", partition.column)
@@ -234,8 +268,13 @@ def read_extract_frame(
     log_step(LOGGER, "read JDBC source")
     log_sql(LOGGER, f"JDBC dbtable scope={scope.value}", query)
     if partition is None:
-        LOGGER.info("JDBC partition bounds skipped reason=%s",
-                    "disabled" if args.no_jdbc_partitioning else "no_partition_column")
+        if args.no_jdbc_partitioning:
+            reason = JdbcReason.DISABLED
+        elif args.num_partitions == 1:
+            reason = JdbcReason.SINGLE_PARTITION
+        else:
+            reason = JdbcReason.NO_PARTITION_COLUMN
+        LOGGER.info("JDBC partition bounds skipped: %s. reason=%s", reason.text, reason.code)
     frame = reader.load()
     frame = frame.cache()
     if partition is not None:

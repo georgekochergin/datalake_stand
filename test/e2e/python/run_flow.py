@@ -488,9 +488,9 @@ def check_load_trace(task_id, log, incremental, *, regular=False):
         and "'START'" in lifecycle_sql[0]), True)
     if incremental:
         probe_scope = "batch_window" if regular else "source_table"
-        expected += [f"JDBC SQL scope={probe_scope} operation=source_position:", "jdbc partitioning: selected column=",
-                     "JDBC result operation=partition_bounds lower_bound=",
-                     "JDBC result operation=source_position max_increment_col=",
+        expected += [f"JDBC SQL scope={probe_scope} operation=combined_bounds:", "jdbc partitioning: selected column=",
+                     "Get the incremental maximum and JDBC partition bounds",
+                     "JDBC result operation=combined_bounds max_increment_col=",
                      "INSERT INTO ingestion.incremental_batches", "UPDATE ingestion.incremental_state",
                      "pg-meta committed operation=finalize_batch table=ingestion.incremental_state",
                      "pg-meta committed operation=finalize_batch table=ingestion.incremental_batches",
@@ -498,10 +498,13 @@ def check_load_trace(task_id, log, incremental, *, regular=False):
                      "JDBCRelation: Number of partitions:"]
         check(f"{task_id}: JDBC metadata detail appears once", log.count("JDBC DatabaseMetaData.getColumns"), 1)
         check(f"{task_id}: Spark SQL block retains logger name", bool(re.search(
-            rf"INFO [\w.]+: JDBC SQL scope={probe_scope} operation=source_position:\n", log)), True)
-        probes = logged_sql(log, "operation=source_position")
+            rf"INFO [\w.]+: JDBC SQL scope={probe_scope} operation=combined_bounds:\n", log)), True)
+        probes = logged_sql(log, "operation=combined_bounds")
         check(f"{task_id}: exactly one combined probe", len(probes), 1)
-        check(f"{task_id}: no separate partition probe", len(logged_sql(log, "operation=partition_bounds")), 0)
+        check(f"{task_id}: exactly one result with all bounds", len(re.findall(
+            r"JDBC result operation=combined_bounds max_increment_col=\S+ lower_bound=\S+ upper_bound=\S+", log)), 1)
+        for operation in ("source_position", "partition_bounds"):
+            check(f"{task_id}: no separate {operation}", f"operation={operation}" in log, False)
         source_sql = probes[0] if probes else ""
         check(f"{task_id}: combined probe uses the lower predicate without counts", bool(
             "max_increment_col" in source_sql and "MIN(" in source_sql and "upper_bound" in source_sql
@@ -511,8 +514,8 @@ def check_load_trace(task_id, log, incremental, *, regular=False):
             "SELECT 1" in sql and "FROM ingestion.incremental_batches" in sql and "%s" not in sql
             for sql in lifecycle_sql), True)
     else:
-        expected += ["--no-jdbc-partitioning", "JDBC partition bounds skipped reason=disabled"]
-        for marker in ("operation=source_position", "operation=partition_bounds",
+        expected += ["--no-jdbc-partitioning", "JDBC partition bounds skipped: JDBC partitioning is disabled. reason=disabled"]
+        for marker in ("operation=source_position", "operation=partition_bounds", "operation=combined_bounds",
                        "ingestion.incremental_state", "ingestion.incremental_batches"):
             check(f"{task_id}: full load does not emit {marker}", marker in log, False)
         check(f"{task_id}: disabled partitioning does not report requested partitions",
