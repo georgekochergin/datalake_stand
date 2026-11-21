@@ -1345,10 +1345,9 @@ TO_CHAR(SYS_EXTRACT_UTC("changed_at"), 'YYYY-MM-DD"T"HH24:MI:SS.FF7"Z"')
 применённый оператор сохраняется в колонке [партии](glossary.md#term-batch) `lower_bound_op`, и читатель
 [окна](glossary.md#term-window) берёт его оттуда, а не выводит из типа или отступа.
 
-Если вычитание выходит за минимум типа, нижняя граница не отбрасывается
-частично, а снимается: lower = NULL, [окно](glossary.md#term-window) читается от начала (безопаснее
-потерять производительность, чем строки). `lower_bound_op` при этом
-сохраняет «потенциальный» оператор и на предикат не влияет.
+Если рассчитанная нижняя граница не представима в типе позиции, новая
+[партия](glossary.md#term-batch) не планируется. Загрузчик не заменяет ошибку
+чтением от начала таблицы.
 
 #### Первичное наполнение и проверка источника
 
@@ -1541,7 +1540,7 @@ Iceberg.
 | `expected_revision` | bigint | Ревизия состояния, которую [партия](glossary.md#term-batch) вправе финализировать (для [CAS](glossary.md#term-cas)) |
 | `watermark_before` | text | Значение [watermark](glossary.md#term-watermark) до [партии](glossary.md#term-batch) |
 | `lookback_size`, `lookback_unit` | numeric / text | Фактически применённый отступ (в [партию](glossary.md#term-batch) попадают значения после приведения default к фактическому типу колонки) |
-| `lower_bound`, `lower_bound_op` | text | Зафиксированная нижняя граница и оператор (`>` / `>=`). NULL границы означает её отсутствие: [bootstrap](glossary.md#term-bootstrap) или выход за минимум типа |
+| `lower_bound`, `lower_bound_op` | text | Зафиксированная нижняя граница и оператор (`>` / `>=`). У новой [партии](glossary.md#term-batch) нижняя граница отсутствует только при [bootstrap](glossary.md#term-bootstrap) |
 | `upper_bound` | text | Замороженная верхняя граница [окна](glossary.md#term-window) чтения |
 | `empty_at_plan` | boolean | Вся таблица источника была пуста при предварительной проверке перед созданием [партии](glossary.md#term-batch) (подробнее ниже).<br>Для пустого [bootstrap](glossary.md#term-bootstrap) фиксирует пустую выборку через `WHERE 1=0` |
 | `status` | text | `PLANNED` → `RUNNING` → `SUCCEEDED` / `FAILED` |
