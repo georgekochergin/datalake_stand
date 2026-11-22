@@ -189,7 +189,7 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
             from ingestion.spark.raw.rdbms import reader
 
             read_source = reader.inspect_source(spark, args)
-            info = entity.validate_incremental_column(read_source, args, check_not_null=False)
+            info = entity.resolve_incremental_column(read_source, args, check_not_null=False)
             kind = expected_kind
             upper, _ = reader.probe_bounds(
                 spark, args, read_source, [f"{read_source.dialect.quote_identifier(info.name)} IS NOT NULL"],
@@ -198,7 +198,7 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
             declared = args.position_type
             args.position_type = "bigint"
             try:
-                entity.validate_incremental_column(read_source, args, check_not_null=False)
+                entity.resolve_incremental_column(read_source, args, check_not_null=False)
             except ValueError as error:
                 require("Incremental type mismatch" in str(error), target + " rejects wrong declared type")
             else:
@@ -421,7 +421,7 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
     """
     from ingestion import meta
     from ingestion.spark.raw.rdbms.incremental import entity
-    from ingestion.spark.raw.rdbms.incremental.act_snap import snapshot as act_snap
+    from ingestion.spark.raw.rdbms.incremental.act_snap import snapshot
 
     target = f"raw.e2e_contract.{source}_snapshot_recovery"
     args = Namespace(
@@ -482,12 +482,12 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
     snapshot_args.incremental_column = None
     snapshot_args.target_table = target + "__act_snap"
 
-    def snapshot(values, crash=False):
+    def run_snapshot(values, crash=False):
         """Read a real JDBC projection and optionally fail after the RTAS commit."""
         snapshot_args.process_id = args.process_id
         register_virtual(snapshot_args.source_table, projection(values), position_columns)
         before = registry()
-        overwrite = act_snap._overwrite_snapshot
+        overwrite = snapshot._overwrite_snapshot
 
         def commit_then_crash(*arguments, **kwargs):
             """Leave a genuine committed Iceberg version behind the injected crash."""
@@ -496,12 +496,12 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
 
         try:
             if crash:
-                with patch.object(act_snap, "_overwrite_snapshot", side_effect=commit_then_crash), \
+                with patch.object(snapshot, "_overwrite_snapshot", side_effect=commit_then_crash), \
                         virtual_sources():
-                    act_snap.managed_snapshot(spark, snapshot_args)
+                    snapshot.managed_snapshot(spark, snapshot_args)
             else:
                 with virtual_sources():
-                    act_snap.managed_snapshot(spark, snapshot_args)
+                    snapshot.managed_snapshot(spark, snapshot_args)
         finally:
             require(registry() == before, f"{source}: snapshot leaves all registry fields and batches untouched")
 
@@ -512,10 +512,10 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
             "ORDER BY committed_at DESC LIMIT 1").collect()
 
     allocate()
-    snapshot(())
+    run_snapshot(())
     require(spark.table(snapshot_args.target_table).count() == 0,
             f"{source}: snapshot before bootstrap publishes an empty table")
-    require(act_snap.current_snapshot_author(spark, snapshot_args.target_table) == args.process_id,
+    require(snapshot.current_snapshot_author(spark, snapshot_args.target_table) == args.process_id,
             f"{source}: first empty publication has an Iceberg author")
     allocate()
     try:
@@ -544,36 +544,36 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
             f"{source}: reads a slice below the watermark without moving it back")
     allocate()
     try:
-        snapshot((9, 11, 12), crash=True)
+        run_snapshot((9, 11, 12), crash=True)
     except RuntimeError as exc:
         require(str(exc) == "injected post-snapshot commit crash",
                 f"{source}: fault occurs after the real snapshot commit")
     else:
         raise AssertionError("snapshot fault injection did not execute")
     committed = version()
-    with patch.object(act_snap, "read_extract_frame", side_effect=AssertionError("retry must not read")):
-        act_snap.managed_snapshot(spark, snapshot_args)
+    with patch.object(snapshot, "read_extract_frame", side_effect=AssertionError("retry must not read")):
+        snapshot.managed_snapshot(spark, snapshot_args)
     require(version() == committed, f"{source}: committed retry does not change freshness or version")
     require({int(row[0]) for row in spark.table(snapshot_args.target_table).select("position").collect()}
             == {9, 11, 12}, f"{source}: snapshot recovers the row outside lookback")
     require(spark.table(snapshot_args.target_table).select("__process_id").distinct().collect()[0][0]
             == args.process_id, f"{source}: recovered publication still carries current process for Asset")
     allocate()
-    with patch.object(act_snap.LOGGER, "warning") as warning:
-        snapshot(())
+    with patch.object(snapshot.LOGGER, "warning") as warning:
+        run_snapshot(())
         require(warning.call_count == 1, f"{source}: empty source emits a warning")
     require(version() == committed and spark.table(snapshot_args.target_table).count() == 3,
             f"{source}: empty check preserves data and publication freshness")
-    require(act_snap.current_snapshot_author(spark, snapshot_args.target_table) != args.process_id,
+    require(snapshot.current_snapshot_author(spark, snapshot_args.target_table) != args.process_id,
             f"{source}: empty check cannot claim the previous publication")
     allocate()
     register_virtual(snapshot_args.source_table, projection((20, 21)), position_columns)
     with virtual_sources():
-        frame = act_snap.read_extract_frame(spark, snapshot_args)
+        frame = snapshot.read_extract_frame(spark, snapshot_args)
     try:
         with patch.object(spark, "sql", side_effect=RuntimeError("injected pre-commit failure")):
             try:
-                act_snap._overwrite_snapshot(
+                snapshot._overwrite_snapshot(
                     spark, frame, target=snapshot_args.target_table, process_id=snapshot_args.process_id,
                     load_dttm=datetime.now(timezone.utc),
                 )
@@ -584,7 +584,7 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
     finally:
         frame.unpersist()
     require(version() == committed, f"{source}: failed attempt leaves previous publication intact")
-    snapshot((20, 21))
+    run_snapshot((20, 21))
     rows = spark.table(snapshot_args.target_table).select("position", "__process_id").collect()
     require({int(row[0]) for row in rows} == {20, 21}
             and {row[1] for row in rows} == {args.process_id},

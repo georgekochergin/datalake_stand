@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from ingestion.logging import configure_driver_logging
 from ingestion.spark.raw.iceberg import validate_target_table
+from ingestion.spark.raw.rdbms import cli
 from ingestion.spark.raw.rdbms.incremental import entity
 
 if TYPE_CHECKING:
@@ -18,23 +19,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Append one incremental entity window from a JDBC source into the raw layer."
     )
-    parser.add_argument("--jdbc-url", required=True)
-    parser.add_argument("--jdbc-user", required=True)
-    parser.add_argument("--jdbc-password", required=True)
-    parser.add_argument("--source-table", required=True)
-    parser.add_argument("--target-table", required=True)
-    parser.add_argument("--process-id", required=True, type=int)
+    cli.add_jdbc_load_args(parser)
     parser.add_argument("--incremental-config", required=True)
-    parser.add_argument("--num-jdbc-partitions", dest="num_partitions", type=int, default=4)
-    parser.add_argument("--no-jdbc-partitioning", action="store_true")
     parser.add_argument("--source-id")
     parser.add_argument("--dag-id")
     parser.add_argument("--run-id")
     args = parser.parse_args(argv)
-    if args.process_id <= 0:
-        raise ValueError(f"--process-id must be a positive integer (got {args.process_id})")
-    if args.num_partitions <= 0:
-        raise ValueError(f"--num-jdbc-partitions must be a positive integer (got {args.num_partitions})")
+    cli.validate_jdbc_load_args(args)
     from ingestion.sources.rdbms.incremental_config import validate
 
     config = validate(json.loads(args.incremental_config))

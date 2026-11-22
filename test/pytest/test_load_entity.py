@@ -139,17 +139,17 @@ class TestEmptyIncrementalWindow(unittest.TestCase):
                 "lower_bound_op": ">=" if lookback else ">"}
 
     def test_equal_bounds_with_zero_lookback_is_empty(self):
-        self.assertTrue(entity._empty_incremental_window(self.batch()))
-        self.assertTrue(entity._empty_incremental_window(self.batch(lower="2026-10-26", upper="2026-10-26")))
+        self.assertTrue(entity.empty_incremental_window(self.batch()))
+        self.assertTrue(entity.empty_incremental_window(self.batch(lower="2026-10-26", upper="2026-10-26")))
 
     def test_lookback_window_with_equal_bounds_is_not_empty(self):
-        self.assertFalse(entity._empty_incremental_window(self.batch(lookback=3)))
-        self.assertFalse(entity._empty_incremental_window(self.batch(lower=None, lookback=3)))
+        self.assertFalse(entity.empty_incremental_window(self.batch(lookback=3)))
+        self.assertFalse(entity.empty_incremental_window(self.batch(lower=None, lookback=3)))
 
     def test_strict_window_with_distinct_bounds_is_not_empty(self):
         for changes in ({"lower": "7"}, {"upper": "12"}, {"lower": None}, {"lower": None, "upper": None}):
             with self.subTest(changes=changes):
-                self.assertFalse(entity._empty_incremental_window(self.batch(**changes)))
+                self.assertFalse(entity.empty_incremental_window(self.batch(**changes)))
 
 
 class TestResolveBatch(unittest.TestCase):
@@ -180,16 +180,16 @@ class TestResolveBatch(unittest.TestCase):
             entity.jdbc, "connection"
         ), patch.object(entity.jdbc, "first_row", return_value=row) as query:
             result = entity._resolve_batch(self.spark, args, lambda: None)
-        return result.batch, catalog, plan, query, result.partition_bounds
+        return types.SimpleNamespace(resolved=result, catalog=catalog, persist=plan, query=query)
 
     def test_regular_probe_uses_locked_watermark(self):
-        result, catalog, _, query, bounds = self.plan(None, watermark="8")
-        self.assertEqual(result, {"lower_bound": "8", "lower_bound_op": ">", "upper_bound": "10"})
-        catalog.assert_called_once()
-        query.assert_called_once()
-        self.assertEqual(query.call_args.args[1],
+        run = self.plan(None, watermark="8")
+        self.assertEqual(run.resolved.batch, {"lower_bound": "8", "lower_bound_op": ">", "upper_bound": "10"})
+        run.catalog.assert_called_once()
+        run.query.assert_called_once()
+        self.assertEqual(run.query.call_args.args[1],
                          "SELECT MAX([_batch_id]) AS max_increment_col FROM [retail_bank].[transactions] WHERE [_batch_id] > 8")
-        self.assertEqual(bounds, (None, None))
+        self.assertEqual(run.resolved.partition_bounds, (None, None))
 
     def test_nullability_check_is_opt_out_only(self):
         info = entity.jdbc.ColumnMeta("_batch_id", "bigint", 19, 0, False)
@@ -198,7 +198,7 @@ class TestResolveBatch(unittest.TestCase):
         args = self.args("--incremental-config", json.dumps({"contract": {
             "source_column": "_batch_id", "position_type": "bigint", "check_not_null": False,
         }, "lookback": {"size": 0, "unit": None}}))
-        _, _, _, query, _ = self.plan(None, args=args, meta=info)
+        query = self.plan(None, args=args, meta=info).query
         query.assert_called_once()
         self.assertTrue(query.call_args.args[1].endswith("WHERE [_batch_id] IS NOT NULL"))
         wrong_type = entity.jdbc.ColumnMeta("_batch_id", "int", 10, 0, False)
@@ -206,13 +206,13 @@ class TestResolveBatch(unittest.TestCase):
             self.plan(None, args=args, meta=wrong_type)
 
     def test_empty_slice_and_lower_max_are_not_errors(self):
-        result, _, _, _, _ = self.plan(None, watermark="12", row=(None,))
-        self.assertIsNone(result["upper_bound"])
+        run = self.plan(None, watermark="12", row=(None,))
+        self.assertIsNone(run.resolved.batch["upper_bound"])
         args = self.args()
         args.lookback_size = 5
-        result, _, _, query, _ = self.plan(None, args=args, watermark="12", row=("10",))
-        self.assertEqual(result["upper_bound"], "10")
-        self.assertTrue(query.call_args.args[1].endswith("WHERE [_batch_id] > 7"))
+        run = self.plan(None, args=args, watermark="12", row=("10",))
+        self.assertEqual(run.resolved.batch["upper_bound"], "10")
+        self.assertTrue(run.query.call_args.args[1].endswith("WHERE [_batch_id] > 7"))
 
     def test_succeeded_batch_short_circuits_without_source(self):
         batch = {"target_table": "raw.bank.retail_bank__transactions",
@@ -220,12 +220,13 @@ class TestResolveBatch(unittest.TestCase):
                  "row_count": 5, "finished_at": "2026-11-06"}
         args = self.args()
         with self.assertLogs(entity.LOGGER, level="INFO") as logs:
-            result, catalog, plan, probe, bounds = self.plan(batch, args=args)
-        self.assertIs(result, batch)
-        self.assertIsNone(bounds)
-        catalog.assert_not_called()
-        plan.assert_not_called()
-        probe.assert_not_called()
+            run = self.plan(batch, args=args)
+        self.assertIs(run.resolved.batch, batch)
+        self.assertIsNone(run.resolved.read_source)
+        self.assertIsNone(run.resolved.partition_bounds)
+        run.catalog.assert_not_called()
+        run.persist.assert_not_called()
+        run.query.assert_not_called()
         self.assertTrue(any("repeat read skipped" in line for line in logs.output))
 
     def test_existing_batch_target_mismatch_rejected(self):
@@ -248,12 +249,13 @@ class TestResolveBatch(unittest.TestCase):
     def test_retry_checks_type_without_reprobing_incremental_maximum(self):
         batch = {"target_table": "raw.bank.retail_bank__transactions",
                  "incremental_column": "_batch_id", "incremental_type": "bigint", "status": "RUNNING"}
-        result, catalog, plan, probe, bounds = self.plan(batch)
-        self.assertIs(result, batch)
-        self.assertIsNone(bounds)
-        catalog.assert_called_once()
-        plan.assert_not_called()
-        probe.assert_not_called()
+        run = self.plan(batch)
+        self.assertIs(run.resolved.batch, batch)
+        self.assertIsNotNone(run.resolved.read_source)
+        self.assertIsNone(run.resolved.partition_bounds)
+        run.catalog.assert_called_once()
+        run.persist.assert_not_called()
+        run.query.assert_not_called()
 
     def test_invalid_lookback_rejected_before_planning(self):
         with self.assertRaisesRegex(ValueError, "forbids a unit"):

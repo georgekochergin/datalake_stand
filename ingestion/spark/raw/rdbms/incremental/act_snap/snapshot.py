@@ -46,7 +46,10 @@ def current_snapshot_author(spark: "SparkSession", target: str) -> int | None:
 
 
 def build_rtas_sql(target: str, process_id: int, columns: list[str]) -> str:
-    """Render the atomic CREATE OR REPLACE TABLE ... AS SELECT statement."""
+    """Render the atomic replacement statement against the snapshot_source temp view.
+
+    The caller must register that view before executing the statement.
+    """
     rendered = ", ".join(quote_identifier(column) for column in columns)
     return (
         f"CREATE OR REPLACE TABLE {target} USING iceberg "

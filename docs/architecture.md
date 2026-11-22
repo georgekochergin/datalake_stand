@@ -1405,7 +1405,7 @@ TO_CHAR(SYS_EXTRACT_UTC("changed_at"), 'YYYY-MM-DD"T"HH24:MI:SS.FF7"Z"')
 `ingestion/meta`, читает окно через `incremental/window.py` (предикаты, позиция,
 count/max-агрегация) и общий `reader.py`, а пишет [raw](glossary.md#term-raw) через writer слоя
 `append.py`. [Полный срез](glossary.md#term-full)
-исполняет `full/load_entity.py` без обращений к реестру, снимочный поток —
+исполняет `full/load_entity.py` без обращений к реестру. Загрузку [актуального снимка](glossary.md#term-snapshot) запускает
 `incremental/act_snap/load_act_snap.py`. Эта точка входа запускает Spark и передаёт управление
 в `incremental/act_snap/snapshot.py`, который читает источник и публикует таблицу Iceberg
 (см. [DAG-и снимков](#87-dag-и-снимков-и-таблицы-снимки)).
@@ -1428,7 +1428,7 @@ Iceberg-коммит в эту транзакцию не входит.
 | Инкрементальный [bootstrap](glossary.md#term-bootstrap) ([watermark](glossary.md#term-watermark) NULL) | `bootstrap` | [raw](glossary.md#term-raw)-таблица | только upper | устанавливается (NULL → максимум) |
 | Инкрементальный регулярный | `regular` | [raw](glossary.md#term-raw)-таблица | lower и upper | max([watermark](glossary.md#term-watermark), observed) |
 
-[Полный срез](glossary.md#term-full) ([сущность](glossary.md#term-entity) без инкрементальной колонки) и снимочный поток
+[Полный срез](glossary.md#term-full) ([сущность](glossary.md#term-entity) без инкрементальной колонки) и загрузка [актуального снимка](glossary.md#term-snapshot)
 ([DAG-и снимков](#87-dag-и-снимков-и-таблицы-снимки)) в реестр **не пишутся**: их загрузки
 не имеют окон и [watermark](glossary.md#term-watermark), факт и свежесть загрузки читаются по данным [raw](glossary.md#term-raw)
 и метаданным Iceberg, а не по pg-meta. Наличие строки `incremental_state`
@@ -1860,7 +1860,7 @@ COMMIT;
 - Мета-колонки те же: `__process_id` (автор публикации) и `__load_dttm`
   (единый литерал на весь снимок — по нему считается свежесть данных).
 - Схему остальной части задаёт JDBC-проекция источника на момент снимка.
-- Namespace каталога снимочный поток создаёт сам (`CREATE NAMESPACE IF NOT
+- Загрузчик [актуального снимка](glossary.md#term-snapshot) создаёт namespace каталога сам (`CREATE NAMESPACE IF NOT
   EXISTS` перед первой публикацией): DAG-снимок независим от того, запускалась
   ли когда-либо обычная загрузка [сущности](glossary.md#term-entity).
 - Единственное отличие DDL от [raw](glossary.md#term-raw)-таблицы — отсутствие `PARTITIONED BY`:
