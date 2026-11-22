@@ -2,19 +2,33 @@
 
 Pure DB-API code on the shared ingestion.meta transaction helper. Owns the
 state-then-batch lock order and CAS revision fencing; serves incremental
-entities only — full-slice loads and snapshot flows never call it.
+entities only — full-slice loads and snapshot flows never call it. The
+registry stores and validates frozen windows: computing bounds and typed
+maxima belongs to the planner callbacks and ingestion.positions.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Literal
+from typing import Literal, Protocol
 
 from . import LOG, DbConnect, DbCursor, DbRow, _execute, _operation, _row
 
-_CalculateLower = Callable[[str | None], tuple[str | None, str]]
-_ProbeUpper = Callable[[str | None, str], str | None]
-_ComparePositions = Callable[[str, str | None], int]
+
+class BatchPlanner(Protocol):
+    """Source probes that plan_batch runs inside its pg-meta transaction.
+
+    Both methods run while the incremental_state row is locked, so the frozen
+    bounds and the checked-out revision always match. probe_upper may issue a
+    JDBC query to the source database.
+    """
+
+    def calculate_lower(self, watermark: str | None) -> tuple[str | None, str]:
+        """Return the lower bound and its operator for the committed watermark."""
+        ...
+
+    def probe_upper(self, lower: str | None, op: str) -> str | None:
+        """Return the source maximum over the lower predicate, or None when empty."""
+        ...
 
 
 def _check_contract(state: DbRow, column: str | None, incremental_type: str | None) -> None:
@@ -60,7 +74,12 @@ def _lock_batch(cur: DbCursor, process_id: int, source_id: str, entity_fqn: str)
 
 
 def get_batch(*, process_id: int, source_id: str, entity_fqn: str, db_connect: DbConnect) -> DbRow | None:
-    """Return the process's revision-validated batch, or None before planning."""
+    """Return the process's revision-validated batch, or None before planning.
+
+    One pg-meta transaction: an unlocked existence probe first, so a fresh
+    execution takes no state lock at all; an existing batch is then fenced by
+    locking state and batch FOR UPDATE in the shared order.
+    """
     with _operation(db_connect, "get_batch", process_id=process_id, source_id=source_id,
                     entity_fqn=entity_fqn) as (cur, _):
         _execute(cur,
@@ -89,18 +108,17 @@ def _batch_reason(watermark: str | None) -> Literal["bootstrap", "regular"]:
 def plan_batch(
     *, process_id: int, dag_id: str, run_id: str, source_id: str,
     entity_fqn: str, target_table: str, incremental_column: str, incremental_type: str,
-    upper_bound: str | None = None, empty_at_plan: bool = False, lookback_size: int = 0,
-    lookback_unit: str | None = None, calculate_lower: _CalculateLower | None = None,
-    probe_upper: _ProbeUpper | None = None, db_connect: DbConnect,
+    lookback_size: int = 0, lookback_unit: str | None = None, planner: BatchPlanner,
+    db_connect: DbConnect,
 ) -> DbRow | None:
     """Persist fixed bounds once and return the original batch on retry.
 
-    The registry serves incremental entities only; full-slice loads and
-    snapshot flows never call it. The batch identity is (process_id,
-    source_id, entity_fqn): retries of one execution replan into the same
-    frozen window, a fresh execution plans a fresh batch. The optional source
-    probe receives the actual lower predicate under the state lock so its
-    result and the frozen lower bound always use the same revision.
+    One pg-meta transaction: INSERT the state ON CONFLICT DO NOTHING; state
+    FOR UPDATE; batch FOR UPDATE — a retry of this execution returns its
+    frozen window without probing again. A fresh batch is planned through
+    the planner callbacks, which run while the state row stays locked, and
+    inserted with the frozen bounds. The batch identity is (process_id,
+    source_id, entity_fqn): a fresh execution plans a fresh batch.
     """
     if incremental_column is None or incremental_type is None:
         raise ValueError("The incremental registry requires an incremental column and type")
@@ -131,15 +149,9 @@ def plan_batch(
             return batch
         watermark = state["watermark"]
         reason = _batch_reason(watermark)
-        if calculate_lower is None:
-            if lookback_size:
-                raise ValueError("Nonzero lookback requires calculate_lower")
-            lower, lower_op = watermark, ">"
-        else:
-            lower, lower_op = calculate_lower(watermark)
-        if probe_upper is not None:
-            upper_bound = probe_upper(lower, lower_op)
-            empty_at_plan = upper_bound is None
+        lower, lower_op = planner.calculate_lower(watermark)
+        upper_bound = planner.probe_upper(lower, lower_op)
+        empty_at_plan = upper_bound is None
         _execute(cur,
             "INSERT INTO ingestion.incremental_batches "
             "(process_id, dag_id, run_id, source_id, entity_fqn, target_table, reason, "
@@ -156,7 +168,12 @@ def plan_batch(
 
 
 def start_batch(*, process_id: int, source_id: str, entity_fqn: str, db_connect: DbConnect) -> DbRow | None:
-    """Start an attempt after the caller has ensured no live executor remains."""
+    """Start an attempt after the caller has ensured no live executor remains.
+
+    One pg-meta transaction: state and batch FOR UPDATE in the shared order;
+    an already-succeeded batch returns unchanged, otherwise the batch becomes
+    RUNNING with attempt_count incremented.
+    """
     with _operation(db_connect, "start_batch", process_id=process_id, source_id=source_id,
                     entity_fqn=entity_fqn) as (cur, changes):
         _, batch = _lock_batch(cur, process_id, source_id, entity_fqn)
@@ -174,18 +191,19 @@ def start_batch(*, process_id: int, source_id: str, entity_fqn: str, db_connect:
         return started
 
 
-_UNSET = object()
-
-
 def finalize_batch(
     *, process_id: int, source_id: str, entity_fqn: str, row_count: int,
-    observed_max: str | None = None, compare_positions: _ComparePositions | None = None,
-    watermark_after: object = _UNSET, db_connect: DbConnect,
+    observed_max: str | None, watermark_after: str | None, db_connect: DbConnect,
 ) -> DbRow | None:
     """Atomically finish a batch and CAS the state revision.
 
-    compare_positions(left, right) returns a negative/zero/positive typed
-    comparison. Alternatively supply the typed maximum as watermark_after.
+    One pg-meta transaction: state and batch FOR UPDATE in the shared order;
+    UPDATE the state watermark guarded by a revision CAS; UPDATE the batch to
+    SUCCEEDED. watermark_after is the typed maximum of the previous watermark
+    and observed_max, computed by the caller through ingestion.positions.
+    NULL positions are ignored like in positions.maximum: None is accepted
+    only when both positions are NULL, otherwise the known position is
+    required.
     """
     if type(row_count) is not int or row_count < 0:
         raise ValueError("row_count must be a nonnegative integer")
@@ -196,23 +214,16 @@ def finalize_batch(
             changes.append(("incremental_batches", batch, None))
             return batch
         before = state["watermark"]
-        if observed_max is None:
-            after = before
-        elif before is None:
-            after = observed_max
-        elif compare_positions is not None:
-            after = observed_max if compare_positions(observed_max, before) > 0 else before
-        elif watermark_after is not _UNSET:
-            if watermark_after not in (before, observed_max):
-                raise ValueError("watermark_after must be the typed maximum of before and observed_max")
-            after = watermark_after
-        else:
-            raise ValueError("Typed compare_positions or watermark_after is required")
+        allowed = {value for value in (before, observed_max) if value is not None}
+        if not allowed:
+            allowed = {None}
+        if watermark_after not in allowed:
+            raise ValueError("watermark_after must be the typed maximum of before and observed_max")
         _execute(cur,
             "UPDATE ingestion.incremental_state SET watermark = %s, revision = revision + 1, "
             "last_process_id = %s, updated_at = clock_timestamp() "
             "WHERE source_id = %s AND entity_fqn = %s AND revision = %s RETURNING *",
-            (after, batch["process_id"], batch["source_id"], batch["entity_fqn"],
+            (watermark_after, batch["process_id"], batch["source_id"], batch["entity_fqn"],
              batch["expected_revision"]),
         )
         if cur.rowcount != 1:
@@ -223,7 +234,7 @@ def finalize_batch(
             "observed_max = %s, watermark_after = %s, "
             "finished_at = clock_timestamp() "
             "WHERE process_id = %s AND source_id = %s AND entity_fqn = %s RETURNING *",
-            (row_count, observed_max, after, process_id, source_id, entity_fqn),
+            (row_count, observed_max, watermark_after, process_id, source_id, entity_fqn),
         )
         finalized = _row(cur)
         changes.append(("incremental_batches", batch, finalized))
@@ -231,7 +242,12 @@ def finalize_batch(
 
 
 def fail_batch(*, process_id: int, source_id: str, entity_fqn: str, db_connect: DbConnect) -> DbRow | None:
-    """Record a failed attempt without changing extraction state."""
+    """Record a failed attempt without changing extraction state.
+
+    One pg-meta transaction: state and batch FOR UPDATE in the shared order;
+    an already-succeeded batch returns unchanged, otherwise the batch becomes
+    FAILED and the watermark and revision stay as they are.
+    """
     with _operation(db_connect, "fail_batch", process_id=process_id, source_id=source_id,
                     entity_fqn=entity_fqn) as (cur, changes):
         _, batch = _lock_batch(cur, process_id, source_id, entity_fqn)

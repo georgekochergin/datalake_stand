@@ -2,17 +2,13 @@
 
 import argparse
 import json
-import os
-from typing import TYPE_CHECKING
 
 from ingestion.logging import configure_driver_logging
+from ingestion.meta import dsn_connect
 from ingestion.spark.raw.iceberg import validate_target_table
 from ingestion.spark.raw.rdbms import cli
 from ingestion.spark.raw.rdbms.incremental import entity
 from ingestion.sources.rdbms.incremental_config import validate, window_contract
-
-if TYPE_CHECKING:
-    from psycopg2.extensions import connection as Psycopg2Connection
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -31,18 +27,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def _connect_pg_meta() -> "Psycopg2Connection":
-    """Open a registry connection using the DSN passed by the Airflow operator."""
-    import psycopg2
-
-    dsn = os.environ.get("INGESTION_META_DSN")
-    if not dsn:
-        raise RuntimeError(
-            "INGESTION_META_DSN is not set: the incremental loader needs pg-meta credentials"
-        )
-    return psycopg2.connect(dsn)
-
-
 def main(argv: list[str] | None = None) -> None:
     """Load one entity from a JDBC source into the raw layer."""
     configure_driver_logging()
@@ -54,7 +38,7 @@ def main(argv: list[str] | None = None) -> None:
 
     spark = SparkSession.builder.getOrCreate()
     try:
-        entity.managed_load(spark, args, db_connect=_connect_pg_meta)
+        entity.managed_load(spark, args, db_connect=dsn_connect)
     finally:
         spark.stop()
 

@@ -12,8 +12,25 @@ from uuid import uuid4
 
 from ingestion import meta
 from ingestion.meta import registry
+from ingestion.sources.rdbms import positions
 
 ROOT = Path("/workspace")
+
+
+class IntPlanner:
+    """Planner double over integer positions with a fixed probed maximum."""
+
+    def __init__(self, upper="10", lower=None):
+        self.upper = upper
+        self.lower = lower
+
+    def calculate_lower(self, watermark):
+        """Apply the configured lower computation, or read from the watermark."""
+        return self.lower(watermark) if self.lower else (watermark, ">")
+
+    def probe_upper(self, lower, op):
+        """Return the fixed maximum."""
+        return self.upper
 
 
 @unittest.skipUnless(os.environ.get("EXTRACTION_TEST_DSN"), "EXTRACTION_TEST_DSN is not set")
@@ -57,25 +74,26 @@ class PostgresTests(unittest.TestCase):
         self.source = uuid4().hex
         self.args = dict(process_id=1, dag_id="dag", run_id="run1", source_id=self.source,
                          entity_fqn="s.t", target_table="raw.s.t", incremental_column="id",
-                         incremental_type="bigint", upper_bound="10", empty_at_plan=False,
-                         db_connect=self.connect)
+                         incremental_type="bigint", db_connect=self.connect)
 
     def plan(self, **changes):
-        """Plan a batch with test-specific overrides."""
-        return registry.plan_batch(**(self.args | changes))
+        """Plan a batch with a planner double and test-specific overrides."""
+        planner = changes.pop("planner", IntPlanner())
+        return registry.plan_batch(**(self.args | changes), planner=planner)
 
     def finish(self, batch, count=1, observed="10"):
-        """Finalize using an integer comparator rather than textual ordering."""
+        """Finalize with the typed integer maximum of the watermark and observed max."""
+        before = self.state()["watermark"]
         return registry.finalize_batch(
             process_id=batch["process_id"], source_id=batch["source_id"],
             entity_fqn=batch["entity_fqn"], row_count=count, observed_max=observed,
+            watermark_after=positions.maximum(before, observed, "bigint"),
             db_connect=self.connect,
-            compare_positions=lambda left, right: (int(left) > int(right)) - (int(left) < int(right)),
         )
 
     def state(self):
         """Read committed state for this case."""
-        with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+        with meta.transaction(db_connect=self.connect) as conn, conn.cursor() as cur:
             cur.execute("SELECT * FROM ingestion.incremental_state WHERE source_id = %s", (self.source,))
             return meta._row(cur)
 
@@ -88,7 +106,7 @@ class PostgresTests(unittest.TestCase):
                          entity_fqn=batch["entity_fqn"], db_connect=self.connect)
         registry.fail_batch(process_id=batch["process_id"], source_id=batch["source_id"],
                         entity_fqn=batch["entity_fqn"], db_connect=self.connect)
-        retry = self.plan(upper_bound="99")
+        retry = self.plan(planner=IntPlanner(upper="99"))
         self.assertEqual(retry["process_id"], batch["process_id"])
         self.assertEqual(retry["upper_bound"], "10")
         self.assertEqual(retry["status"], "FAILED")
@@ -109,10 +127,10 @@ class PostgresTests(unittest.TestCase):
         """A lookback never moves the watermark backwards and no-op advances revision."""
         self.finish(self.plan(), observed="9")
         batch = self.plan(process_id=2, run_id="run2", lookback_size=2,
-                          calculate_lower=lambda value: (str(int(value) - 2), ">="))
+                          planner=IntPlanner(lower=lambda value: (str(int(value) - 2), ">=")))
         self.assertEqual((batch["lower_bound"], batch["lower_bound_op"]), ("7", ">="))
         self.assertEqual(self.finish(batch, observed="10")["watermark_after"], "10")
-        batch = self.plan(process_id=3, run_id="run3", upper_bound="8")
+        batch = self.plan(process_id=3, run_id="run3", planner=IntPlanner(upper="8"))
         self.assertEqual(self.finish(batch, observed="8")["watermark_after"], "10")
         batch = self.plan(process_id=4, run_id="run4")
         self.assertEqual(self.finish(batch, count=0, observed=None)["watermark_after"], "10")
@@ -127,24 +145,30 @@ class PostgresTests(unittest.TestCase):
 
     def test_empty_bootstrap_and_invalid_lower_bound(self):
         """An invalid lower bound aborts planning before querying the source."""
-        from ingestion.sources.rdbms import positions
-
-        batch = self.plan(upper_bound=None, empty_at_plan=True)
+        batch = self.plan(planner=IntPlanner(upper=None))
         self.assertTrue(batch["empty_at_plan"])
         self.finish(batch, count=0, observed=None)
         self.assertIsNone(self.state()["watermark"])
         batch = self.plan(process_id=2, run_id="run2")
         self.assertEqual(batch["reason"], "bootstrap")
         self.finish(batch)
-        def unexpected_probe(lower, op):
-            self.fail("Source bounds must not be probed with an invalid lower bound")
+        case = self
+        size = 10**20
+
+        class OverflowLower(IntPlanner):
+            """Planner whose lower bound overflows, proving the source probe never runs."""
+
+            def calculate_lower(self, watermark):
+                """Overflow the bigint range from the committed watermark."""
+                return positions.window_bounds(watermark, "bigint", size)
+
+            def probe_upper(self, lower, op):
+                """Any probe is a failure: planning must abort on the lower bound."""
+                case.fail("Source bounds must not be probed with an invalid lower bound")
 
         previous = self.state()
-        size = 10**20
         with self.assertRaisesRegex(ValueError, f"Lower bound is outside the bigint range: watermark=10, lookback={size}"):
-            self.plan(process_id=3, run_id="run3", lookback_size=size,
-                      calculate_lower=lambda value: positions.window_bounds(value, "bigint", size),
-                      probe_upper=unexpected_probe)
+            self.plan(process_id=3, run_id="run3", lookback_size=size, planner=OverflowLower())
         self.assertEqual(self.state(), previous)
         self.assertIsNone(registry.get_batch(process_id=3, source_id=self.source,
                                              entity_fqn="s.t", db_connect=self.connect))
@@ -154,7 +178,7 @@ class PostgresTests(unittest.TestCase):
         batch = self.plan()
         with self.assertRaisesRegex(ValueError, "contract"):
             self.plan(incremental_column="other")
-        with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+        with meta.transaction(db_connect=self.connect) as conn, conn.cursor() as cur:
             cur.execute("UPDATE ingestion.incremental_state SET revision = revision + 1 WHERE source_id = %s",
                         (self.source,))
         for operation in (
@@ -166,7 +190,7 @@ class PostgresTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "revision"):
                 operation()
-        with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+        with meta.transaction(db_connect=self.connect) as conn, conn.cursor() as cur:
             cur.execute("SELECT status FROM ingestion.incremental_batches "
                         "WHERE process_id = %s AND source_id = %s AND entity_fqn = %s",
                         (batch["process_id"], batch["source_id"], batch["entity_fqn"]))
@@ -178,7 +202,7 @@ class PostgresTests(unittest.TestCase):
         first = meta.allocate_process_id(**kwargs)
         second = meta.allocate_process_id(**kwargs)
         self.assertLess(first, second)
-        with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+        with meta.transaction(db_connect=self.connect) as conn, conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM ingestion.airflow_dagruns_log "
                         "WHERE dag_id = %s AND run_id = %s AND status = 'START'", (self.source, "run"))
             self.assertEqual(cur.fetchone()[0], 2)
@@ -187,8 +211,7 @@ class PostgresTests(unittest.TestCase):
         """An overlapping slice below the watermark may be committed without moving it back."""
         self.finish(self.plan())
         batch = self.plan(process_id=2, run_id="run2", lookback_size=2,
-                          calculate_lower=lambda watermark: (str(int(watermark) - 2), ">"),
-                          probe_upper=lambda lower, op: "9")
+                          planner=IntPlanner(upper="9", lower=lambda watermark: (str(int(watermark) - 2), ">")))
         self.assertEqual((batch["lower_bound"], batch["upper_bound"]), ("8", "9"))
         self.assertEqual(self.finish(batch, observed="9")["watermark_after"], "10")
 
@@ -196,7 +219,7 @@ class PostgresTests(unittest.TestCase):
         """The deferred composite FK rejects pointers to unknown batches at commit."""
         self.plan()
         with self.assertRaises(self.psycopg2.Error):
-            with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+            with meta.transaction(db_connect=self.connect) as conn, conn.cursor() as cur:
                 cur.execute(
                     "UPDATE ingestion.incremental_state SET last_process_id = %s WHERE source_id = %s",
                     (2147483647, self.source),
@@ -208,7 +231,7 @@ class PostgresTests(unittest.TestCase):
         self.plan()
         for reason in ("manual_full", "scheduled_full", "full_snapshot"):
             with self.subTest(reason=reason), self.assertRaises(self.psycopg2.Error):
-                with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+                with meta.transaction(db_connect=self.connect) as conn, conn.cursor() as cur:
                     cur.execute(
                         "INSERT INTO ingestion.incremental_batches "
                         "(process_id, dag_id, run_id, source_id, entity_fqn, target_table, reason, "

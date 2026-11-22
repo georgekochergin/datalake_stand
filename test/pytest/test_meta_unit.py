@@ -6,16 +6,19 @@ statements ingestion/meta issues, so branch logic runs on every host without
 PostgreSQL.
 """
 
+import os
 import sys
+import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from ingestion import meta
 from ingestion.meta import registry
+from ingestion.sources.rdbms import positions
 
 
 STATE_COLUMNS = (
@@ -221,6 +224,24 @@ class FakePg:
         return FakeConnection(self)
 
 
+class IntPlanner:
+    """Planner double over integer positions with a fixed probed maximum."""
+
+    def __init__(self, upper="10", lower=None):
+        self.upper = upper
+        self.lower = lower
+        self.probes = []
+
+    def calculate_lower(self, watermark):
+        """Apply the configured lower computation, or read from the watermark."""
+        return self.lower(watermark) if self.lower else (watermark, ">")
+
+    def probe_upper(self, lower, op):
+        """Record the predicate and return the fixed maximum."""
+        self.probes.append((lower, op))
+        return self.upper
+
+
 class BatchTestCase(unittest.TestCase):
     """Shared planning helpers over a hermetic database."""
 
@@ -229,19 +250,23 @@ class BatchTestCase(unittest.TestCase):
         self.args = dict(process_id=1, dag_id="dag", run_id="run1", source_id="bank",
                          entity_fqn="s.t", target_table="raw.bank.s__t",
                          incremental_column="id", incremental_type="bigint",
-                         upper_bound="10", empty_at_plan=False, db_connect=self.db.connect)
-        self.int_compare = lambda left, right: (int(left) > int(right)) - (int(left) < int(right))
+                         db_connect=self.db.connect)
 
-    def plan(self, **changes):
-        """Plan a batch with test-specific overrides."""
-        return registry.plan_batch(**(self.args | changes))
+    def planner(self, upper="10", lower=None):
+        """A planner double freezing the given probed maximum."""
+        return IntPlanner(upper=upper, lower=lower)
+
+    def plan(self, planner=None, **changes):
+        """Plan a batch with a planner double and test-specific overrides."""
+        return registry.plan_batch(**(self.args | changes), planner=planner or self.planner())
 
     def finish(self, batch, count=1, observed="10", **changes):
-        """Finalize with the integer comparator."""
+        """Finalize with the typed integer maximum of the watermark and observed max."""
+        before = self.db.state[(batch["source_id"], batch["entity_fqn"])]["watermark"]
+        changes.setdefault("watermark_after", positions.maximum(before, observed, "bigint"))
         return registry.finalize_batch(process_id=batch["process_id"], source_id=batch["source_id"],
                                    entity_fqn=batch["entity_fqn"], row_count=count,
-                                   observed_max=observed, db_connect=self.db.connect,
-                                   compare_positions=self.int_compare, **changes)
+                                   observed_max=observed, db_connect=self.db.connect, **changes)
 
     def state(self):
         """Read committed state for the planned entity."""
@@ -263,7 +288,7 @@ class TestPlanBatch(BatchTestCase):
     def test_regular_window_applies_lookback_lower_and_op(self):
         self.finish(self.plan())
         batch = self.plan(process_id=2, run_id="run2", lookback_size=2,
-                          calculate_lower=lambda value: (str(int(value) - 2), ">="))
+                          planner=self.planner(lower=lambda value: (str(int(value) - 2), ">=")))
         self.assertEqual(batch["reason"], "regular")
         self.assertEqual((batch["lower_bound"], batch["lower_bound_op"], batch["upper_bound"]),
                          ("8", ">=", "10"))
@@ -276,15 +301,10 @@ class TestPlanBatch(BatchTestCase):
 
     def test_empty_probe_freezes_lower_bound_and_is_not_repeated(self):
         self.finish(self.plan())
-        probes = []
-
-        def empty(lower, op):
-            probes.append((lower, op))
-            return None
-
-        first = self.plan(process_id=2, probe_upper=empty)
-        self.assertEqual(self.plan(process_id=2, probe_upper=empty), first)
-        self.assertEqual(probes, [("10", ">")])
+        empty = self.planner(upper=None)
+        first = self.plan(process_id=2, planner=empty)
+        self.assertEqual(self.plan(process_id=2, planner=empty), first)
+        self.assertEqual(empty.probes, [("10", ">")])
         self.assertEqual((first["upper_bound"], first["empty_at_plan"]), (None, True))
 
     def test_registry_serves_incremental_entities_only(self):
@@ -294,13 +314,13 @@ class TestPlanBatch(BatchTestCase):
 
     def test_retry_returns_frozen_batch(self):
         first = self.plan()
-        retry = self.plan(upper_bound="99")
+        retry = self.plan(planner=self.planner(upper="99"))
         self.assertEqual(retry, first)
         self.assertEqual(retry["upper_bound"], "10")
 
     def test_new_execution_plans_new_batch(self):
         first = self.plan()
-        second = self.plan(process_id=2, run_id="run2", upper_bound="99")
+        second = self.plan(process_id=2, run_id="run2", planner=self.planner(upper="99"))
         self.assertEqual(len(self.db.batches), 2)
         self.assertEqual((first["upper_bound"], second["upper_bound"]), ("10", "99"))
         self.assertEqual(self.state()["revision"], 1)
@@ -335,7 +355,10 @@ class TestBatchLifecycle(BatchTestCase):
             meta.__name__, level="INFO"
         ) as logs:
             with self.assertRaisesRegex(RuntimeError, "commit failed"):
-                registry.finalize_batch(**(self.key(batch) | {"db_connect": lambda: conn, "row_count": 0}))
+                registry.finalize_batch(**(self.key(batch) | {
+                    "db_connect": lambda: conn, "row_count": 0,
+                    "observed_max": None, "watermark_after": None,
+                }))
         self.assertEqual(conn.rollbacks, 1)
         output = "\n".join(logs.output)
         self.assertIn("UPDATE ingestion.incremental_batches", output)
@@ -368,7 +391,7 @@ class TestBatchLifecycle(BatchTestCase):
         self.assertEqual((self.state()["watermark"], self.state()["revision"],
                           self.state()["last_process_id"]), ("10", 2, batch["process_id"]))
 
-    def test_finalize_regular_uses_typed_compare(self):
+    def test_finalize_regular_uses_typed_maximum(self):
         self.finish(self.plan())
         batch = self.plan(process_id=2, run_id="run2")
         self.assertEqual(self.finish(batch, observed="12")["watermark_after"], "12")
@@ -387,12 +410,20 @@ class TestBatchLifecycle(BatchTestCase):
             **(self.key(batch) | dict(row_count=1, observed_max="9", watermark_after="10",
                                       db_connect=self.db.connect)))["watermark_after"], "10")
 
-    def test_finalize_requires_typed_strategy(self):
-        self.finish(self.plan())
-        batch = self.plan(process_id=2, run_id="run2")
-        with self.assertRaisesRegex(ValueError, "required"):
-            registry.finalize_batch(**(self.key(batch) | dict(row_count=1, observed_max="11",
-                                                          db_connect=self.db.connect)))
+    def test_finalize_rejects_null_watermark_over_known_position(self):
+        bootstrap = self.plan()
+        with self.assertRaisesRegex(ValueError, "typed maximum"):
+            registry.finalize_batch(**(self.key(bootstrap) | dict(row_count=1, observed_max="10",
+                                                              watermark_after=None,
+                                                              db_connect=self.db.connect)))
+        self.assertIsNone(self.state()["watermark"])
+        self.finish(bootstrap)
+        regular = self.plan(process_id=2, run_id="run2")
+        with self.assertRaisesRegex(ValueError, "typed maximum"):
+            registry.finalize_batch(**(self.key(regular) | dict(row_count=0, observed_max=None,
+                                                           watermark_after=None,
+                                                           db_connect=self.db.connect)))
+        self.assertEqual(self.state()["watermark"], "10")
 
     def test_finalize_stale_revision_rejected_before_update(self):
         self.finish(self.plan())
@@ -423,6 +454,7 @@ class TestBatchLifecycle(BatchTestCase):
         for bad in ("5", -1, True, 1.0):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 registry.finalize_batch(**(self.key(batch) | dict(row_count=bad, observed_max="10",
+                                                              watermark_after="10",
                                                               db_connect=self.db.connect)))
 
     def test_fail_marks_failed_without_state_change(self):
@@ -478,9 +510,31 @@ class TestGetBatch(BatchTestCase):
                             db_connect=self.db.connect)
 
     def test_missing_state_rejected(self):
-        with meta.connection(db_connect=self.db.connect) as conn, conn.cursor() as cur:
+        with meta.transaction(db_connect=self.db.connect) as conn, conn.cursor() as cur:
             with self.assertRaisesRegex(ValueError, "does not exist"):
                 registry._lock_state(cur, "ghost", "s.t")
+
+
+class TestDsnConnect(unittest.TestCase):
+    """The driver-side factory connects with the DSN passed by the submit operator."""
+
+    def setUp(self):
+        psycopg2 = types.ModuleType("psycopg2")
+        psycopg2.connect = MagicMock(return_value=MagicMock())
+        self.psycopg2 = psycopg2
+
+    def test_missing_dsn_fails_with_explicit_error(self):
+        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "INGESTION_META_DSN is not set"):
+                meta.dsn_connect()
+        self.psycopg2.connect.assert_not_called()
+
+    def test_connects_with_the_provided_dsn(self):
+        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.dict(
+            os.environ, {"INGESTION_META_DSN": "host=meta-dsn"}
+        ):
+            self.assertIs(meta.dsn_connect(), self.psycopg2.connect.return_value)
+        self.psycopg2.connect.assert_called_once_with("host=meta-dsn")
 
 
 class TestProcessAndEvents(unittest.TestCase):

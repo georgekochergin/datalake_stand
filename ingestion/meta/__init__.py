@@ -1,7 +1,8 @@
 """Transactional pg-meta logging client shared by Airflow and the Spark driver.
 
 Pure DB-API code: callers inject db_connect, so the package imports neither
-Airflow nor any database driver. Connections are owned per call: one short
+Airflow nor any database driver at module level; the driver-side dsn_connect
+factory loads psycopg2 lazily. Connections are owned per call: one short
 transaction, commit or rollback, then close. The incremental batch registry
 lives in ingestion.meta.registry.
 """
@@ -9,6 +10,7 @@ lives in ingestion.meta.registry.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -30,8 +32,20 @@ _RowChange: TypeAlias = tuple[str, DbRow | None, DbRow | None]
 LOG = logging.getLogger(__name__)
 
 
+def dsn_connect() -> DbConnection:
+    """Open a driver-side pg-meta connection from the INGESTION_META_DSN environment."""
+    import psycopg2
+
+    dsn = os.environ.get("INGESTION_META_DSN")
+    if not dsn:
+        raise RuntimeError(
+            "INGESTION_META_DSN is not set: the incremental loader needs pg-meta credentials"
+        )
+    return psycopg2.connect(dsn)
+
+
 @contextmanager
-def connection(db_connect: DbConnect) -> Iterator[DbConnection]:
+def transaction(db_connect: DbConnect) -> Iterator[DbConnection]:
     """Own a short DB-API transaction and close its connection."""
     conn = db_connect()
     try:
@@ -94,7 +108,7 @@ def _operation(
     LOG.info("pg-meta begin operation=%s key=%r", name, key)
     changes = []
     try:
-        with connection(db_connect) as conn:
+        with transaction(db_connect) as conn:
             with conn.cursor() as cur:
                 yield cur, changes
     except Exception as error:
