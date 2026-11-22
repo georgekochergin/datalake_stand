@@ -12,6 +12,21 @@ from uuid import uuid4
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 
+class IntPlanner:
+    """Planner double freezing a predetermined source maximum for registry calls."""
+
+    def __init__(self, upper="10"):
+        self.upper = upper
+
+    def calculate_lower(self, watermark):
+        """Read from the committed watermark without lookback."""
+        return watermark, ">"
+
+    def probe_upper(self, lower, op):
+        """Return the predetermined maximum."""
+        return self.upper
+
+
 def require(condition, message):
     """Fail explicitly without relying on Python assertion optimization flags."""
     if not condition:
@@ -114,12 +129,12 @@ def check_registry_recovery():
     orphan = meta.allocate_process_id(dag_id="e2e_registry", run_id=source,
                                       execution_date=None, db_connect=connect)
 
-    def arguments(process_id):
+    def arguments(process_id, upper="10"):
         """Planning arguments for one execution of the synthetic entity."""
         return dict(process_id=process_id, dag_id="e2e_registry", run_id=source,
                     source_id=source, entity_fqn="synthetic.transactions",
                     target_table="raw.synthetic.transactions", incremental_column="position",
-                    incremental_type="bigint", upper_bound="10", empty_at_plan=False,
+                    incremental_type="bigint", planner=IntPlanner(upper=upper),
                     db_connect=connect)
 
     def key(batch):
@@ -132,42 +147,43 @@ def check_registry_recovery():
             "an orphan generating-task START does not prevent another execution from planning")
     registry.start_batch(**key(planned))
     registry.fail_batch(**key(planned))
-    retry = registry.plan_batch(**dict(arguments(first), upper_bound="999"))
+    retry = registry.plan_batch(**arguments(first, upper="999"))
     require(retry["process_id"] == planned["process_id"] and retry["upper_bound"] == "10"
             and retry["status"] == "FAILED" and retry["watermark_after"] is None,
             "retry of the same execution retains identity and frozen upper bound")
     registry.start_batch(**key(planned))
-    finished = registry.finalize_batch(**dict(key(planned), row_count=2, observed_max="10"))
+    finished = registry.finalize_batch(**dict(key(planned), row_count=2, observed_max="10",
+                                              watermark_after="10"))
     require(finished["attempt_count"] == 2, "retry records attempts")
-    repeated = registry.finalize_batch(**dict(key(planned), row_count=999, observed_max="999"))
+    repeated = registry.finalize_batch(**dict(key(planned), row_count=999, observed_max="999",
+                                              watermark_after="999"))
     require(repeated == finished, "repeated successful finalization returns original result")
     regression_process = meta.allocate_process_id(dag_id="e2e_registry", run_id=source + "-regression",
                                                   execution_date=None, db_connect=connect)
-    second_batch = registry.plan_batch(**dict(arguments(regression_process), upper_bound="9"))
+    second_batch = registry.plan_batch(**arguments(regression_process, upper="9"))
     registry.start_batch(**key(second_batch))
-    regression = registry.finalize_batch(
-        **dict(key(second_batch), row_count=1, observed_max="9"),
-        compare_positions=lambda left, right: int(left) - int(right),
-    )
-    require(regression["watermark_after"] == "10", "typed comparison prevents watermark regression from 10 to 9")
+    regression = registry.finalize_batch(**dict(key(second_batch), row_count=1, observed_max="9",
+                                                watermark_after="10"))
+    require(regression["watermark_after"] == "10", "typed maximum prevents watermark regression from 10 to 9")
     noop_process = meta.allocate_process_id(dag_id="e2e_registry", run_id=source + "-noop",
                                             execution_date=None, db_connect=connect)
-    third = registry.plan_batch(**dict(arguments(noop_process), upper_bound="10"))
-    noop = registry.finalize_batch(**dict(key(third), row_count=0, observed_max=None))
+    third = registry.plan_batch(**arguments(noop_process, upper="10"))
+    noop = registry.finalize_batch(**dict(key(third), row_count=0, observed_max=None,
+                                          watermark_after="10"))
     require(noop["watermark_after"] == "10" and noop["attempt_count"] == 0,
             "no-op finalization requires no Spark execution")
     stale_process = meta.allocate_process_id(dag_id="e2e_registry", run_id=source + "-stale",
                                              execution_date=None, db_connect=connect)
     newer_process = meta.allocate_process_id(dag_id="e2e_registry", run_id=source + "-newer",
                                              execution_date=None, db_connect=connect)
-    stale = registry.plan_batch(**dict(arguments(stale_process), upper_bound="11"))
-    competing = registry.plan_batch(**dict(arguments(newer_process), upper_bound="12"))
+    stale = registry.plan_batch(**arguments(stale_process, upper="11"))
+    competing = registry.plan_batch(**arguments(newer_process, upper="12"))
     registry.start_batch(**key(competing))
-    registry.finalize_batch(**dict(key(competing), row_count=1, observed_max="12"),
-                        compare_positions=lambda left, right: int(left) - int(right))
+    registry.finalize_batch(**dict(key(competing), row_count=1, observed_max="12",
+                                   watermark_after="12"))
     try:
-        registry.finalize_batch(**dict(key(stale), row_count=1, observed_max="11"),
-                            compare_positions=lambda left, right: int(left) - int(right))
+        registry.finalize_batch(**dict(key(stale), row_count=1, observed_max="11",
+                                       watermark_after="11"))
     except ValueError:
         print("PASS  stale revision finalization rejected")
     else:
@@ -209,12 +225,13 @@ def check_registry_recovery():
         connection.commit()
         migrated_process = meta.allocate_process_id(dag_id="e2e_registry", run_id=source + "-migrated",
                                                     execution_date=None, db_connect=connect)
-        migrated = registry.plan_batch(**dict(arguments(migrated_process), incremental_column="other_position",
-                                          upper_bound="90000"))
+        migrated = registry.plan_batch(**dict(arguments(migrated_process, upper="90000"),
+                                          incremental_column="other_position"))
         require(migrated["reason"] == "bootstrap" and migrated["watermark_before"] is None,
                 "migrated contract reboots from null watermark as bootstrap")
         registry.start_batch(**key(migrated))
-        finalized = registry.finalize_batch(**dict(key(migrated), row_count=1, observed_max="90000"))
+        finalized = registry.finalize_batch(**dict(key(migrated), row_count=1, observed_max="90000",
+                                                   watermark_after="90000"))
         require(finalized["watermark_after"] == "90000", "new contract bootstrap advances independently")
         with connection.cursor() as cursor:
             cursor.execute("SELECT count(*) FROM ingestion.incremental_state_migrations WHERE source_id = %s", (source,))

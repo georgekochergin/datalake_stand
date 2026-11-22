@@ -2,7 +2,6 @@
 
 import sys
 import json
-import os
 import types
 import unittest
 from dataclasses import replace
@@ -11,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from ingestion import meta
 from ingestion.spark.raw.rdbms.incremental import entity, load_entity
 
 MSSQL_URL = "jdbc:sqlserver://host:1433;databaseName=retail_bank"
@@ -130,7 +130,7 @@ class TestMain(unittest.TestCase):
         managed.assert_called_once()
         self.assertIs(managed.call_args.args[0], spark)
         self.assertEqual(managed.call_args.args[1].source_id, "bank")
-        self.assertIs(managed.call_args.kwargs["db_connect"], load_entity._connect_pg_meta)
+        self.assertIs(managed.call_args.kwargs["db_connect"], meta.dsn_connect)
 
 
 class TestEmptyIncrementalWindow(unittest.TestCase):
@@ -173,8 +173,10 @@ class TestResolveBatch(unittest.TestCase):
         keys = entity.jdbc.KeyMetadata((), (), {info.name: info})
 
         def persist(**kwargs):
-            lower, op = kwargs["calculate_lower"](watermark)
-            return {"lower_bound": lower, "lower_bound_op": op, "upper_bound": kwargs["probe_upper"](lower, op)}
+            planner = kwargs["planner"]
+            lower, op = planner.calculate_lower(watermark)
+            return {"lower_bound": lower, "lower_bound_op": op,
+                    "upper_bound": planner.probe_upper(lower, op)}
 
         with patch.object(self.registry, "get_batch", return_value=batch), patch.object(
             self.registry, "plan_batch", side_effect=persist
@@ -262,28 +264,6 @@ class TestResolveBatch(unittest.TestCase):
     def test_invalid_lookback_rejected_before_planning(self):
         with self.assertRaisesRegex(ValueError, "forbids a unit"):
             self.args("--incremental-config", json.dumps({"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 1, "unit": "h"}}))
-
-
-class TestPgMetaConnection(unittest.TestCase):
-    """The Spark entry point uses the DSN passed by the submit operator."""
-
-    def setUp(self):
-        psycopg2 = types.ModuleType("psycopg2")
-        psycopg2.connect = MagicMock(return_value=MagicMock())
-        self.psycopg2 = psycopg2
-
-    def test_missing_dsn_fails_with_explicit_error(self):
-        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(RuntimeError, "INGESTION_META_DSN is not set"):
-                load_entity._connect_pg_meta()
-        self.psycopg2.connect.assert_not_called()
-
-    def test_registry_connection_uses_provided_dsn(self):
-        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.dict(
-            os.environ, {"INGESTION_META_DSN": "host=meta-dsn"}
-        ):
-            self.assertIs(load_entity._connect_pg_meta(), self.psycopg2.connect.return_value)
-        self.psycopg2.connect.assert_called_once_with("host=meta-dsn")
 
 
 class TestManagedLoad(unittest.TestCase):

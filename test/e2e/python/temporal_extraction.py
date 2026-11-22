@@ -350,10 +350,22 @@ def check_post_append_retry(spark, hook, jdbc, token):
     seed_process = meta.allocate_process_id(dag_id=args.dag_id, run_id=token, db_connect=hook.get_conn)
     seed_key = dict(process_id=seed_process, source_id=args.source_id,
                     entity_fqn=args.source_table, db_connect=hook.get_conn)
+
+    class SeededPlanner:
+        """Planner double freezing the seeded maximum without touching the source."""
+
+        def calculate_lower(self, watermark):
+            """Read from the committed watermark without lookback."""
+            return watermark, ">"
+
+        def probe_upper(self, lower, op):
+            """Return the seeded maximum."""
+            return "1"
+
     registry.plan_batch(**seed_key, dag_id=args.dag_id, run_id=token, target_table=args.target_table,
                         incremental_column=args.incremental.column, incremental_type=args.incremental.position_type,
-                        upper_bound="1")
-    registry.finalize_batch(**seed_key, row_count=1, observed_max="1")
+                        planner=SeededPlanner())
+    registry.finalize_batch(**seed_key, row_count=1, observed_max="1", watermark_after="1")
     args.process_id = meta.allocate_process_id(dag_id=args.dag_id, run_id=token, db_connect=hook.get_conn)
     columns = {name: jdbc_pkg.ColumnMeta(name, "BIGINT", 19, 0, True) for name in ("id", "position")}
 

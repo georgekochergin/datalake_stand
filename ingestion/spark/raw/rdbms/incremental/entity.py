@@ -1,4 +1,12 @@
-"""Load a persisted incremental JDBC window into Iceberg with at-least-once append."""
+"""Load one persisted incremental JDBC window into Iceberg with at-least-once append.
+
+One execution of managed_load walks a single pg-meta batch through the flow:
+resolve reuses the frozen window of a retry (registry.get_batch) or plans a
+fresh one (registry.plan_batch, probing the source maximum inside the
+planning transaction); a succeeded batch returns immediately, a provably
+empty window finalizes without reading, and an executable window is started,
+read, appended, and finalized, with registry.fail_batch recording an abort.
+"""
 
 import argparse
 import logging
@@ -38,15 +46,13 @@ class _ResolvedBatch:
 
 @dataclass
 class _WindowPlanner:
-    """Supply callbacks for planning a fresh batch under the registry's state lock.
+    """JDBC implementation of the registry.BatchPlanner protocol for one attempt.
 
-    registry.plan_batch computes the lower predicate from the locked watermark
-    and calls probe_upper once if it creates a batch. If the batch already
-    exists, the registry does not probe again. After plan_batch returns,
-    _plan_new_batch passes probed_bounds to the reader to save a JDBC query.
-
-    None means the callback did not run. (None, None) means it ran but did
-    not obtain usable partition bounds, so the reader need not probe again.
+    registry.plan_batch calls calculate_lower with the watermark locked by the
+    planning transaction, then probe_upper over the resulting predicate while
+    the lock is still held; a retry that finds an existing batch probes
+    nothing. probe_upper remembers the partition bounds it observed so the
+    reader can reuse them instead of probing the frozen window again.
     """
 
     spark: "SparkSession"
@@ -177,9 +183,7 @@ def _plan_new_batch(spark: "SparkSession", args: argparse.Namespace, db_connect:
         process_id=args.process_id, dag_id=args.dag_id, run_id=args.run_id,
         source_id=args.source_id, entity_fqn=args.source_table, target_table=args.target_table,
         incremental_column=contract.column, incremental_type=kind,
-        lookback_size=size, lookback_unit=unit, db_connect=db_connect,
-        calculate_lower=planner.calculate_lower,
-        probe_upper=planner.probe_upper,
+        lookback_size=size, lookback_unit=unit, planner=planner, db_connect=db_connect,
     )
     return _ResolvedBatch(batch, read_source=source, partition_bounds=planner.probed_bounds)
 
@@ -193,24 +197,29 @@ def managed_load(
     batch = plan.batch
     if batch["status"] == "SUCCEEDED":
         return
-    registry_args = dict(process_id=args.process_id, source_id=args.source_id,
-                         entity_fqn=args.source_table, db_connect=db_connect)
     if empty_incremental_window(batch):
         reason = reader.JdbcReason.EMPTY_WINDOW
         LOGGER.info("%s. JDBC read and Iceberg append skipped. No raw table created by this attempt. "
                     "target_table=%s reason=%s", reason.text, args.target_table, reason.code)
-        registry.finalize_batch(row_count=0, observed_max=None, **registry_args)
+        registry.finalize_batch(
+            process_id=args.process_id, source_id=args.source_id, entity_fqn=args.source_table,
+            row_count=0, observed_max=None, watermark_after=batch["watermark_before"],
+            db_connect=db_connect,
+        )
         return
-    _execute_batch(spark, args, plan, registry_args)
+    _execute_batch(spark, args, plan, db_connect)
 
 
 def _execute_batch(
-    spark: "SparkSession", args: argparse.Namespace, plan: _ResolvedBatch, registry_args: dict[str, object],
+    spark: "SparkSession", args: argparse.Namespace, plan: _ResolvedBatch, db_connect: "DbConnect",
 ) -> None:
     """Append the window at least once and atomically finalize its pg-meta state."""
     batch = plan.batch
     kind = batch["incremental_type"]
-    registry.start_batch(**registry_args)
+    registry.start_batch(
+        process_id=args.process_id, source_id=args.source_id,
+        entity_fqn=args.source_table, db_connect=db_connect,
+    )
     try:
         source = window.read_window_frame(
             spark, args, batch, kind, source=plan.read_source, bounds=plan.partition_bounds,
@@ -220,14 +229,20 @@ def _execute_batch(
             rows, observed, clean = window.window_summary(source, kind)
             LOGGER.info("batch summary row_count=%s observed_max=%s", rows, observed)
             append.append_raw(spark, args.target_table, clean, rows, args.process_id)
-            watermark = positions.maximum(batch["watermark_before"], observed, kind)
-            registry.finalize_batch(row_count=rows, observed_max=observed,
-                                    watermark_after=watermark, **registry_args)
+            registry.finalize_batch(
+                process_id=args.process_id, source_id=args.source_id, entity_fqn=args.source_table,
+                row_count=rows, observed_max=observed,
+                watermark_after=positions.maximum(batch["watermark_before"], observed, kind),
+                db_connect=db_connect,
+            )
         finally:
             source.unpersist()
     except Exception:
         try:
-            registry.fail_batch(**registry_args)
+            registry.fail_batch(
+                process_id=args.process_id, source_id=args.source_id,
+                entity_fqn=args.source_table, db_connect=db_connect,
+            )
         except Exception:
             LOGGER.warning("Unable to persist batch failure")
         raise
