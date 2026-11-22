@@ -65,12 +65,12 @@ class OracleDialect(RdbmsDialect):
         return f"TO_CHAR({value}, 'YYYY-MM-DD\"T\"HH24:MI:SS{fraction}{suffix}')"
 
     def column_projection(self, type_name: str, reference: str) -> str | None:
-        """Rewrite timezone types, unmappable by Spark JDBC, into UTC instants.
-
-        Spark cannot resolve Oracle TIMESTAMP ... WITH [LOCAL] TIME ZONE columns
-        at all (JDBC type -101/-102). SYS_EXTRACT_UTC normalizes them to UTC
-        independently of the session timezone.
-        """
-        if "TIME ZONE" in type_name:
-            return f"SYS_EXTRACT_UTC({reference})"
-        return None
+        """Convert the signed UTC interval to epoch microseconds, rounding down."""
+        if not normalize_type_name(type_name).endswith(" TIME ZONE"):
+            return None
+        age = f"((SYS_EXTRACT_UTC({reference}) - TIMESTAMP '1970-01-01 00:00:00') DAY(9) TO SECOND(9))"
+        seconds = " + ".join(
+            f"EXTRACT({unit} FROM {age}){factor}"
+            for unit, factor in (("DAY", " * 86400"), ("HOUR", " * 3600"), ("MINUTE", " * 60"), ("SECOND", ""))
+        )
+        return f"CAST(FLOOR(({seconds}) * 1000000) AS NUMBER(19,0))"

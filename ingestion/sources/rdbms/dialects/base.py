@@ -50,7 +50,7 @@ class RdbmsDialect:
         return MetadataLocation(None, parts[0][0], parts[1][0])
 
     def column_projection(self, type_name: str, reference: str) -> str | None:
-        """Return a source-side read expression for special types, else None."""
+        """Render an instant as integral Unix microseconds, else None."""
         return None
 
     def reader_options(self) -> dict[str, str]:

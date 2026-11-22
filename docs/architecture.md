@@ -1220,7 +1220,7 @@ p/scale не подходят. Метаданные JDBC преобразуют�
   позицию строкой (`CONVERT` + `DATEPART(nanosecond)`). В Oracle применяется
   `TO_CHAR` с маской вплоть до `FF9`.
 - Oracle `TIMESTAMP WITH [LOCAL] TIME ZONE` проецируется через
-  `SYS_EXTRACT_UTC` ещё в SELECT: Spark JDBC не отображает исходные JDBC-типы
+  `SYS_EXTRACT_UTC` ещё в SELECT: Spark JDBC не всегда отображает исходные JDBC-типы
   -101/-102. Это касается и обычных колонок [raw](glossary.md#term-raw), не только позиции.
 
 #### Нормализация instant-позиции в UTC
@@ -2037,6 +2037,15 @@ Spark JDBC определяет типы колонок по результат�
 Тип `timestamp` в Iceberg — время без зоны (`timestamp_ntz` в Spark SQL),
 а `timestamptz` — абсолютный момент (`timestamp_ltz` в Spark SQL).
 
+- Если тип источника задаёт момент со смещением или часовым поясом, загрузчик
+  сохраняет его как `timestamptz`. Например, `15:30 +03:00` и `12:30 +00:00`
+  записываются как один момент. Исходное смещение не сохраняется.
+- Если источник не задаёт пояс, загрузчик не переводит дату и время в UTC.
+- `__load_dttm` также имеет тип `timestamptz`. Чтобы видеть моменты в UTC при
+  запросах, используйте часовой пояс UTC в сессии клиента.
+- `timestamp` и `timestamptz` хранят до шести дробных знаков секунды.
+  Точность [позиции инкремента](glossary.md#term-position) определяется отдельно.
+
 ### Microsoft SQL Server (MSSQL)
 
 | Тип в SQL Server | Тип в Iceberg | Примечание |
@@ -2055,7 +2064,7 @@ Spark JDBC определяет типы колонок по результат�
 | `geometry`, `geography` | `binary` | Байты JDBC, без геопространственной типизации |
 | `date` | `date` | |
 | `smalldatetime`, `datetime`, `datetime2` | `timestamp` | Дата и время без зоны |
-| `datetimeoffset` | `string` | Spark JDBC читает значение вместе со смещением как строку |
+| `datetimeoffset` | `timestamptz` | `SWITCHOFFSET` приводит момент к UTC. `DATEDIFF_BIG` возвращает микросекунды от эпохи Unix |
 | `time` | `timestamptz` | Spark JDBC добавляет дату `1970-01-01`. Это не тип `time` в Iceberg |
 
 ### Oracle
@@ -2068,9 +2077,13 @@ Spark JDBC определяет типы колонок по результат�
 | `CHAR`, `VARCHAR2`, `NCHAR`, `NVARCHAR2`, `CLOB`, `NCLOB`, `LONG` | `string` | Длина строковой колонки не переносится в схему Iceberg |
 | `RAW`, `LONG RAW`, `BLOB` | `binary` | |
 | `DATE`, `TIMESTAMP` | `timestamp` | Oracle `DATE` содержит время до секунд. JDBC-драйвер по умолчанию читает его как timestamp |
-| `TIMESTAMP WITH TIME ZONE`, `TIMESTAMP WITH LOCAL TIME ZONE` | `timestamp` | Загрузчик применяет `SYS_EXTRACT_UTC` в запросе. Хранится время в UTC без исходной зоны или смещения |
+| `TIMESTAMP WITH TIME ZONE`, `TIMESTAMP WITH LOCAL TIME ZONE` | `timestamptz` | После `SYS_EXTRACT_UTC` Oracle вычисляет микросекунды от эпохи Unix |
 
 ### Типы DataFrame при создании таблицы
+
+Моменты со смещением передаются по JDBC как целое число микросекунд от эпохи
+Unix. `timestamp_micros()` преобразует его в `timestamp_ltz` без разбора текста
+и без зависимости от часового пояса сессии Spark.
 
 При создании таблицы для добавления строк `schema_columns()` в
 [`ingestion/spark/raw/iceberg.py`](../ingestion/spark/raw/iceberg.py) принимает

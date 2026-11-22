@@ -170,15 +170,16 @@ class TestCompatibilityProjection(unittest.TestCase):
         )
 
     def test_oracle_projects_timezone_columns(self):
-        projection = jdbc.compatibility_projection(ORACLE, self.keys())
+        projection, utc_columns = jdbc.compatibility_projection(ORACLE, self.keys())
         self.assertEqual(projection, [
             'extract_source."plain_col"',
-            'SYS_EXTRACT_UTC(extract_source."tz_col") AS "tz_col"',
+            ORACLE.column_projection("TIMESTAMP(9) WITH TIME ZONE", 'extract_source."tz_col"') + ' AS "tz_col"',
         ])
+        self.assertEqual(utc_columns, ["tz_col"])
 
     def test_native_read_returns_none(self):
         mssql = registry.by_conn_type("mssql")
-        self.assertIsNone(jdbc.compatibility_projection(mssql, self.keys()))
+        self.assertEqual(jdbc.compatibility_projection(mssql, self.keys()), (None, []))
 
 
 class TestFirstRow(unittest.TestCase):

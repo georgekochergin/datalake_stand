@@ -194,7 +194,7 @@ class TestReadExtractFrame(unittest.TestCase):
     def frame(self, args, filters=(), extra_select="", projection=None, keys=None,
               bounds=(1, 100), partitions=1, reader_double=None):
         reader_double = reader_double if reader_double is not None else RecordingReader(partitions=partitions)
-        with patch.object(reader.jdbc, "compatibility_projection", return_value=projection), patch.object(
+        with patch.object(reader.jdbc, "compatibility_projection", return_value=(projection, [])), patch.object(
             reader.jdbc, "key_metadata", return_value=keys or self.key_metadata()
         ) as key_call, patch.object(reader, "probe_bounds", return_value=(None, bounds)), patch.object(
             reader, "jdbc_reader", return_value=reader_double
@@ -332,9 +332,9 @@ class TestReadExtractFrame(unittest.TestCase):
                 self.frame(make_args(), keys=jdbc.KeyMetadata((), (), {}))
 
     def test_compatibility_projection_rewrites_select(self):
-        projection = ['extract_source."a"', 'SYS_EXTRACT_UTC(extract_source."b") AS "b"']
+        projection = ['extract_source."a"', 'DATEDIFF_BIG(MICROSECOND, epoch, extract_source."b") AS "b"']
         _, _, query, _ = self.frame(make_args(jdbc_url=ORACLE_URL), projection=projection)
-        self.assertIn('SELECT extract_source."a", SYS_EXTRACT_UTC(extract_source."b") AS "b"', query)
+        self.assertIn('SELECT ' + ', '.join(projection), query)
         self.assertIn('FROM (SELECT * FROM "retail_bank"."clients")', query)
 
 

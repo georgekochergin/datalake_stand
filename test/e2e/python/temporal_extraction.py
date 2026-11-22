@@ -129,6 +129,41 @@ def source_count(spark, args, lower, upper, kind, lower_op=">"):
         connection.close()
 
 
+def check_raw_temporal(spark, target_table, kind):
+    """Check the stored type and instant without relying on UTC display."""
+    from pyspark.sql.types import TimestampNTZType, TimestampType
+
+    instant = kind.startswith("timestamp_instant")
+    timezone_key = "spark.sql.session.timeZone"
+    previous_zone = spark.conf.get(timezone_key)
+    spark.conf.set(timezone_key, "Asia/Tokyo")
+    try:
+        frame = spark.table(target_table)
+        require(isinstance(frame.schema["__load_dttm"].dataType, TimestampType),
+                target_table + " load timestamp represents an instant")
+        columns = ["position"]
+        if "local_zone" in frame.columns:
+            columns.append("local_zone")
+        for column in columns:
+            expected_type = TimestampType if instant else TimestampNTZType
+            require(isinstance(frame.schema[column].dataType, expected_type),
+                    f"{target_table}.{column} Iceberg type is {expected_type.__name__} in Spark")
+        expected = ("TIMESTAMP_LTZ '2024-06-15 10:34:56.123456Z'" if instant
+                    else "TIMESTAMP_NTZ '2024-06-15 12:34:56.123456'")
+        mismatches = " OR ".join(f"NOT (`{column}` <=> {expected})" for column in columns)
+        require(frame.where(mismatches).count() == 0,
+                target_table + " stores the expected microsecond value in a non-UTC Spark session")
+        if instant:
+            require(isinstance(frame.schema["epoch_edge"].dataType, TimestampType),
+                    target_table + " nullable instant keeps its Iceberg type")
+            edge = "TIMESTAMP_LTZ '1969-12-31 23:59:59.999999Z'"
+            values = frame.selectExpr(f"epoch_edge <=> {edge}", "epoch_edge IS NULL").collect()
+            require(sorted(map(tuple, values)) == [(False, True), (True, False)],
+                    target_table + " floors negative fractional microseconds and preserves NULL")
+    finally:
+        spark.conf.set(timezone_key, previous_zone)
+
+
 def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, token,
              expected_upper=None, fixture=None):
     """Verify bootstrap, aligned lookback, empty resume, and successful retry."""
@@ -231,6 +266,8 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
                 total += expected_count
                 frame = spark.table(args.target_table)
                 require(frame.count() == total, label + " raw append-only count")
+                if phase == "bootstrap" and expected_upper is not None:
+                    check_raw_temporal(spark, args.target_table, kind)
                 require(frame.filter(frame["__process_id"] == batch["process_id"]).count() == expected_count,
                         label + " raw rows carry the process identity")
                 require(frame.filter(frame["__process_id"].isNull()).count() == 0,
@@ -254,26 +291,43 @@ def precision_fixtures(source):
             ("datetime2", "datetime2(7)", "timestamp_local(7)", ""),
             ("datetimeoffset", "datetimeoffset(7)", "timestamp_instant(7)", "+02:00"),
         ):
+            edge = f", CAST('1970-01-01T01:59:59.9999999+02:00' AS {sql_type}) AS epoch_edge" if suffix else ""
+            missing = f", CAST(NULL AS {sql_type}) AS epoch_edge" if suffix else ""
             query = " UNION ALL ".join(
                 f"SELECT {index} AS id, CAST('2024-06-15T12:34:56.123456{index}{suffix}' AS {sql_type}) AS position"
+                + (edge if index == 1 else missing)
                 for index in (1, 2)
             )
             upper = "2024-06-15T" + ("10" if suffix else "12") + ":34:56.1234562" + ("Z" if suffix else "")
             column = jdbc_pkg.ColumnMeta("position", sql_type.split("(")[0].upper(), None, 7, True)
-            yield name, f"({query}) temporal_fixture", kind, upper, column
+            columns = {"position": column}
+            if suffix:
+                columns["epoch_edge"] = jdbc_pkg.ColumnMeta("epoch_edge", "DATETIMEOFFSET", None, 7, False)
+            yield name, f"({query}) temporal_fixture", kind, upper, columns
     else:
         for name, sql_type, function, kind, suffix in (
             ("timestamp9", "TIMESTAMP(9)", "TO_TIMESTAMP", "timestamp_local(9)", ""),
             ("timestamptz9", "TIMESTAMP(9) WITH TIME ZONE", "TO_TIMESTAMP_TZ", "timestamp_instant(9)", "+02:00"),
         ):
             mask = 'YYYY-MM-DD"T"HH24:MI:SS.FF9' + ("TZH:TZM" if suffix else "")
-            query = " UNION ALL ".join(
-                f'SELECT {index} AS id, CAST({function}(\'2024-06-15T12:34:56.12345678{index}{suffix}\', \'{mask}\') AS {sql_type}) AS "position" FROM dual'
-                for index in (1, 2)
-            )
+            queries = []
+            for index in (1, 2):
+                value = f"{function}('2024-06-15T12:34:56.12345678{index}{suffix}', '{mask}')"
+                extra = f', CAST({value} AS TIMESTAMP(9) WITH LOCAL TIME ZONE) AS "local_zone"' if suffix else ""
+                if suffix:
+                    edge = f"{function}('1970-01-01T01:59:59.999999999+02:00', '{mask}')" if index == 1 else "NULL"
+                    extra += f', CAST({edge} AS {sql_type}) AS "epoch_edge"'
+                queries.append(f'SELECT {index} AS id, CAST({value} AS {sql_type}) AS "position"{extra} FROM dual')
+            query = " UNION ALL ".join(queries)
             upper = "2024-06-15T" + ("10" if suffix else "12") + ":34:56.123456782" + ("Z" if suffix else "")
             column = jdbc_pkg.ColumnMeta("position", sql_type, None, None, True)
-            yield name, f"({query}) temporal_fixture", kind, upper, column
+            columns = {"position": column}
+            if suffix:
+                columns["local_zone"] = jdbc_pkg.ColumnMeta(
+                    "local_zone", "TIMESTAMP(9) WITH LOCAL TIME ZONE", None, 9, True,
+                )
+                columns["epoch_edge"] = jdbc_pkg.ColumnMeta("epoch_edge", sql_type, None, 9, False)
+            yield name, f"({query}) temporal_fixture", kind, upper, columns
 
 
 def check_post_append_retry(spark, hook, jdbc, token):
@@ -646,11 +700,11 @@ def main():
                 continue
             jdbc = source_jdbc[source]
             exercise(spark, hook, source, jdbc, table, f"{source}_temporal", "posting_date", kind, token)
-            for name, query, fixture_kind, upper, column in precision_fixtures(source):
+            for name, query, fixture_kind, upper, columns in precision_fixtures(source):
                 fqn = f"fixture.{source}_{name}"
                 exercise(spark, hook, source, jdbc, fqn, f"{source}_{name}", "position",
                          fixture_kind, token, expected_upper=upper,
-                         fixture=(query, {"position": column}))
+                         fixture=(query, columns))
         print("PASS temporal extraction contracts; FAIL=0", flush=True)
     finally:
         spark.stop()
