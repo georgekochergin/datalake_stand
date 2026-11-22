@@ -200,8 +200,10 @@ def finalize_batch(
     One pg-meta transaction: state and batch FOR UPDATE in the shared order;
     UPDATE the state watermark guarded by a revision CAS; UPDATE the batch to
     SUCCEEDED. watermark_after is the typed maximum of the previous watermark
-    and observed_max, computed by the caller through ingestion.positions and
-    accepted only when it equals one of the two.
+    and observed_max, computed by the caller through ingestion.positions.
+    NULL positions are ignored like in positions.maximum: None is accepted
+    only when both positions are NULL, otherwise the known position is
+    required.
     """
     if type(row_count) is not int or row_count < 0:
         raise ValueError("row_count must be a nonnegative integer")
@@ -212,7 +214,10 @@ def finalize_batch(
             changes.append(("incremental_batches", batch, None))
             return batch
         before = state["watermark"]
-        if watermark_after not in (before, observed_max):
+        allowed = {value for value in (before, observed_max) if value is not None}
+        if not allowed:
+            allowed = {None}
+        if watermark_after not in allowed:
             raise ValueError("watermark_after must be the typed maximum of before and observed_max")
         _execute(cur,
             "UPDATE ingestion.incremental_state SET watermark = %s, revision = revision + 1, "

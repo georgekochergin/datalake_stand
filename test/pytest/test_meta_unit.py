@@ -410,6 +410,21 @@ class TestBatchLifecycle(BatchTestCase):
             **(self.key(batch) | dict(row_count=1, observed_max="9", watermark_after="10",
                                       db_connect=self.db.connect)))["watermark_after"], "10")
 
+    def test_finalize_rejects_null_watermark_over_known_position(self):
+        bootstrap = self.plan()
+        with self.assertRaisesRegex(ValueError, "typed maximum"):
+            registry.finalize_batch(**(self.key(bootstrap) | dict(row_count=1, observed_max="10",
+                                                              watermark_after=None,
+                                                              db_connect=self.db.connect)))
+        self.assertIsNone(self.state()["watermark"])
+        self.finish(bootstrap)
+        regular = self.plan(process_id=2, run_id="run2")
+        with self.assertRaisesRegex(ValueError, "typed maximum"):
+            registry.finalize_batch(**(self.key(regular) | dict(row_count=0, observed_max=None,
+                                                           watermark_after=None,
+                                                           db_connect=self.db.connect)))
+        self.assertEqual(self.state()["watermark"], "10")
+
     def test_finalize_stale_revision_rejected_before_update(self):
         self.finish(self.plan())
         batch = self.plan(process_id=2, run_id="run2")
