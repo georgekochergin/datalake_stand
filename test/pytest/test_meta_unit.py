@@ -495,7 +495,7 @@ class TestGetBatch(BatchTestCase):
                             db_connect=self.db.connect)
 
     def test_missing_state_rejected(self):
-        with meta.connection(db_connect=self.db.connect) as conn, conn.cursor() as cur:
+        with meta.transaction(db_connect=self.db.connect) as conn, conn.cursor() as cur:
             with self.assertRaisesRegex(ValueError, "does not exist"):
                 registry._lock_state(cur, "ghost", "s.t")
 

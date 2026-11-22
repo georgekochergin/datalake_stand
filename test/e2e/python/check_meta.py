@@ -93,7 +93,7 @@ class PostgresTests(unittest.TestCase):
 
     def state(self):
         """Read committed state for this case."""
-        with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+        with meta.transaction(db_connect=self.connect) as conn, conn.cursor() as cur:
             cur.execute("SELECT * FROM ingestion.incremental_state WHERE source_id = %s", (self.source,))
             return meta._row(cur)
 
@@ -178,7 +178,7 @@ class PostgresTests(unittest.TestCase):
         batch = self.plan()
         with self.assertRaisesRegex(ValueError, "contract"):
             self.plan(incremental_column="other")
-        with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+        with meta.transaction(db_connect=self.connect) as conn, conn.cursor() as cur:
             cur.execute("UPDATE ingestion.incremental_state SET revision = revision + 1 WHERE source_id = %s",
                         (self.source,))
         for operation in (
@@ -190,7 +190,7 @@ class PostgresTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "revision"):
                 operation()
-        with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+        with meta.transaction(db_connect=self.connect) as conn, conn.cursor() as cur:
             cur.execute("SELECT status FROM ingestion.incremental_batches "
                         "WHERE process_id = %s AND source_id = %s AND entity_fqn = %s",
                         (batch["process_id"], batch["source_id"], batch["entity_fqn"]))
@@ -202,7 +202,7 @@ class PostgresTests(unittest.TestCase):
         first = meta.allocate_process_id(**kwargs)
         second = meta.allocate_process_id(**kwargs)
         self.assertLess(first, second)
-        with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+        with meta.transaction(db_connect=self.connect) as conn, conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM ingestion.airflow_dagruns_log "
                         "WHERE dag_id = %s AND run_id = %s AND status = 'START'", (self.source, "run"))
             self.assertEqual(cur.fetchone()[0], 2)
@@ -219,7 +219,7 @@ class PostgresTests(unittest.TestCase):
         """The deferred composite FK rejects pointers to unknown batches at commit."""
         self.plan()
         with self.assertRaises(self.psycopg2.Error):
-            with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+            with meta.transaction(db_connect=self.connect) as conn, conn.cursor() as cur:
                 cur.execute(
                     "UPDATE ingestion.incremental_state SET last_process_id = %s WHERE source_id = %s",
                     (2147483647, self.source),
@@ -231,7 +231,7 @@ class PostgresTests(unittest.TestCase):
         self.plan()
         for reason in ("manual_full", "scheduled_full", "full_snapshot"):
             with self.subTest(reason=reason), self.assertRaises(self.psycopg2.Error):
-                with meta.connection(db_connect=self.connect) as conn, conn.cursor() as cur:
+                with meta.transaction(db_connect=self.connect) as conn, conn.cursor() as cur:
                     cur.execute(
                         "INSERT INTO ingestion.incremental_batches "
                         "(process_id, dag_id, run_id, source_id, entity_fqn, target_table, reason, "

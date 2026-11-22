@@ -45,7 +45,7 @@ def dsn_connect() -> DbConnection:
 
 
 @contextmanager
-def connection(db_connect: DbConnect) -> Iterator[DbConnection]:
+def transaction(db_connect: DbConnect) -> Iterator[DbConnection]:
     """Own a short DB-API transaction and close its connection."""
     conn = db_connect()
     try:
@@ -108,7 +108,7 @@ def _operation(
     LOG.info("pg-meta begin operation=%s key=%r", name, key)
     changes = []
     try:
-        with connection(db_connect) as conn:
+        with transaction(db_connect) as conn:
             with conn.cursor() as cur:
                 yield cur, changes
     except Exception as error:

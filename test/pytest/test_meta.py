@@ -24,18 +24,18 @@ class TransactionTests(unittest.TestCase):
         )
         subprocess.run([sys.executable, "-c", code], check=True)
 
-    def test_connection_commit_and_close(self):
+    def test_transaction_commits_and_closes(self):
         conn = MagicMock()
-        with meta.connection(db_connect=lambda: conn):
+        with meta.transaction(db_connect=lambda: conn):
             pass
         conn.commit.assert_called_once()
         conn.close.assert_called_once()
         conn.rollback.assert_not_called()
 
-    def test_connection_rolls_back_and_closes(self):
+    def test_transaction_rolls_back_and_closes(self):
         conn = MagicMock()
         with self.assertRaisesRegex(ValueError, "failure"):
-            with meta.connection(db_connect=lambda: conn):
+            with meta.transaction(db_connect=lambda: conn):
                 raise ValueError("failure")
         conn.rollback.assert_called_once()
         conn.close.assert_called_once()
