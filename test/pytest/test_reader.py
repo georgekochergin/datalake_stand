@@ -75,12 +75,13 @@ class TestRenderSourceTable(unittest.TestCase):
 
 
 class RecordingReader:
-    """A JDBC reader double recording options, drops and RDD partitions."""
+    """A JDBC reader double recording options, frame operations and RDD partitions."""
 
     def __init__(self, collected=None, partitions=1):
         self.options = {}
         self.collected = collected
         self.dropped = []
+        self.frame_operations = []
         self.rdd = types.SimpleNamespace(getNumPartitions=lambda: partitions)
 
     def format(self, _):
@@ -103,6 +104,12 @@ class RecordingReader:
 
     def cache(self):
         """Return the cached frame double."""
+        self.frame_operations.append(("cache",))
+        return self
+
+    def withColumns(self, columns):
+        """Record column replacements before caching."""
+        self.frame_operations.append(("withColumns", columns))
         return self
 
     def collect(self):
@@ -336,6 +343,29 @@ class TestReadExtractFrame(unittest.TestCase):
         _, _, query, _ = self.frame(make_args(jdbc_url=ORACLE_URL), projection=projection)
         self.assertIn('SELECT ' + ', '.join(projection), query)
         self.assertIn('FROM (SELECT * FROM "retail_bank"."clients")', query)
+
+    def test_converts_only_projected_microseconds_before_cache(self):
+        keys = self.key_metadata(columns=[("local_time", "datetime2"), ("event.at`utc", "datetimeoffset")])
+        source = reader.ReadSource(registry.by_conn_type("mssql"), "[s].[t]", keys, None)
+        frame = RecordingReader()
+        functions = MagicMock()
+        sql = types.ModuleType("pyspark.sql")
+        sql.functions = functions
+        pyspark = types.ModuleType("pyspark")
+        pyspark.sql = sql
+        with patch.dict(sys.modules, {"pyspark": pyspark, "pyspark.sql": sql}), patch.object(
+            reader, "jdbc_reader", return_value=frame
+        ):
+            result = reader.read_extract_frame(self.spark, make_args(), source=source)
+
+        functions.col.assert_called_once_with("`event.at``utc`")
+        functions.col.return_value.cast.assert_called_once_with("long")
+        functions.timestamp_micros.assert_called_once_with(functions.col.return_value.cast.return_value)
+        self.assertIs(result, frame)
+        self.assertEqual(frame.frame_operations, [
+            ("withColumns", {"event.at`utc": functions.timestamp_micros.return_value}),
+            ("cache",),
+        ])
 
 
 if __name__ == "__main__":

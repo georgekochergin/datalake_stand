@@ -1219,9 +1219,11 @@ p/scale не подходят. Метаданные JDBC преобразуют�
   DataFrame ограничена шестью. Для этого источник дополнительно возвращает
   позицию строкой (`CONVERT` + `DATEPART(nanosecond)`). В Oracle применяется
   `TO_CHAR` с маской вплоть до `FF9`.
-- Oracle `TIMESTAMP WITH [LOCAL] TIME ZONE` проецируется через
-  `SYS_EXTRACT_UTC` ещё в SELECT: Spark JDBC не всегда отображает исходные JDBC-типы
-  -101/-102. Это касается и обычных колонок [raw](glossary.md#term-raw), не только позиции.
+- В Spark 3.5.5 встроенный Oracle JDBC-диалект поддерживает `TIMESTAMP WITH TIME ZONE`
+  (код `-101`), только когда часовой пояс сессии Spark совпадает с поясом JVM.
+  `TIMESTAMP WITH LOCAL TIME ZONE` (код `-102`) этот диалект не поддерживает.
+  Загрузчик применяет `SYS_EXTRACT_UTC` в `SELECT` для обоих типов, в том числе
+  для обычных колонок [raw](glossary.md#term-raw).
 
 #### Нормализация instant-позиции в UTC
 
