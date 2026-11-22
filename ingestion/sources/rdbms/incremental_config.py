@@ -1,6 +1,7 @@
 """Validation of the resolved incremental loading configuration."""
 
 import re
+from dataclasses import dataclass
 from typing import NotRequired, TypedDict, cast
 
 from . import positions
@@ -26,6 +27,27 @@ class IncrementalConfig(TypedDict):
 
     contract: _Contract
     lookback: _Lookback
+
+
+@dataclass(frozen=True)
+class WindowContract:
+    """Flat loader-facing view of the validated incremental config."""
+
+    column: str
+    position_type: str
+    check_not_null: bool
+    lookback_size: int
+    lookback_unit: str | None
+
+
+def window_contract(config: IncrementalConfig) -> WindowContract:
+    """Flatten validated config and apply the default nullability check."""
+    contract, lookback = config["contract"], config["lookback"]
+    return WindowContract(
+        column=contract["source_column"], position_type=contract["position_type"],
+        check_not_null=contract.get("check_not_null", True),
+        lookback_size=lookback["size"], lookback_unit=lookback["unit"],
+    )
 
 
 def validate(config: object) -> IncrementalConfig:

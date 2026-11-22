@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from pyspark.sql import DataFrame, DataFrameReader, SparkSession
 
 PartitionBound = int | Decimal | date | None
+PartitionBounds = tuple[PartitionBound, PartitionBound]
 
 LOGGER = logging.getLogger(__name__)
 
@@ -156,7 +157,7 @@ def _integral_bounds_out_of_long_range(kind: str, low: int | Decimal, high: int 
 def probe_bounds(
     spark: "SparkSession", args: argparse.Namespace, source: ReadSource, filters: Sequence[str],
     *, scope: JdbcReadScope, incremental: tuple[str, str] | None = None,
-) -> tuple[str | None, tuple[PartitionBound, PartitionBound]]:
+) -> tuple[str | None, PartitionBounds]:
     """Fetch the requested bounds with one JDBC statement, or skip the probe."""
     expressions = []
     dialect, partition = source.dialect, source.partition
@@ -214,7 +215,7 @@ def build_extract_query(
 
 def apply_partition_options(
     args: argparse.Namespace, reader: "DataFrameReader", partition: jdbc_partitioning.PartitionChoice | None,
-    bounds: tuple[PartitionBound, PartitionBound],
+    bounds: PartitionBounds,
 ) -> "DataFrameReader":
     """Enable parallel ranges when the observed bounds fit Spark's options."""
     if partition is None:
@@ -243,7 +244,7 @@ def apply_partition_options(
 def read_extract_frame(
     spark: "SparkSession", args: argparse.Namespace, filters: Sequence[str] = (), extra_select: str = "",
     *, detailed_metadata: bool = True, source: ReadSource | None = None,
-    bounds: tuple[PartitionBound, PartitionBound] | None = None,
+    bounds: PartitionBounds | None = None,
 ) -> "DataFrame":
     """Read the source over JDBC into a cached frame with explicit predicates.
 

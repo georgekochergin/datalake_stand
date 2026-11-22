@@ -40,12 +40,13 @@ def position_select(dialect: RdbmsDialect, kind: str, incremental_column: str) -
 def read_window_frame(
     spark: "SparkSession", args: argparse.Namespace, batch: "DbRow", kind: str, *, detailed_metadata: bool = True,
     source: reader.ReadSource | None = None,
-    bounds: tuple[reader.PartitionBound, reader.PartitionBound] | None = None,
+    bounds: reader.PartitionBounds | None = None,
 ) -> "DataFrame":
     """Read the frozen batch window into a cached frame via the shared JDBC reader."""
     dialect = dialects.by_jdbc_url(args.jdbc_url)
-    info = source.keys.columns.get(args.incremental_column.lower()) if source is not None else None
-    column = info.name if info is not None else args.incremental_column
+    declared_column = args.incremental.column
+    info = source.keys.columns.get(declared_column.lower()) if source is not None else None
+    column = info.name if info is not None else declared_column
     filters = window_filters(dialect, batch, kind, column)
     extra_select = position_select(dialect, kind, column)
     return reader.read_extract_frame(spark, args, filters=filters, extra_select=extra_select,

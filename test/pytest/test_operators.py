@@ -111,13 +111,22 @@ def test_standard_jdbc_urls_are_visible_for_all_registered_dialects(dialect):
     assert raw._PUBLIC_JDBC_URL.fullmatch(url), f"Review the safe display rule for {type(dialect).__name__}"
 
 
-@pytest.mark.parametrize("driver", ("full/load_entity.py", "incremental/load_entity.py", "incremental/load_act_snap.py"))
+@pytest.mark.parametrize("driver", (
+    "full/load_entity.py", "incremental/load_entity.py", "incremental/act_snap/load_act_snap.py",
+))
 def test_driver_arguments_have_an_explicit_log_display_policy(driver):
     raw = load_operators().raw_rdbms
-    path = Path(__file__).resolve().parents[2] / "ingestion/spark/raw/rdbms" / driver
+    root = Path(__file__).resolve().parents[2] / "ingestion/spark/raw/rdbms"
+    path = root / driver
     parser = next(node for node in ast.parse(path.read_text()).body
                   if isinstance(node, ast.FunctionDef) and node.name == "parse_args")
-    options = {arg.value for node in ast.walk(parser) if isinstance(node, ast.Call)
+    shared_args = next(node for node in ast.parse((root / "cli.py").read_text()).body
+                       if isinstance(node, ast.FunctionDef) and node.name == "add_jdbc_load_args")
+    assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+               and isinstance(node.func.value, ast.Name) and node.func.value.id == "cli"
+               and node.func.attr == shared_args.name for node in ast.walk(parser))
+    options = {arg.value for function in (parser, shared_args)
+               for node in ast.walk(function) if isinstance(node, ast.Call)
                and isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument"
                for arg in node.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
                and arg.value.startswith("--")}
@@ -561,7 +570,7 @@ class TestIngestActSnapOperator(unittest.TestCase):
 
     def test_application_path_and_arguments(self):
         operator = self.operator()
-        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/incremental/load_act_snap.py")
+        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/incremental/act_snap/load_act_snap.py")
         self.assertEqual(operator.deploy_mode, "client")
         self.assertIsNone(operator.execute(self.context))
         args = operator.application_args

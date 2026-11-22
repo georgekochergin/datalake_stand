@@ -2,9 +2,9 @@
 """Exercise temporal managed extraction against real JDBC sources and Iceberg."""
 
 import importlib.util
-import os
 from argparse import ArgumentParser, Namespace
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from unittest import TestCase
 from uuid import uuid4
@@ -101,7 +101,7 @@ def source_count(spark, args, lower, upper, kind, lower_op=">"):
     from ingestion.sources.rdbms import registry as dialects
 
     dialect = dialects.by_jdbc_url(args.jdbc_url)
-    column = dialect.quote_identifier(args.incremental_column)
+    column = dialect.quote_identifier(args.incremental.column)
     predicates = []
     for value, operator in ((lower, lower_op), (upper, "<=")):
         if value is not None:
@@ -167,18 +167,19 @@ def check_raw_temporal(spark, target_table, kind):
 def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, token,
              expected_upper=None, fixture=None):
     """Verify bootstrap, aligned lookback, empty resume, and successful retry."""
-    load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/incremental/load_entity.py")
+    from ingestion.spark.raw.rdbms.incremental import entity
     from ingestion import meta
     from ingestion.sources.rdbms import positions
+    from ingestion.sources.rdbms.incremental_config import WindowContract
 
     args = Namespace(
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
         source_table=table, target_table=f"raw.e2e_contract.{target}",
-        source_id=f"e2e_{source}", incremental_column=column,
+        source_id=f"e2e_{source}",
         no_jdbc_partitioning=True, num_partitions=1,
         dag_id="e2e_temporal_extraction", run_id=None,
-        process_id=None, lookback_size=0, lookback_unit=None,
-        position_type=expected_kind, check_not_null=False,
+        process_id=None,
+        incremental=WindowContract(column, expected_kind, check_not_null=False, lookback_size=0, lookback_unit=None),
     )
     if fixture is not None:
         register_virtual(table, *fixture)
@@ -190,22 +191,22 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
             from ingestion.spark.raw.rdbms import reader
 
             read_source = reader.inspect_source(spark, args)
-            info = load_entity.source_column(read_source, args, check_not_null=False)
+            info = entity.resolve_incremental_column(read_source, args, check_not_null=False)
             kind = expected_kind
             upper, _ = reader.probe_bounds(
                 spark, args, read_source, [f"{read_source.dialect.quote_identifier(info.name)} IS NOT NULL"],
                 scope=reader.JdbcReadScope.SOURCE_TABLE, incremental=(info.name, kind),
             )
-            declared = args.position_type
-            args.position_type = "bigint"
+            declared = args.incremental
+            args.incremental = replace(declared, position_type="bigint")
             try:
-                load_entity.source_column(read_source, args, check_not_null=False)
+                entity.resolve_incremental_column(read_source, args, check_not_null=False)
             except ValueError as error:
                 require("Incremental type mismatch" in str(error), target + " rejects wrong declared type")
             else:
                 raise AssertionError(target + " accepted a wrong declared type")
             finally:
-                args.position_type = declared
+                args.incremental = declared
             require(upper is not None, target + " has non-null temporal data")
             if expected_upper is not None:
                 require(upper == expected_upper, target + " source MAX preserves full fractional precision")
@@ -219,8 +220,7 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
                 args.run_id = f"{token}-{target}-{phase}"
                 args.process_id = meta.allocate_process_id(dag_id=args.dag_id, run_id=args.run_id,
                                                            db_connect=hook.get_conn)
-                args.lookback_size = 1 if phase == "lookback" else 0
-                args.lookback_unit = "d" if args.lookback_size else None
+                args.incremental = replace(declared, lookback_size=1, lookback_unit="d") if phase == "lookback" else declared
                 if phase == "lookback":
                     lower, lower_op = positions.window_bounds(watermark, kind, 1, "d")
                 else:
@@ -232,7 +232,7 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
                 if phase == "lookback":
                     require(expected_count > 0, target + " lookback includes overlapping source rows")
                     require(lower_op == ">=", target + " temporal lookback uses the inclusive aligned operator")
-                load_entity.managed_load(spark, args)
+                entity.managed_load(spark, args, db_connect=hook.get_conn)
                 batch = metadata_row(hook, "incremental_batches", args.source_id, table)
                 state = metadata_row(hook, "incremental_state", args.source_id, table)
                 label = f"{target}/{phase}"
@@ -272,7 +272,7 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
                         label + " raw rows carry the process identity")
                 require(frame.filter(frame["__process_id"].isNull()).count() == 0,
                         label + " every raw row has a process identity")
-                load_entity.managed_load(spark, args)
+                entity.managed_load(spark, args, db_connect=hook.get_conn)
                 retried = metadata_row(hook, "incremental_batches", args.source_id, table)
                 require(retried == batch and spark.table(args.target_table).count() == total,
                         label + " successful retry neither appends nor mutates persisted batch")
@@ -332,26 +332,26 @@ def precision_fixtures(source):
 
 def check_post_append_retry(spark, hook, jdbc, token):
     """Repeat a partitioned append with the saved incremental window after a metadata failure."""
-    load_entity = load_module("load_entity", "/opt/spark-jobs/raw/rdbms/incremental/load_entity.py")
     from ingestion import meta
     from ingestion.meta import registry
     from ingestion.sources.rdbms import jdbc as jdbc_pkg
     from ingestion.spark.raw.rdbms import reader
+    from ingestion.spark.raw.rdbms.incremental import entity
+    from ingestion.sources.rdbms.incremental_config import WindowContract
 
     args = Namespace(
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
         source_table="fixture.retry_probe",
         target_table="raw.e2e_contract.post_append_retry", source_id="e2e_retry",
-        incremental_column="position", no_jdbc_partitioning=False,
+        no_jdbc_partitioning=False,
         num_partitions=2, dag_id="e2e_post_append_retry", run_id=token,
-        lookback_size=0, lookback_unit=None,
-        position_type="bigint", check_not_null=True,
+        incremental=WindowContract("position", "bigint", check_not_null=True, lookback_size=0, lookback_unit=None),
     )
     seed_process = meta.allocate_process_id(dag_id=args.dag_id, run_id=token, db_connect=hook.get_conn)
     seed_key = dict(process_id=seed_process, source_id=args.source_id,
                     entity_fqn=args.source_table, db_connect=hook.get_conn)
     registry.plan_batch(**seed_key, dag_id=args.dag_id, run_id=token, target_table=args.target_table,
-                        incremental_column=args.incremental_column, incremental_type=args.position_type,
+                        incremental_column=args.incremental.column, incremental_type=args.incremental.position_type,
                         upper_bound="1")
     registry.finalize_batch(**seed_key, row_count=1, observed_max="1")
     args.process_id = meta.allocate_process_id(dag_id=args.dag_id, run_id=token, db_connect=hook.get_conn)
@@ -373,7 +373,7 @@ def check_post_append_retry(spark, hook, jdbc, token):
         with virtual_sources():
             with patch.object(registry, "finalize_batch", side_effect=RuntimeError("injected metadata failure")):
                 try:
-                    load_entity.managed_load(spark, args)
+                    entity.managed_load(spark, args, db_connect=hook.get_conn)
                 except RuntimeError as exc:
                     require(str(exc) == "injected metadata failure", "expected post-append failure")
                 else:
@@ -387,7 +387,7 @@ def check_post_append_retry(spark, hook, jdbc, token):
             with TestCase().assertLogs(reader.LOGGER, level="INFO") as logs, patch.object(
                 jdbc_pkg, "first_row", wraps=jdbc_pkg.first_row
             ) as probe:
-                load_entity.managed_load(spark, args)
+                entity.managed_load(spark, args, db_connect=hook.get_conn)
             probe.assert_called_once()
             sql = probe.call_args.args[1]
             require("MIN([id]) AS lower_bound, MAX([id]) AS upper_bound" in sql
@@ -421,16 +421,21 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
     The logical entity remains constant while real JDBC reads use each projection.
     """
     from ingestion import meta
-    from ingestion.spark.raw.rdbms.incremental import load_entity, load_act_snap
+    from ingestion.spark.raw.rdbms.incremental import entity
+    from ingestion.spark.raw.rdbms.incremental.act_snap import snapshot
+    from ingestion.sources.rdbms.incremental_config import WindowContract
 
     target = f"raw.e2e_contract.{source}_snapshot_recovery"
     args = Namespace(
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
         source_table=f"fixture.{source}_late_rows", target_table=target,
-        source_id=f"e2e_snapshot_{source}", incremental_column="position",
+        source_id=f"e2e_snapshot_{source}",
         no_jdbc_partitioning=True, num_partitions=1, dag_id="e2e_snapshot_recovery",
-        run_id=token, process_id=None, lookback_size=2, lookback_unit=None,
-        position_type="decimal(18,0)" if source == "broker" else "bigint", check_not_null=True,
+        run_id=token, process_id=None,
+        incremental=WindowContract(
+            "position", "decimal(18,0)" if source == "broker" else "bigint",
+            check_not_null=True, lookback_size=2, lookback_unit=None,
+        ),
     )
 
     def allocate():
@@ -476,32 +481,31 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
         """Execute the unchanged loader with controlled JDBC source visibility."""
         register_virtual(args.source_table, projection(values), position_columns)
         with virtual_sources():
-            load_entity.managed_load(spark, args)
+            entity.managed_load(spark, args, db_connect=hook.get_conn)
 
     snapshot_args = Namespace(**vars(args))
-    snapshot_args.incremental_column = None
     snapshot_args.target_table = target + "__act_snap"
 
-    def snapshot(values, crash=False):
+    def run_snapshot(values, crash=False):
         """Read a real JDBC projection and optionally fail after the RTAS commit."""
         snapshot_args.process_id = args.process_id
         register_virtual(snapshot_args.source_table, projection(values), position_columns)
         before = registry()
-        overwrite = load_act_snap._overwrite_snapshot
+        overwrite = snapshot._overwrite_snapshot
 
-        def commit_then_crash(*arguments):
+        def commit_then_crash(*arguments, **kwargs):
             """Leave a genuine committed Iceberg version behind the injected crash."""
-            overwrite(*arguments)
+            overwrite(*arguments, **kwargs)
             raise RuntimeError("injected post-snapshot commit crash")
 
         try:
             if crash:
-                with patch.object(load_act_snap, "_overwrite_snapshot", side_effect=commit_then_crash), \
+                with patch.object(snapshot, "_overwrite_snapshot", side_effect=commit_then_crash), \
                         virtual_sources():
-                    load_act_snap.managed_snapshot(spark, snapshot_args)
+                    snapshot.managed_snapshot(spark, snapshot_args)
             else:
                 with virtual_sources():
-                    load_act_snap.managed_snapshot(spark, snapshot_args)
+                    snapshot.managed_snapshot(spark, snapshot_args)
         finally:
             require(registry() == before, f"{source}: snapshot leaves all registry fields and batches untouched")
 
@@ -512,10 +516,10 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
             "ORDER BY committed_at DESC LIMIT 1").collect()
 
     allocate()
-    snapshot(())
+    run_snapshot(())
     require(spark.table(snapshot_args.target_table).count() == 0,
             f"{source}: snapshot before bootstrap publishes an empty table")
-    require(load_act_snap.current_snapshot_author(spark, snapshot_args.target_table) == args.process_id,
+    require(snapshot.current_snapshot_author(spark, snapshot_args.target_table) == args.process_id,
             f"{source}: first empty publication has an Iceberg author")
     allocate()
     try:
@@ -524,7 +528,7 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
         require("does not confirm NOT NULL" in str(error), f"{source}: strict contract rejects nullable metadata")
     else:
         raise AssertionError("strict contract accepted a nullable incremental column")
-    args.check_not_null = False
+    args.incremental = replace(args.incremental, check_not_null=False)
     incremental((None,))
     require(not spark.catalog.tableExists(target), f"{source}: empty bootstrap does not create the raw table")
     require(metadata_row(hook, "incremental_state", args.source_id, args.source_table)["watermark"] is None,
@@ -544,36 +548,39 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
             f"{source}: reads a slice below the watermark without moving it back")
     allocate()
     try:
-        snapshot((9, 11, 12), crash=True)
+        run_snapshot((9, 11, 12), crash=True)
     except RuntimeError as exc:
         require(str(exc) == "injected post-snapshot commit crash",
                 f"{source}: fault occurs after the real snapshot commit")
     else:
         raise AssertionError("snapshot fault injection did not execute")
     committed = version()
-    with patch.object(load_act_snap, "read_extract_frame", side_effect=AssertionError("retry must not read")):
-        load_act_snap.managed_snapshot(spark, snapshot_args)
+    with patch.object(snapshot, "read_extract_frame", side_effect=AssertionError("retry must not read")):
+        snapshot.managed_snapshot(spark, snapshot_args)
     require(version() == committed, f"{source}: committed retry does not change freshness or version")
     require({int(row[0]) for row in spark.table(snapshot_args.target_table).select("position").collect()}
             == {9, 11, 12}, f"{source}: snapshot recovers the row outside lookback")
     require(spark.table(snapshot_args.target_table).select("__process_id").distinct().collect()[0][0]
             == args.process_id, f"{source}: recovered publication still carries current process for Asset")
     allocate()
-    with patch.object(load_act_snap.LOGGER, "warning") as warning:
-        snapshot(())
+    with patch.object(snapshot.LOGGER, "warning") as warning:
+        run_snapshot(())
         require(warning.call_count == 1, f"{source}: empty source emits a warning")
     require(version() == committed and spark.table(snapshot_args.target_table).count() == 3,
             f"{source}: empty check preserves data and publication freshness")
-    require(load_act_snap.current_snapshot_author(spark, snapshot_args.target_table) != args.process_id,
+    require(snapshot.current_snapshot_author(spark, snapshot_args.target_table) != args.process_id,
             f"{source}: empty check cannot claim the previous publication")
     allocate()
     register_virtual(snapshot_args.source_table, projection((20, 21)), position_columns)
     with virtual_sources():
-        frame = load_act_snap.read_extract_frame(spark, snapshot_args)
+        frame = snapshot.read_extract_frame(spark, snapshot_args)
     try:
         with patch.object(spark, "sql", side_effect=RuntimeError("injected pre-commit failure")):
             try:
-                load_act_snap._overwrite_snapshot(spark, snapshot_args, frame, datetime.now(timezone.utc))
+                snapshot._overwrite_snapshot(
+                    spark, frame, target=snapshot_args.target_table, process_id=snapshot_args.process_id,
+                    load_dttm=datetime.now(timezone.utc),
+                )
             except RuntimeError:
                 pass
             else:
@@ -581,7 +588,7 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
     finally:
         frame.unpersist()
     require(version() == committed, f"{source}: failed attempt leaves previous publication intact")
-    snapshot((20, 21))
+    run_snapshot((20, 21))
     rows = spark.table(snapshot_args.target_table).select("position", "__process_id").collect()
     require({int(row[0]) for row in rows} == {20, 21}
             and {row[1] for row in rows} == {args.process_id},
@@ -623,7 +630,7 @@ def check_partitioned_load_path(spark, source_jdbc):
         dialect = dialects.by_jdbc_url(jdbc_url)
         target = f"raw.e2e_contract.{source}_day_partition_path"
         args = Namespace(jdbc_url=jdbc_url, jdbc_user=user, jdbc_password=password,
-                         source_table=table, target_table=target, incremental_column=None,
+                         source_table=table, target_table=target,
                          no_jdbc_partitioning=False, num_partitions=4, process_id=1)
         require(not spark.catalog.tableExists(target),
                 f"{source}: day-partition path starts with a fresh raw table")
@@ -662,19 +669,12 @@ def main():
     parser = ArgumentParser()
     parser.add_argument("--source", choices=("bank", "broker"), required=True)
     selected = parser.parse_args().source
-    from airflow.hooks.base import BaseHook
     from airflow.models.connection import Connection
     from airflow.providers.postgres.hooks.postgres import PostgresHook
     from airflow.utils.session import create_session
     from ingestion.operators import resolve_source_connection
     from pyspark.sql import SparkSession
 
-    from psycopg2.extensions import make_dsn
-
-    meta = BaseHook.get_connection("ingestion_meta")
-    os.environ["INGESTION_META_DSN"] = make_dsn(
-        host=meta.host, port=meta.port or 5432, dbname=meta.schema,
-        user=meta.login, password=meta.password)
     hook = PostgresHook(postgres_conn_id="ingestion_meta")
     with create_session() as session:
         source_jdbc = {
