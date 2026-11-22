@@ -12,6 +12,7 @@ from ingestion.spark.raw.rdbms import reader
 from ingestion.spark.raw.rdbms.incremental import window
 from ingestion.sources.rdbms import jdbc
 from ingestion.sources.rdbms import positions
+from ingestion.sources.rdbms.incremental_config import WindowContract
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
@@ -36,7 +37,7 @@ class _ResolvedBatch:
 
 
 @dataclass
-class _WindowProbe:
+class _WindowPlanner:
     """Supply callbacks for planning a fresh batch under the registry's state lock.
 
     registry.plan_batch computes the lower predicate from the locked watermark
@@ -50,6 +51,7 @@ class _WindowProbe:
 
     spark: "SparkSession"
     args: argparse.Namespace
+    contract: WindowContract
     source: reader.ReadSource
     column: jdbc.ColumnMeta
     probed_bounds: reader.PartitionBounds | None = None
@@ -57,7 +59,7 @@ class _WindowProbe:
     def calculate_lower(self, watermark: str | None) -> tuple[str | None, str]:
         """Compute the lower predicate from the committed watermark and lookback."""
         return positions.window_bounds(
-            watermark, self.args.position_type, self.args.lookback_size, self.args.lookback_unit,
+            watermark, self.contract.position_type, self.contract.lookback_size, self.contract.lookback_unit,
         )
 
     def probe_upper(self, lower: str | None, op: str) -> str | None:
@@ -73,7 +75,7 @@ class _WindowProbe:
         """
         dialect = self.source.dialect
         quoted = dialect.quote_identifier(self.column.name)
-        kind = self.args.position_type
+        kind = self.contract.position_type
         if lower is None:
             filters = [] if self.column.not_null else [f"{quoted} IS NOT NULL"]
             scope = reader.JdbcReadScope.SOURCE_TABLE
@@ -99,11 +101,12 @@ def resolve_incremental_column(
 ) -> jdbc.ColumnMeta:
     """Return JDBC catalog metadata for a column matching the incremental contract."""
     table = f"{args.source_id}.{args.source_table}"
-    column = f"{table}.{args.incremental_column}"
-    info = source.keys.columns.get(args.incremental_column.lower())
+    contract: WindowContract = args.incremental
+    column = f"{table}.{contract.column}"
+    info = source.keys.columns.get(contract.column.lower())
     if info is None:
         raise ValueError(
-            f"Incremental column {args.incremental_column!r} not found in JDBC metadata for "
+            f"Incremental column {contract.column!r} not found in JDBC metadata for "
             f"{table}"
         )
     kind = jdbc.column_position_kind(source.dialect, info)
@@ -112,10 +115,11 @@ def resolve_incremental_column(
             f"Unsupported JDBC type of incremental column {column}: "
             f"{info.type_name} precision={info.precision} scale={info.scale}"
         )
-    if kind != args.position_type:
+    if kind != contract.position_type:
         raise ValueError(
             f"Incremental type mismatch for {column}: "
-            f"expected={args.position_type} actual={kind} JDBC={info.type_name} precision={info.precision} scale={info.scale}"
+            f"expected={contract.position_type} actual={kind} JDBC={info.type_name} "
+            f"precision={info.precision} scale={info.scale}"
         )
     if check_not_null and not info.not_null:
         raise ValueError(f"JDBC metadata does not confirm NOT NULL for incremental column {args.source_table}.{info.name}")
@@ -139,12 +143,12 @@ def _reuse_batch(spark: "SparkSession", args: argparse.Namespace, batch: "DbRow"
     """Verify a retry's contract without probing the incremental maximum again."""
     if batch["target_table"] != args.target_table:
         raise ValueError("Persisted batch target does not match")
-    if batch["incremental_column"] != args.incremental_column:
+    if batch["incremental_column"] != args.incremental.column:
         raise ValueError(
             "Persisted batch incremental column does not match the manifest; "
             "stop executors and migrate the contract"
         )
-    if batch["incremental_type"] != args.position_type:
+    if batch["incremental_type"] != args.incremental.position_type:
         raise ValueError("Persisted batch position type does not match incremental.contract")
     reason = reader.JdbcReason.PERSISTED_BATCH
     LOGGER.info("JDBC incremental maximum not recalculated: %s. reason=%s", reason.text, reason.code)
@@ -163,20 +167,21 @@ def _reuse_batch(spark: "SparkSession", args: argparse.Namespace, batch: "DbRow"
 def _plan_new_batch(spark: "SparkSession", args: argparse.Namespace, db_connect: "DbConnect") -> _ResolvedBatch:
     """Probe and persist the window under the registry's state lock."""
     source = reader.inspect_source(spark, args)
-    info = resolve_incremental_column(source, args, check_not_null=args.check_not_null)
-    kind = args.position_type
-    size, unit = args.lookback_size, args.lookback_unit
+    contract: WindowContract = args.incremental
+    info = resolve_incremental_column(source, args, check_not_null=contract.check_not_null)
+    kind = contract.position_type
+    size, unit = contract.lookback_size, contract.lookback_unit
     LOGGER.info("incremental config: kind=%s lookback_size=%s lookback_unit=%s", kind, size, unit)
-    probe = _WindowProbe(spark, args, source, info)
+    planner = _WindowPlanner(spark, args, contract, source, info)
     batch = registry.plan_batch(
         process_id=args.process_id, dag_id=args.dag_id, run_id=args.run_id,
         source_id=args.source_id, entity_fqn=args.source_table, target_table=args.target_table,
-        incremental_column=args.incremental_column, incremental_type=kind,
+        incremental_column=contract.column, incremental_type=kind,
         lookback_size=size, lookback_unit=unit, db_connect=db_connect,
-        calculate_lower=probe.calculate_lower,
-        probe_upper=probe.probe_upper,
+        calculate_lower=planner.calculate_lower,
+        probe_upper=planner.probe_upper,
     )
-    return _ResolvedBatch(batch, read_source=source, partition_bounds=probe.probed_bounds)
+    return _ResolvedBatch(batch, read_source=source, partition_bounds=planner.probed_bounds)
 
 
 def managed_load(

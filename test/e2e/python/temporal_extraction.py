@@ -4,6 +4,7 @@
 import importlib.util
 from argparse import ArgumentParser, Namespace
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from unittest import TestCase
 from uuid import uuid4
@@ -100,7 +101,7 @@ def source_count(spark, args, lower, upper, kind, lower_op=">"):
     from ingestion.sources.rdbms import registry as dialects
 
     dialect = dialects.by_jdbc_url(args.jdbc_url)
-    column = dialect.quote_identifier(args.incremental_column)
+    column = dialect.quote_identifier(args.incremental.column)
     predicates = []
     for value, operator in ((lower, lower_op), (upper, "<=")):
         if value is not None:
@@ -169,15 +170,16 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
     from ingestion.spark.raw.rdbms.incremental import entity
     from ingestion import meta
     from ingestion.sources.rdbms import positions
+    from ingestion.sources.rdbms.incremental_config import WindowContract
 
     args = Namespace(
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
         source_table=table, target_table=f"raw.e2e_contract.{target}",
-        source_id=f"e2e_{source}", incremental_column=column,
+        source_id=f"e2e_{source}",
         no_jdbc_partitioning=True, num_partitions=1,
         dag_id="e2e_temporal_extraction", run_id=None,
-        process_id=None, lookback_size=0, lookback_unit=None,
-        position_type=expected_kind, check_not_null=False,
+        process_id=None,
+        incremental=WindowContract(column, expected_kind, check_not_null=False, lookback_size=0, lookback_unit=None),
     )
     if fixture is not None:
         register_virtual(table, *fixture)
@@ -195,8 +197,8 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
                 spark, args, read_source, [f"{read_source.dialect.quote_identifier(info.name)} IS NOT NULL"],
                 scope=reader.JdbcReadScope.SOURCE_TABLE, incremental=(info.name, kind),
             )
-            declared = args.position_type
-            args.position_type = "bigint"
+            declared = args.incremental
+            args.incremental = replace(declared, position_type="bigint")
             try:
                 entity.resolve_incremental_column(read_source, args, check_not_null=False)
             except ValueError as error:
@@ -204,7 +206,7 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
             else:
                 raise AssertionError(target + " accepted a wrong declared type")
             finally:
-                args.position_type = declared
+                args.incremental = declared
             require(upper is not None, target + " has non-null temporal data")
             if expected_upper is not None:
                 require(upper == expected_upper, target + " source MAX preserves full fractional precision")
@@ -218,8 +220,7 @@ def exercise(spark, hook, source, jdbc, table, target, column, expected_kind, to
                 args.run_id = f"{token}-{target}-{phase}"
                 args.process_id = meta.allocate_process_id(dag_id=args.dag_id, run_id=args.run_id,
                                                            db_connect=hook.get_conn)
-                args.lookback_size = 1 if phase == "lookback" else 0
-                args.lookback_unit = "d" if args.lookback_size else None
+                args.incremental = replace(declared, lookback_size=1, lookback_unit="d") if phase == "lookback" else declared
                 if phase == "lookback":
                     lower, lower_op = positions.window_bounds(watermark, kind, 1, "d")
                 else:
@@ -336,21 +337,21 @@ def check_post_append_retry(spark, hook, jdbc, token):
     from ingestion.sources.rdbms import jdbc as jdbc_pkg
     from ingestion.spark.raw.rdbms import reader
     from ingestion.spark.raw.rdbms.incremental import entity
+    from ingestion.sources.rdbms.incremental_config import WindowContract
 
     args = Namespace(
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
         source_table="fixture.retry_probe",
         target_table="raw.e2e_contract.post_append_retry", source_id="e2e_retry",
-        incremental_column="position", no_jdbc_partitioning=False,
+        no_jdbc_partitioning=False,
         num_partitions=2, dag_id="e2e_post_append_retry", run_id=token,
-        lookback_size=0, lookback_unit=None,
-        position_type="bigint", check_not_null=True,
+        incremental=WindowContract("position", "bigint", check_not_null=True, lookback_size=0, lookback_unit=None),
     )
     seed_process = meta.allocate_process_id(dag_id=args.dag_id, run_id=token, db_connect=hook.get_conn)
     seed_key = dict(process_id=seed_process, source_id=args.source_id,
                     entity_fqn=args.source_table, db_connect=hook.get_conn)
     registry.plan_batch(**seed_key, dag_id=args.dag_id, run_id=token, target_table=args.target_table,
-                        incremental_column=args.incremental_column, incremental_type=args.position_type,
+                        incremental_column=args.incremental.column, incremental_type=args.incremental.position_type,
                         upper_bound="1")
     registry.finalize_batch(**seed_key, row_count=1, observed_max="1")
     args.process_id = meta.allocate_process_id(dag_id=args.dag_id, run_id=token, db_connect=hook.get_conn)
@@ -422,15 +423,19 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
     from ingestion import meta
     from ingestion.spark.raw.rdbms.incremental import entity
     from ingestion.spark.raw.rdbms.incremental.act_snap import snapshot
+    from ingestion.sources.rdbms.incremental_config import WindowContract
 
     target = f"raw.e2e_contract.{source}_snapshot_recovery"
     args = Namespace(
         jdbc_url=jdbc[0], jdbc_user=jdbc[1], jdbc_password=jdbc[2],
         source_table=f"fixture.{source}_late_rows", target_table=target,
-        source_id=f"e2e_snapshot_{source}", incremental_column="position",
+        source_id=f"e2e_snapshot_{source}",
         no_jdbc_partitioning=True, num_partitions=1, dag_id="e2e_snapshot_recovery",
-        run_id=token, process_id=None, lookback_size=2, lookback_unit=None,
-        position_type="decimal(18,0)" if source == "broker" else "bigint", check_not_null=True,
+        run_id=token, process_id=None,
+        incremental=WindowContract(
+            "position", "decimal(18,0)" if source == "broker" else "bigint",
+            check_not_null=True, lookback_size=2, lookback_unit=None,
+        ),
     )
 
     def allocate():
@@ -479,7 +484,6 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
             entity.managed_load(spark, args, db_connect=hook.get_conn)
 
     snapshot_args = Namespace(**vars(args))
-    snapshot_args.incremental_column = None
     snapshot_args.target_table = target + "__act_snap"
 
     def run_snapshot(values, crash=False):
@@ -524,7 +528,7 @@ def check_snapshot_recovery(spark, hook, source, jdbc, token):
         require("does not confirm NOT NULL" in str(error), f"{source}: strict contract rejects nullable metadata")
     else:
         raise AssertionError("strict contract accepted a nullable incremental column")
-    args.check_not_null = False
+    args.incremental = replace(args.incremental, check_not_null=False)
     incremental((None,))
     require(not spark.catalog.tableExists(target), f"{source}: empty bootstrap does not create the raw table")
     require(metadata_row(hook, "incremental_state", args.source_id, args.source_table)["watermark"] is None,
@@ -626,7 +630,7 @@ def check_partitioned_load_path(spark, source_jdbc):
         dialect = dialects.by_jdbc_url(jdbc_url)
         target = f"raw.e2e_contract.{source}_day_partition_path"
         args = Namespace(jdbc_url=jdbc_url, jdbc_user=user, jdbc_password=password,
-                         source_table=table, target_table=target, incremental_column=None,
+                         source_table=table, target_table=target,
                          no_jdbc_partitioning=False, num_partitions=4, process_id=1)
         require(not spark.catalog.tableExists(target),
                 f"{source}: day-partition path starts with a fresh raw table")

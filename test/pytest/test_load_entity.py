@@ -5,6 +5,7 @@ import json
 import os
 import types
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -47,7 +48,8 @@ class TestParseArgs(unittest.TestCase):
         self.assertEqual(args.source_table, "retail_bank.transactions")
         self.assertEqual(args.target_table, "raw.bank.retail_bank__transactions")
         self.assertEqual(args.process_id, 42)
-        self.assertEqual(args.incremental_column, "_batch_id")
+        self.assertEqual(args.incremental.column, "_batch_id")
+        self.assertTrue(args.incremental.check_not_null)
         self.assertEqual(args.num_partitions, 4)
 
     def test_incremental_column_required(self):
@@ -61,15 +63,15 @@ class TestParseArgs(unittest.TestCase):
             "--incremental-config", json.dumps({"contract": {"source_column": "updated_at", "position_type": "timestamp_local(7)"}, "lookback": {"size": 3, "unit": "h"}}),
         ))
         self.assertEqual((args.source_id, args.dag_id, args.run_id), ("bank", "dag", "run"))
-        self.assertEqual((args.lookback_size, args.lookback_unit), (3, "h"))
-        self.assertEqual(args.position_type, "timestamp_local(7)")
+        self.assertEqual((args.incremental.lookback_size, args.incremental.lookback_unit), (3, "h"))
+        self.assertEqual(args.incremental.position_type, "timestamp_local(7)")
         self.assertFalse(hasattr(args, "force_full"))
 
     def test_lookback_given_defaults_off(self):
         args = load_entity.parse_args(build_argv("--source-id", "bank"))
         self.assertFalse(hasattr(args, "lookback_given"))
-        self.assertEqual(args.lookback_size, 0)
-        self.assertIsNone(args.lookback_unit)
+        self.assertEqual(args.incremental.lookback_size, 0)
+        self.assertIsNone(args.incremental.lookback_unit)
 
     def test_unknown_lookback_unit_rejected(self):
         with self.assertRaises(SystemExit):
@@ -209,7 +211,7 @@ class TestResolveBatch(unittest.TestCase):
         run = self.plan(None, watermark="12", row=(None,))
         self.assertIsNone(run.resolved.batch["upper_bound"])
         args = self.args()
-        args.lookback_size = 5
+        args.incremental = replace(args.incremental, lookback_size=5)
         run = self.plan(None, args=args, watermark="12", row=("10",))
         self.assertEqual(run.resolved.batch["upper_bound"], "10")
         self.assertTrue(run.query.call_args.args[1].endswith("WHERE [_batch_id] > 7"))
@@ -242,7 +244,7 @@ class TestResolveBatch(unittest.TestCase):
                          "incremental_column": "_batch_id", "status": status,
                          "row_count": 5, "finished_at": "2026-11-07"}
                 args = self.args()
-                args.incremental_column = "other_position"
+                args.incremental = replace(args.incremental, column="other_position")
                 with self.assertRaisesRegex(ValueError, "incremental column does not match"):
                     self.plan(batch, args=args)
 

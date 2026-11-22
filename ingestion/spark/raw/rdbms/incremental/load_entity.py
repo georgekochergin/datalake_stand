@@ -9,6 +9,7 @@ from ingestion.logging import configure_driver_logging
 from ingestion.spark.raw.iceberg import validate_target_table
 from ingestion.spark.raw.rdbms import cli
 from ingestion.spark.raw.rdbms.incremental import entity
+from ingestion.sources.rdbms.incremental_config import validate, window_contract
 
 if TYPE_CHECKING:
     from psycopg2.extensions import connection as Psycopg2Connection
@@ -20,21 +21,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Append one incremental entity window from a JDBC source into the raw layer."
     )
     cli.add_jdbc_load_args(parser)
-    parser.add_argument("--incremental-config", required=True)
+    parser.add_argument("--incremental-config", dest="incremental", required=True)
     parser.add_argument("--source-id")
     parser.add_argument("--dag-id")
     parser.add_argument("--run-id")
     args = parser.parse_args(argv)
     cli.validate_jdbc_load_args(args)
-    from ingestion.sources.rdbms.incremental_config import validate
-
-    config = validate(json.loads(args.incremental_config))
-    args.incremental_config = config
-    args.incremental_column = config["contract"]["source_column"]
-    args.position_type = config["contract"]["position_type"]
-    args.check_not_null = config["contract"].get("check_not_null", True)
-    args.lookback_size = config["lookback"]["size"]
-    args.lookback_unit = config["lookback"]["unit"]
+    args.incremental = window_contract(validate(json.loads(args.incremental)))
     return args
 
 

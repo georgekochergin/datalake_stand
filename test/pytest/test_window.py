@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from ingestion.sources.rdbms import registry
+from ingestion.sources.rdbms.incremental_config import WindowContract
 from ingestion.spark.raw.rdbms.incremental import window
 
 MSSQL_URL = "jdbc:sqlserver://host:1433;databaseName=retail_bank"
@@ -24,7 +25,7 @@ def make_args(**overrides):
         "source_table": "retail_bank.transactions",
         "num_partitions": 4,
         "no_jdbc_partitioning": False,
-        "incremental_column": "_batch_id",
+        "incremental": WindowContract("_batch_id", "bigint", check_not_null=True, lookback_size=0, lookback_unit=None),
     }
     values.update(overrides)
     return types.SimpleNamespace(**values)
