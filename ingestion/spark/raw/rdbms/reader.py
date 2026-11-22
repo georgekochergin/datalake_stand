@@ -256,7 +256,7 @@ def read_extract_frame(
     """
     scope = JdbcReadScope.BATCH_WINDOW if filters or extra_select else JdbcReadScope.SOURCE_TABLE
     source = source or inspect_source(spark, args, detailed=detailed_metadata)
-    projection = jdbc.compatibility_projection(source.dialect, source.keys)
+    projection, utc_columns = jdbc.compatibility_projection(source.dialect, source.keys)
     partition = source.partition
     if bounds is None and partition is not None:
         _, bounds = probe_bounds(spark, args, source, filters, scope=scope)
@@ -276,6 +276,13 @@ def read_extract_frame(
             reason = JdbcReason.NO_PARTITION_COLUMN
         LOGGER.info("JDBC partition bounds skipped: %s. reason=%s", reason.text, reason.code)
     frame = reader.load()
+    if utc_columns:
+        from pyspark.sql import functions as F
+
+        frame = frame.withColumns({
+            name: F.timestamp_micros(F.col("`" + name.replace("`", "``") + "`").cast("long"))
+            for name in utc_columns
+        })
     frame = frame.cache()
     if partition is not None:
         LOGGER.info(

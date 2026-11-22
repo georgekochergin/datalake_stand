@@ -92,16 +92,15 @@ def column_position_kind(dialect: RdbmsDialect, info: ColumnMeta) -> str | None:
     return None
 
 
-def compatibility_projection(dialect: RdbmsDialect, keys: KeyMetadata) -> list[str] | None:
-    """Build projected select items when the dialect rewrites special columns.
+def compatibility_projection(dialect: RdbmsDialect, keys: KeyMetadata) -> tuple[list[str] | None, list[str]]:
+    """Build select items and list the columns projected as Unix microseconds.
 
     Column facts come from the JDBC catalog (getColumns), the same source as
     the partitioning choice, so no SQL is executed against the source.
-    Returns None when the dialect reads every column natively, leaving the
-    plain extract_source.* select untouched.
+    Use extract_source.* when the dialect reads every column natively.
     """
     projected = []
-    rewrote = False
+    utc_columns = []
     for info in keys.columns.values():
         alias = dialect.quote_identifier(info.name)
         reference = f"extract_source.{alias}"
@@ -109,9 +108,9 @@ def compatibility_projection(dialect: RdbmsDialect, keys: KeyMetadata) -> list[s
         if expression is None:
             projected.append(reference)
         else:
-            rewrote = True
+            utc_columns.append(info.name)
             projected.append(f"{expression} AS {alias}")
-    return projected if rewrote else None
+    return (projected if utc_columns else None), utc_columns
 
 
 def key_metadata(

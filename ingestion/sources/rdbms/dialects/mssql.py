@@ -68,3 +68,10 @@ class MssqlDialect(RdbmsDialect):
                 f"CAST(DATEPART(nanosecond, {value}) AS varchar(9)), 9), {precision})"
             )
         return expression + (" + 'Z'" if family == "instant" else "")
+
+    def column_projection(self, type_name: str, reference: str) -> str | None:
+        """Count UTC microsecond boundaries from the Unix epoch."""
+        if normalize_type_name(type_name).split("(", 1)[0].strip() == "DATETIMEOFFSET":
+            utc = f"CAST(SWITCHOFFSET({reference}, '+00:00') AS datetime2(7))"
+            return f"DATEDIFF_BIG(MICROSECOND, CAST('19700101' AS datetime2(7)), {utc})"
+        return None

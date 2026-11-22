@@ -217,18 +217,28 @@ class TestPositionExpression(unittest.TestCase):
 
 
 class TestColumnProjection(unittest.TestCase):
-    """Special-type read expressions; every dialect except Oracle reads natively."""
+    """Only instant types are projected as Unix microseconds."""
 
     def test_mssql_reads_natively(self):
-        for type_name in ("datetime2", "datetimeoffset", "nvarchar", "TIMESTAMP WITH TIME ZONE"):
+        for type_name in ("datetime2", "datetime", "date", "nvarchar", "TIMESTAMP WITH TIME ZONE"):
             self.assertIsNone(MSSQL.column_projection(type_name, "extract_source.[ts]"))
+
+    def test_mssql_rewrites_datetimeoffset(self):
+        for type_name in ("datetimeoffset", "DATETIMEOFFSET(7)"):
+            expression = MSSQL.column_projection(type_name, "extract_source.[ts]")
+            self.assertEqual(
+                expression,
+                "DATEDIFF_BIG(MICROSECOND, CAST('19700101' AS datetime2(7)), "
+                "CAST(SWITCHOFFSET(extract_source.[ts], '+00:00') AS datetime2(7)))",
+            )
 
     def test_oracle_rewrites_timezone_columns_only(self):
         for type_name in ("TIMESTAMP(9) WITH TIME ZONE", "TIMESTAMP WITH LOCAL TIME ZONE"):
-            self.assertEqual(
-                ORACLE.column_projection(type_name, 'extract_source."ts"'),
-                'SYS_EXTRACT_UTC(extract_source."ts")',
-            )
+            expression = ORACLE.column_projection(type_name, 'extract_source."ts"')
+            self.assertIn('SYS_EXTRACT_UTC(extract_source."ts")', expression)
+            self.assertIn('DAY(9) TO SECOND(9)', expression)
+            self.assertTrue(expression.startswith('CAST(FLOOR('))
+            self.assertTrue(expression.endswith(' * 1000000) AS NUMBER(19,0))'))
         for type_name in ("TIMESTAMP(9)", "DATE", "NUMBER", "VARCHAR2"):
             self.assertIsNone(ORACLE.column_projection(type_name, 'extract_source."ts"'))
 
