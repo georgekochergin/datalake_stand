@@ -396,7 +396,7 @@ DAG ingest__rdbms__<source_id>__<pipeline>__act_snap_<alias>
 ├── generate_process_id   собственный process_id снимочного запуска
 └── activate_source       SydafaActivateOperator: поднять СУБД, TTL 15 минут
     └── TaskGroup "snap_<schema>__<table>"
-        ├── load           IngestActSnapOperator → ingestion/spark/raw/rdbms/incremental/load_act_snap.py
+        ├── load           IngestActSnapOperator → ingestion/spark/raw/rdbms/incremental/act_snap/load_act_snap.py
         └── publish_asset  PythonOperator: в таблице есть строки текущего
                            процесса — публикация, иначе пропуск
 ```
@@ -1397,14 +1397,18 @@ TO_CHAR(SYS_EXTRACT_UTC("changed_at"), 'YYYY-MM-DD"T"HH24:MI:SS.FF7"Z"')
 
 ### 8.2. Жизненный цикл загрузки
 
-Загрузкой инкрементального [окна](glossary.md#term-window) управляет `managed_load()` в
-`ingestion/spark/raw/rdbms/incremental/load_entity.py`. Она вызывает
+Точка входа Spark `ingestion/spark/raw/rdbms/incremental/load_entity.py` разбирает аргументы,
+управляет сессией Spark и передаёт фабрику соединений с pg-meta в `managed_load()`.
+Эта функция находится в `incremental/entity.py` и управляет загрузкой инкрементального
+[окна](glossary.md#term-window). Она вызывает
 реестр партий `ingestion/meta/registry.py` на общем helper транзакций пакета
 `ingestion/meta`, читает окно через `incremental/window.py` (предикаты, позиция,
 count/max-агрегация) и общий `reader.py`, а пишет [raw](glossary.md#term-raw) через writer слоя
 `append.py`. [Полный срез](glossary.md#term-full)
 исполняет `full/load_entity.py` без обращений к реестру, снимочный поток —
-`incremental/load_act_snap.py` (см. [DAG-и снимков](#87-dag-и-снимков-и-таблицы-снимки)).
+`incremental/act_snap/load_act_snap.py`. Эта точка входа запускает Spark и передаёт управление
+в `incremental/act_snap/snapshot.py`, который читает источник и публикует таблицу Iceberg
+(см. [DAG-и снимков](#87-dag-и-снимков-и-таблицы-снимки)).
 **[Партия](glossary.md#term-batch)** — одна загрузка одной [сущности](glossary.md#term-entity) в одном [исполнении](glossary.md#term-execution) DAG-а. Ключ —
 `(process_id, source_id, entity_fqn)`, в [raw](glossary.md#term-raw) [партию](glossary.md#term-batch) отмечает `__process_id`.
 **[Попытка](glossary.md#term-attempt)** — [исполнение](glossary.md#term-execution) этой [партии](glossary.md#term-batch): [retry](glossary.md#term-retry) задач Airflow не создаёт новую

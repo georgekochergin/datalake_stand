@@ -111,7 +111,9 @@ def test_standard_jdbc_urls_are_visible_for_all_registered_dialects(dialect):
     assert raw._PUBLIC_JDBC_URL.fullmatch(url), f"Review the safe display rule for {type(dialect).__name__}"
 
 
-@pytest.mark.parametrize("driver", ("full/load_entity.py", "incremental/load_entity.py", "incremental/load_act_snap.py"))
+@pytest.mark.parametrize("driver", (
+    "full/load_entity.py", "incremental/load_entity.py", "incremental/act_snap/load_act_snap.py",
+))
 def test_driver_arguments_have_an_explicit_log_display_policy(driver):
     raw = load_operators().raw_rdbms
     path = Path(__file__).resolve().parents[2] / "ingestion/spark/raw/rdbms" / driver
@@ -561,7 +563,7 @@ class TestIngestActSnapOperator(unittest.TestCase):
 
     def test_application_path_and_arguments(self):
         operator = self.operator()
-        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/incremental/load_act_snap.py")
+        self.assertEqual(operator.application, "/opt/spark-jobs/raw/rdbms/incremental/act_snap/load_act_snap.py")
         self.assertEqual(operator.deploy_mode, "client")
         self.assertIsNone(operator.execute(self.context))
         args = operator.application_args

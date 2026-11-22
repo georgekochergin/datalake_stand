@@ -290,7 +290,7 @@ class IngestActSnapOperator(_RdbmsSubmitOperator):
     ) -> None:
         _strict_submit_options(source_type, jdbc_partitioning, num_partitions)
         super().__init__(
-            application="/opt/spark-jobs/raw/rdbms/incremental/load_act_snap.py",
+            application="/opt/spark-jobs/raw/rdbms/incremental/act_snap/load_act_snap.py",
             name=target_table,
             conn_id=SUBMIT_CONN_ID,
             deploy_mode="client",

@@ -6,11 +6,11 @@ import os
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from ingestion.spark.raw.rdbms.incremental import load_entity
+from ingestion.spark.raw.rdbms.incremental import entity, load_entity
 
 MSSQL_URL = "jdbc:sqlserver://host:1433;databaseName=retail_bank"
 ORACLE_URL = "jdbc:oracle:thin:@//host:1521/sydafa"
@@ -121,13 +121,14 @@ class TestMain(unittest.TestCase):
         pyspark.sql = sql
         managed = MagicMock()
         with patch.dict(sys.modules, {"pyspark": pyspark, "pyspark.sql": sql}), patch.object(
-            load_entity, "managed_load", managed
+            entity, "managed_load", managed
         ):
             load_entity.main(build_argv("--source-id", "bank", "--dag-id", "dag", "--run-id", "run"))
         spark.stop.assert_called_once()
         managed.assert_called_once()
         self.assertIs(managed.call_args.args[0], spark)
         self.assertEqual(managed.call_args.args[1].source_id, "bank")
+        self.assertIs(managed.call_args.kwargs["db_connect"], load_entity._connect_pg_meta)
 
 
 class TestEmptyIncrementalWindow(unittest.TestCase):
@@ -138,20 +139,20 @@ class TestEmptyIncrementalWindow(unittest.TestCase):
                 "lower_bound_op": ">=" if lookback else ">"}
 
     def test_equal_bounds_with_zero_lookback_is_empty(self):
-        self.assertTrue(load_entity.empty_incremental_window(self.batch()))
-        self.assertTrue(load_entity.empty_incremental_window(self.batch(lower="2026-10-26", upper="2026-10-26")))
+        self.assertTrue(entity._empty_incremental_window(self.batch()))
+        self.assertTrue(entity._empty_incremental_window(self.batch(lower="2026-10-26", upper="2026-10-26")))
 
     def test_lookback_window_with_equal_bounds_is_not_empty(self):
-        self.assertFalse(load_entity.empty_incremental_window(self.batch(lookback=3)))
-        self.assertFalse(load_entity.empty_incremental_window(self.batch(lower=None, lookback=3)))
+        self.assertFalse(entity._empty_incremental_window(self.batch(lookback=3)))
+        self.assertFalse(entity._empty_incremental_window(self.batch(lower=None, lookback=3)))
 
     def test_strict_window_with_distinct_bounds_is_not_empty(self):
         for changes in ({"lower": "7"}, {"upper": "12"}, {"lower": None}, {"lower": None, "upper": None}):
             with self.subTest(changes=changes):
-                self.assertFalse(load_entity.empty_incremental_window(self.batch(**changes)))
+                self.assertFalse(entity._empty_incremental_window(self.batch(**changes)))
 
 
-class TestPlanBatch(unittest.TestCase):
+class TestResolveBatch(unittest.TestCase):
     """Batch resolution and planning before any source window is read."""
 
     def setUp(self):
@@ -166,8 +167,8 @@ class TestPlanBatch(unittest.TestCase):
 
     def plan(self, batch, args=None, watermark=None, row=("10",), meta=None):
         args = args or self.args()
-        info = meta or load_entity.jdbc.ColumnMeta("_batch_id", "bigint", 19, 0, True)
-        keys = load_entity.jdbc.KeyMetadata((), (), {info.name: info})
+        info = meta or entity.jdbc.ColumnMeta("_batch_id", "bigint", 19, 0, True)
+        keys = entity.jdbc.KeyMetadata((), (), {info.name: info})
 
         def persist(**kwargs):
             lower, op = kwargs["calculate_lower"](watermark)
@@ -175,11 +176,11 @@ class TestPlanBatch(unittest.TestCase):
 
         with patch.object(self.registry, "get_batch", return_value=batch), patch.object(
             self.registry, "plan_batch", side_effect=persist
-        ) as plan, patch.object(load_entity.jdbc, "key_metadata", return_value=keys) as catalog, patch.object(
-            load_entity.jdbc, "connection"
-        ), patch.object(load_entity.jdbc, "first_row", return_value=row) as query:
-            result, source, bounds = load_entity._plan_batch(self.spark, args, lambda: None)
-        return result, catalog, plan, query, bounds
+        ) as plan, patch.object(entity.jdbc, "key_metadata", return_value=keys) as catalog, patch.object(
+            entity.jdbc, "connection"
+        ), patch.object(entity.jdbc, "first_row", return_value=row) as query:
+            result = entity._resolve_batch(self.spark, args, lambda: None)
+        return result.batch, catalog, plan, query, result.partition_bounds
 
     def test_regular_probe_uses_locked_watermark(self):
         result, catalog, _, query, bounds = self.plan(None, watermark="8")
@@ -191,7 +192,7 @@ class TestPlanBatch(unittest.TestCase):
         self.assertEqual(bounds, (None, None))
 
     def test_nullability_check_is_opt_out_only(self):
-        info = load_entity.jdbc.ColumnMeta("_batch_id", "bigint", 19, 0, False)
+        info = entity.jdbc.ColumnMeta("_batch_id", "bigint", 19, 0, False)
         with self.assertRaisesRegex(ValueError, "does not confirm NOT NULL"):
             self.plan(None, meta=info)
         args = self.args("--incremental-config", json.dumps({"contract": {
@@ -200,7 +201,7 @@ class TestPlanBatch(unittest.TestCase):
         _, _, _, query, _ = self.plan(None, args=args, meta=info)
         query.assert_called_once()
         self.assertTrue(query.call_args.args[1].endswith("WHERE [_batch_id] IS NOT NULL"))
-        wrong_type = load_entity.jdbc.ColumnMeta("_batch_id", "int", 10, 0, False)
+        wrong_type = entity.jdbc.ColumnMeta("_batch_id", "int", 10, 0, False)
         with self.assertRaisesRegex(ValueError, "Incremental type mismatch"):
             self.plan(None, args=args, meta=wrong_type)
 
@@ -218,9 +219,11 @@ class TestPlanBatch(unittest.TestCase):
                  "incremental_column": "_batch_id", "incremental_type": "bigint", "status": "SUCCEEDED",
                  "row_count": 5, "finished_at": "2026-11-06"}
         args = self.args()
-        with self.assertLogs(load_entity.LOGGER, level="INFO") as logs:
+        with self.assertLogs(entity.LOGGER, level="INFO") as logs:
             result, catalog, plan, probe, bounds = self.plan(batch, args=args)
         self.assertIs(result, batch)
+        self.assertIsNone(bounds)
+        catalog.assert_not_called()
         plan.assert_not_called()
         probe.assert_not_called()
         self.assertTrue(any("repeat read skipped" in line for line in logs.output))
@@ -257,6 +260,28 @@ class TestPlanBatch(unittest.TestCase):
             self.args("--incremental-config", json.dumps({"contract": {"source_column": "_batch_id", "position_type": "bigint"}, "lookback": {"size": 1, "unit": "h"}}))
 
 
+class TestPgMetaConnection(unittest.TestCase):
+    """The Spark entry point uses the DSN passed by the submit operator."""
+
+    def setUp(self):
+        psycopg2 = types.ModuleType("psycopg2")
+        psycopg2.connect = MagicMock(return_value=MagicMock())
+        self.psycopg2 = psycopg2
+
+    def test_missing_dsn_fails_with_explicit_error(self):
+        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "INGESTION_META_DSN is not set"):
+                load_entity._connect_pg_meta()
+        self.psycopg2.connect.assert_not_called()
+
+    def test_registry_connection_uses_provided_dsn(self):
+        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.dict(
+            os.environ, {"INGESTION_META_DSN": "host=meta-dsn"}
+        ):
+            self.assertIs(load_entity._connect_pg_meta(), self.psycopg2.connect.return_value)
+        self.psycopg2.connect.assert_called_once_with("host=meta-dsn")
+
+
 class TestManagedLoad(unittest.TestCase):
     """Managed execution: planning, empty windows, finalization, and failure."""
 
@@ -266,24 +291,7 @@ class TestManagedLoad(unittest.TestCase):
         self.registry = registry
         self.spark = MagicMock()
         self.source = MagicMock()
-        psycopg2 = types.ModuleType("psycopg2")
-        psycopg2.connect = MagicMock(return_value=MagicMock())
-        self.psycopg2 = psycopg2
-
-    def test_missing_dsn_fails_with_explicit_error(self):
-        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(RuntimeError, "INGESTION_META_DSN is not set"):
-                load_entity.managed_load(self.spark, self.args())
-
-    def test_registry_connection_uses_provided_dsn(self):
-        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.dict(
-            os.environ, {"INGESTION_META_DSN": "host=meta-dsn"}
-        ), patch.object(
-            load_entity, "_plan_batch", return_value=(self.batch(status="SUCCEEDED"), None, None)
-        ) as plan:
-            load_entity.managed_load(self.spark, self.args())
-            plan.call_args.args[2]()
-        self.psycopg2.connect.assert_called_once_with("host=meta-dsn")
+        self.db_connect = MagicMock()
 
     def batch(self, **changes):
         values = {"process_id": 7, "status": "RUNNING", "incremental_type": "bigint",
@@ -301,41 +309,39 @@ class TestManagedLoad(unittest.TestCase):
     def load(self, batch, args=None, appended=(5, "10"), append_error=None):
         """Run managed_load with every collaborator patched; return the patchers' mocks."""
         args = args or self.args()
-        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.dict(
-            os.environ, {"INGESTION_META_DSN": "host=meta-dsn"}
-        ), patch.object(
-            load_entity, "_plan_batch", return_value=(batch, None, None)
-        ), patch.object(load_entity.reader, "read_extract_frame", return_value=self.source) as read_frame, patch.object(
-            load_entity.window,
+        with patch.object(
+            entity, "_resolve_batch", return_value=entity._ResolvedBatch(batch)
+        ) as plan, patch.object(entity.reader, "read_extract_frame", return_value=self.source) as read_frame, patch.object(
+            entity.window,
             "window_summary",
             return_value=(appended[0], appended[1], self.source),
         ), patch.object(
-            load_entity.append,
+            entity.append,
             "append_raw",
             **({"side_effect": append_error} if append_error else {}),
         ) as append, patch.object(self.registry, "start_batch") as started, patch.object(
             self.registry, "finalize_batch"
         ) as finalize, patch.object(self.registry, "fail_batch") as failed:
-            load_entity.managed_load(self.spark, args)
+            entity.managed_load(self.spark, args, db_connect=self.db_connect)
+        plan.assert_called_once_with(self.spark, args, self.db_connect)
         return types.SimpleNamespace(read_frame=read_frame, append=append, started=started,
                                      finalize=finalize, failed=failed)
 
     def test_succeeded_batch_is_noop(self):
-        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.object(
-            load_entity, "_plan_batch", return_value=(self.batch(status="SUCCEEDED"), None, None)
+        with patch.object(
+            entity, "_resolve_batch", return_value=entity._ResolvedBatch(self.batch(status="SUCCEEDED"))
         ):
-            load_entity.managed_load(self.spark, self.args())
+            entity.managed_load(self.spark, self.args(), db_connect=self.db_connect)
         self.source.unpersist.assert_not_called()
 
     def test_provably_empty_window_finalizes_without_reading(self):
-        with self.assertLogs(load_entity.LOGGER, level="INFO") as logs, patch.dict(
-            sys.modules, {"psycopg2": self.psycopg2}
-        ), patch.object(
-            load_entity, "_plan_batch", return_value=(self.batch(upper_bound=None, empty_at_plan=True), None, None)
-        ), patch.object(load_entity.reader, "read_extract_frame") as read_frame, patch.object(
+        batch = self.batch(upper_bound=None, empty_at_plan=True)
+        with self.assertLogs(entity.LOGGER, level="INFO") as logs, patch.object(
+            entity, "_resolve_batch", return_value=entity._ResolvedBatch(batch)
+        ), patch.object(entity.reader, "read_extract_frame") as read_frame, patch.object(
             self.registry, "finalize_batch"
         ) as finalize:
-            load_entity.managed_load(self.spark, self.args())
+            entity.managed_load(self.spark, self.args(), db_connect=self.db_connect)
         read_frame.assert_not_called()
         self.assertTrue(any(
             "No source rows match the incremental window. JDBC read and Iceberg append skipped. "
@@ -348,22 +354,23 @@ class TestManagedLoad(unittest.TestCase):
         )
 
     def test_lookback_window_with_equal_bounds_is_read(self):
-        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.object(
-            load_entity, "_plan_batch",
-            return_value=(self.batch(lower_bound="10", lower_bound_op=">=", lookback_size=3,
-                                     reason="regular", watermark_before="10"), None, None)
-        ), patch.object(load_entity.reader, "read_extract_frame", return_value=self.source) as read_frame, patch.object(
-            load_entity.window, "window_summary", return_value=(2, "10", self.source)
-        ), patch.object(load_entity.append, "append_raw"), patch.object(
+        batch = self.batch(lower_bound="10", lower_bound_op=">=", lookback_size=3,
+                           reason="regular", watermark_before="10")
+        with patch.object(
+            entity, "_resolve_batch", return_value=entity._ResolvedBatch(batch)
+        ), patch.object(entity.reader, "read_extract_frame", return_value=self.source) as read_frame, patch.object(
+            entity.window, "window_summary", return_value=(2, "10", self.source)
+        ), patch.object(entity.append, "append_raw"), patch.object(
             self.registry, "start_batch"), patch.object(self.registry, "finalize_batch"):
-            load_entity.managed_load(self.spark, self.args())
+            entity.managed_load(self.spark, self.args(), db_connect=self.db_connect)
         read_frame.assert_called_once()
 
     def test_success_finalizes_with_typed_maximum(self):
         run = self.load(self.batch())
         run.started.assert_called_once_with(process_id=7, source_id="bank",
-                                            entity_fqn="retail_bank.transactions", db_connect=ANY)
+                                            entity_fqn="retail_bank.transactions", db_connect=self.db_connect)
         run.failed.assert_not_called()
+        self.assertIs(run.finalize.call_args.kwargs["db_connect"], self.db_connect)
         self.assertEqual(run.finalize.call_args.kwargs["watermark_after"], "10")
         self.source.unpersist.assert_called_once()
 
@@ -372,15 +379,15 @@ class TestManagedLoad(unittest.TestCase):
         self.assertEqual(run.finalize.call_args.kwargs["watermark_after"], "12")
 
     def test_failure_path_records_failed_status_and_reraises(self):
-        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.object(
-            load_entity, "_plan_batch", return_value=(self.batch(), None, None)
-        ), patch.object(load_entity.reader, "read_extract_frame", return_value=self.source), patch.object(
-            load_entity.window, "window_summary", return_value=(5, "10", self.source)
+        with patch.object(
+            entity, "_resolve_batch", return_value=entity._ResolvedBatch(self.batch())
+        ), patch.object(entity.reader, "read_extract_frame", return_value=self.source), patch.object(
+            entity.window, "window_summary", return_value=(5, "10", self.source)
         ), patch.object(
-            load_entity.append, "append_raw", side_effect=RuntimeError("secret boom")
+            entity.append, "append_raw", side_effect=RuntimeError("secret boom")
         ), patch.object(self.registry, "start_batch"), patch.object(self.registry, "fail_batch") as failed:
             with self.assertRaisesRegex(RuntimeError, "secret boom"):
-                load_entity.managed_load(self.spark, self.args())
+                entity.managed_load(self.spark, self.args(), db_connect=self.db_connect)
         self.assertEqual(
             {key: failed.call_args.kwargs[key] for key in ("process_id", "source_id", "entity_fqn")},
             {"process_id": 7, "source_id": "bank", "entity_fqn": "retail_bank.transactions"},
@@ -389,17 +396,17 @@ class TestManagedLoad(unittest.TestCase):
         self.source.unpersist.assert_called_once()
 
     def test_failure_recording_failure_still_reraises(self):
-        with patch.dict(sys.modules, {"psycopg2": self.psycopg2}), patch.object(
-            load_entity, "_plan_batch", return_value=(self.batch(), None, None)
-        ), patch.object(load_entity.reader, "read_extract_frame", return_value=self.source), patch.object(
-            load_entity.window, "window_summary", return_value=(5, "10", self.source)
+        with patch.object(
+            entity, "_resolve_batch", return_value=entity._ResolvedBatch(self.batch())
+        ), patch.object(entity.reader, "read_extract_frame", return_value=self.source), patch.object(
+            entity.window, "window_summary", return_value=(5, "10", self.source)
         ), patch.object(
-            load_entity.append, "append_raw", side_effect=RuntimeError("secret boom")
+            entity.append, "append_raw", side_effect=RuntimeError("secret boom")
         ), patch.object(self.registry, "start_batch"), patch.object(
             self.registry, "fail_batch", side_effect=RuntimeError("meta down")
         ):
-            with self.assertRaisesRegex(RuntimeError, "secret boom"), self.assertLogs(load_entity.LOGGER, level="WARNING"):
-                load_entity.managed_load(self.spark, self.args())
+            with self.assertRaisesRegex(RuntimeError, "secret boom"), self.assertLogs(entity.LOGGER, level="WARNING"):
+                entity.managed_load(self.spark, self.args(), db_connect=self.db_connect)
 
 
 if __name__ == "__main__":

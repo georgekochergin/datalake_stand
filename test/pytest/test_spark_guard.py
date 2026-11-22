@@ -223,7 +223,7 @@ class TestGuardOperatorWiring(unittest.TestCase):
         import ast
 
         root = Path(__file__).resolve().parents[2] / "ingestion/spark/raw/rdbms"
-        for relative in ("full/load_entity.py", "incremental/load_entity.py", "incremental/load_act_snap.py"):
+        for relative in ("full/load_entity.py", "incremental/load_entity.py", "incremental/act_snap/load_act_snap.py"):
             with self.subTest(entrypoint=relative):
                 tree = ast.parse((root / relative).read_text())
                 calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "appName"]

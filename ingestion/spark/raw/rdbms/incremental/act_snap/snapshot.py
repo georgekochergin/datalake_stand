@@ -14,7 +14,7 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from ingestion.logging import configure_driver_logging, log_sql, log_step
+from ingestion.logging import log_sql, log_step
 
 from ingestion.spark.raw.iceberg import (
     CATALOG,
@@ -30,29 +30,8 @@ from ingestion.spark.raw.rdbms.reader import read_extract_frame
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame, SparkSession
 
-SNAPSHOT_SOURCE_VIEW = "snapshot_source"
+_SNAPSHOT_SOURCE_VIEW = "snapshot_source"
 LOGGER = logging.getLogger(__name__)
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse and validate the snapshot loader CLI arguments."""
-    parser = argparse.ArgumentParser(
-        description="Overwrite the actual snapshot of one entity from a JDBC source."
-    )
-    parser.add_argument("--jdbc-url", required=True)
-    parser.add_argument("--jdbc-user", required=True)
-    parser.add_argument("--jdbc-password", required=True)
-    parser.add_argument("--source-table", required=True)
-    parser.add_argument("--target-table", required=True)
-    parser.add_argument("--process-id", required=True, type=int)
-    parser.add_argument("--num-jdbc-partitions", dest="num_partitions", type=int, default=4)
-    parser.add_argument("--no-jdbc-partitioning", action="store_true")
-    args = parser.parse_args(argv)
-    if args.process_id <= 0:
-        raise ValueError(f"--process-id must be a positive integer (got {args.process_id})")
-    if args.num_partitions <= 0:
-        raise ValueError(f"--num-jdbc-partitions must be a positive integer (got {args.num_partitions})")
-    return args
 
 
 def current_snapshot_author(spark: "SparkSession", target: str) -> int | None:
@@ -73,12 +52,12 @@ def build_rtas_sql(target: str, process_id: int, columns: list[str]) -> str:
         f"CREATE OR REPLACE TABLE {target} USING iceberg "
         f"LOCATION '{table_location(target)}' "
         f"TBLPROPERTIES ('{SNAPSHOT_PROCESS_ID_PROPERTY}'='{process_id}') "
-        f"AS SELECT {rendered} FROM {SNAPSHOT_SOURCE_VIEW}"
+        f"AS SELECT {rendered} FROM {_SNAPSHOT_SOURCE_VIEW}"
     )
 
 
 def _overwrite_snapshot(
-    spark: "SparkSession", args: argparse.Namespace, frame: "DataFrame", load_dttm: datetime,
+    spark: "SparkSession", frame: "DataFrame", *, target: str, process_id: int, load_dttm: datetime,
 ) -> None:
     """Replace the snapshot table with the whole read frame in one atomic commit."""
     import pyspark.sql.functions as F
@@ -86,13 +65,13 @@ def _overwrite_snapshot(
     if any(field.name in (METADATA_DTTM, METADATA_PID) for field in frame.schema.fields):
         raise ValueError("Source column collides with ingestion metadata")
     portion = frame.withColumn(METADATA_DTTM, F.lit(load_dttm).cast("timestamp_ltz")).withColumn(
-        METADATA_PID, F.lit(args.process_id).cast("long")
+        METADATA_PID, F.lit(process_id).cast("long")
     )
-    portion.createOrReplaceTempView(SNAPSHOT_SOURCE_VIEW)
-    namespace, _ = validate_target_table(args.target_table)
+    portion.createOrReplaceTempView(_SNAPSHOT_SOURCE_VIEW)
+    namespace, _ = validate_target_table(target)
     log_step(LOGGER, "publish Iceberg snapshot")
     namespace_sql = f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{namespace}"
-    replace_sql = build_rtas_sql(args.target_table, args.process_id, portion.columns)
+    replace_sql = build_rtas_sql(target, process_id, portion.columns)
     log_sql(LOGGER, "Iceberg SQL", namespace_sql)
     spark.sql(namespace_sql)
     log_sql(LOGGER, "Iceberg SQL", replace_sql)
@@ -125,29 +104,13 @@ def managed_snapshot(spark: "SparkSession", args: argparse.Namespace) -> None:
                 args.target_table,
             )
             return
-        load_dttm = datetime.now(timezone.utc)
-        _overwrite_snapshot(spark, args, frame, load_dttm)
+        _overwrite_snapshot(
+            spark, frame, target=args.target_table, process_id=args.process_id,
+            load_dttm=datetime.now(timezone.utc),
+        )
         LOGGER.info(
             "actual snapshot: %s row(s) published to %s by process_id=%s",
             rows, args.target_table, args.process_id,
         )
     finally:
         frame.unpersist()
-
-
-def main(argv: list[str] | None = None) -> None:
-    """Overwrite the actual snapshot of one entity from a JDBC source."""
-    configure_driver_logging()
-    args = parse_args(argv)
-    validate_target_table(args.target_table)
-    from pyspark.sql import SparkSession
-
-    spark = SparkSession.builder.getOrCreate()
-    try:
-        managed_snapshot(spark, args)
-    finally:
-        spark.stop()
-
-
-if __name__ == "__main__":
-    main()

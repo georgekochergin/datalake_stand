@@ -1,4 +1,4 @@
-"""Unit tests for the actual-snapshot loader (spark/raw/rdbms/incremental/load_act_snap.py)."""
+"""Unit tests for the actual-snapshot CLI and publication logic."""
 
 import sys
 import types
@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from ingestion.spark.raw.rdbms.incremental import load_act_snap as act_snap
+from ingestion.spark.raw.rdbms.incremental.act_snap import load_act_snap, snapshot as act_snap
 
 
 def cli_args(**overrides):
@@ -38,7 +38,7 @@ class TestParseArgs(unittest.TestCase):
     ]
 
     def test_valid_defaults(self):
-        args = act_snap.parse_args(self.BASE)
+        args = load_act_snap.parse_args(self.BASE)
         self.assertEqual(args.process_id, 7)
         self.assertEqual(args.num_partitions, 4)
         self.assertFalse(args.no_jdbc_partitioning)
@@ -51,11 +51,11 @@ class TestParseArgs(unittest.TestCase):
         ]
         for extra in (["--process-id", "0"], ["--process-id", "-3"], ["--num-jdbc-partitions", "0"]):
             with self.subTest(extra=extra), self.assertRaises(ValueError):
-                act_snap.parse_args(base + extra)
+                load_act_snap.parse_args(base + extra)
 
     def test_result_marker_rejected(self):
         with self.assertRaises(SystemExit):
-            act_snap.parse_args(self.BASE + ["--result-marker", "/tmp/m.json"])
+            load_act_snap.parse_args(self.BASE + ["--result-marker", "/tmp/m.json"])
 
 
 class TestBuildRtasSql(unittest.TestCase):
@@ -128,7 +128,10 @@ class TestOverwriteSnapshot(unittest.TestCase):
         args = cli_args()
         with patch.dict(sys.modules, {"pyspark": root, "pyspark.sql": sql,
                                       "pyspark.sql.functions": functions}):
-            act_snap._overwrite_snapshot(spark, args, frame, datetime(2026, 1, 1))
+            act_snap._overwrite_snapshot(
+                spark, frame, target=args.target_table, process_id=args.process_id,
+                load_dttm=datetime(2026, 1, 1),
+            )
         executed = [call.args[0] for call in spark.sql.call_args_list]
         self.assertEqual(executed[0], "CREATE NAMESPACE IF NOT EXISTS raw.bank")
         self.assertTrue(executed[1].startswith("CREATE OR REPLACE TABLE raw.bank.s__t__act_snap"))
