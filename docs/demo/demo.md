@@ -9,8 +9,8 @@
 - [Подготовка](#подготовка)
 - [Шаг 1. Обновление источников](#шаг-1-обновление-источников)
 - [Шаг 2. Генерация DAG-ов и запуск загрузок](#шаг-2-генерация-dag-ов-и-запуск-загрузок)
+  - [Структура манифеста](#структура-манифеста)
   - [Многопоточное чтение](#многопоточное-чтение)
-  - [Пул загрузок](#пул-загрузок)
 - [Шаг 3. Результат в Trino и pg-meta](#шаг-3-результат-в-trino-и-pg-meta)
 - [Шаг 4. Повторный раунд: полный срез против инкремента](#шаг-4-повторный-раунд-полный-срез-против-инкремента)
 - [Шаг 5. Повторы запусков и реестр pg-meta](#шаг-5-повторы-запусков-и-реестр-pg-meta)
@@ -125,22 +125,64 @@ YAML-[манифестов](../glossary.md#term-manifest) (`ingestion/conf/pipel
    python3 -m ingestion.generator.generate_dags
    ```
 
-   Удаление папки `generated` данные не сбрасывает: история запусков в базе
-   Airflow сохраняется.
-
-2. Сгенерированные файлы: `ingest__rdbms__bank__main.py`,
-   `ingest__rdbms__bank__refs.py` и два для broker.
-3. Airflow UI → после цикла парсинга (каталог пересканируется за 10 секунд,
-   обновление списка может занять больше одного цикла) в списке DAG-ов
-   четыре `ingest__rdbms__{bank,broker}__{main,refs}`. Открыть
-   `ingest__rdbms__bank__main`: структура
-   `generate_process_id → activate_source → TaskGroup на каждую
-   [сущность](../glossary.md#term-entity) (load → publish_asset)`.
-   `publish_asset` публикует событие готовности таблицы
-   ([Asset](../glossary.md#term-asset)) после успешной загрузки.
-4. Запустить все четыре DAG-а (сначала банка, затем брокера — или все сразу).
-5. Во время загрузок в Spark Master UI (http://localhost:8080) видны
+2. Запустить все четыре DAG-а (сначала банка, затем брокера — или все сразу).
+3. Во время загрузок в Spark Master UI (http://localhost:8080) видны
    работающие приложения (Running Applications), по одному на каждую загрузку.
+
+### Структура манифеста
+
+[Манифест](../glossary.md#term-manifest) пайплайна — YAML-файл
+`ingestion/conf/pipelines/<source_id>/<pipeline>.yaml`. На стенде:
+`bank/main.yaml`, `bank/refs.yaml` и два таких же для broker.
+
+Ключи верхнего уровня:
+
+| Параметр | Тип | Обязателен | По умолчанию | Описание |
+|---|---|---|---|---|
+| `source_id` | string | да | — | Должен существовать в `sources.yaml`.<br>Задаёт схему-неймспейс целевых таблиц |
+| `schedule` | string \| null | нет | `null` (ручной запуск) | Расписание Airflow: только стандартный пятиполевой cron с числовыми полями.<br>Макросы (`@daily`) и иные формы отклоняются валидацией |
+| `catchup` | bool | нет | `false` | Догоняющие запуски Airflow |
+| `tags` | list[string] | нет | `[]` | Теги DAG-а |
+| `entities` | list | да | — | Непустой список [сущностей](../glossary.md#term-entity) |
+
+Настройки [сущности](../glossary.md#term-entity):
+
+| Параметр | Тип | Обязателен | По умолчанию | Описание |
+|---|---|---|---|---|
+| `fqn` | string | да | — | `<схема>.<таблица>` источника, ровно два фрагмента.<br>Регистр исходных имён сохраняется |
+| `incremental` | mapping | нет | [полный срез](../glossary.md#term-full) | Обязательный `contract: {source_column, position_type}` с необязательным `check_not_null` (по умолчанию `true`).<br>`lookback` — отступ [окна](../glossary.md#term-window) чтения.<br>`act_snap` — конфигурация снимочного DAG-а (шаг 9) |
+| `incremental.act_snap.schedule` | string \| null | нет | `null` | Строгий пятиполевой cron.<br>`null` — ручной запуск |
+| `incremental.act_snap.tags` | list[string] | нет | `[]` | Дополнительные теги снимочного DAG-а.<br>Теги основного пайплайна не наследуются |
+| `incremental.act_snap.spark.jdbc_partitioning` | bool | нет | `true` | Независимое от основной [сущности](../glossary.md#term-entity) многопоточное JDBC-чтение |
+| `incremental.act_snap.airflow.pool.name` | string | нет | `default_pool` | [Пул](../glossary.md#term-pool) load-таска снимка |
+| `incremental.act_snap.airflow.pool.slots` | int | нет | `1` | Положительный вес load-таска снимка |
+| `spark.jdbc_partitioning` | bool | нет | `true` | `false` — полностью отключить нарезку JDBC-чтения основной загрузки: без разведки ключей и запроса MIN/MAX.<br>Не влияет на снимок |
+| `airflow.pool.name` | string | нет | `default_pool` | [Пул](../glossary.md#term-pool) load-таска.<br>Пользовательский [пул](../glossary.md#term-pool) должен заранее существовать в Airflow |
+| `airflow.pool.slots` | int | нет | `1` | Вес load-таска в [пуле](../glossary.md#term-pool) |
+
+Тип источника задаётся в `ingestion/conf/sources.yaml`:
+
+| Параметр | Тип | Обязателен | Описание |
+|---|---|---|---|
+| `type` | `rdbms` | да | Категория источника, участвующая в имени DAG.<br>Поддерживается только `rdbms` |
+| `airflow_conn_id` | string | да | Ссылка на Airflow Connection с реквизитами источника.<br>Конкретная СУБД определяется по его `conn_type` во время [исполнения](../glossary.md#term-execution) |
+
+Имя DAG собирается из типа источника, `source_id` и имени файла
+[манифеста](../glossary.md#term-manifest):
+
+`ingest__<type>__<source_id>__<pipeline>` — например, `ingest__rdbms__bank__main`
+([манифест](../glossary.md#term-manifest) `bank/main.yaml`). Если имя файла совпадает
+с `source_id`, последняя
+часть опускается. DAG-снимок получает суффикс `__act_snap_<alias>`, где
+`alias` — первые 8 символов `base32(sha256(FQN))`:
+`ingest__rdbms__bank__main__act_snap_bbphs7ay`.
+
+**На что обратить внимание**
+
+- Чтобы добавить таблицу [полным срезом](../glossary.md#term-full), достаточно
+  записи с её `fqn`.
+- Полные описания атрибутов и правила адресации имён —
+  [раздел 2 архитектуры](../architecture.md#2-манифесты-и-генерация-dag-ов).
 
 ### Многопоточное чтение
 
@@ -185,24 +227,6 @@ YAML-[манифестов](../glossary.md#term-manifest) (`ingestion/conf/pipel
   нарезки. Дельта одного запуска update-DAG (порядка 5000 строк с разбросом
   `transaction_id`) уже даёт ненулевой диапазон — специально готовить данные
   не нужно.
-
-### Пул загрузок
-
-[Пул](../glossary.md#term-pool) Airflow ограничивает число одновременно
-допущенных загрузок: Admin → [Pools](../glossary.md#term-pool) → `ingest_loads`.
-
-- Ёмкость — 6 [слотов](../glossary.md#term-slot).
-- `transactions` занимает 2 [слота](../glossary.md#term-slot), остальные
-  загрузки — по 1.
-- Во время загрузок оживают колонки Running/Queued
-  [Slots](../glossary.md#term-slot). На главной странице Airflow есть виджет
-  [пула](../glossary.md#term-pool).
-
-**На что обратить внимание**
-
-- [Манифест](../glossary.md#term-manifest) описывает, какие таблицы загружать
-  и с какими настройками. Чтобы добавить таблицу [полным срезом](../glossary.md#term-full),
-  достаточно записи с её `fqn`.
 
 ## Шаг 3. Результат в Trino и pg-meta
 
