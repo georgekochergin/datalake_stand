@@ -402,8 +402,8 @@ def check_post_append_retry(spark, hook, jdbc, token):
                 entity.managed_load(spark, args, db_connect=hook.get_conn)
             probe.assert_called_once()
             sql = probe.call_args.args[1]
-            require("MIN([id]) AS lower_bound, MAX([id]) AS upper_bound" in sql
-                    and sql.endswith("WHERE [position] > 1 AND [position] <= 3")
+            require("MIN([id]) AS lower_bound,\n  MAX([id]) AS upper_bound" in sql
+                    and sql.endswith("WHERE [position] > 1\n  AND [position] <= 3")
                     and "MAX([position])" not in sql,
                     "retry probes only partition bounds within both frozen predicates")
             require(sum("JDBC SQL scope=batch_window operation=partition_bounds:" in line
