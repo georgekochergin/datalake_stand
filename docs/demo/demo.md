@@ -14,11 +14,10 @@
   - [Многопоточное чтение](#многопоточное-чтение)
 - [Шаг 3. Результат в Trino и pg-meta](#шаг-3-результат-в-trino-и-pg-meta)
 - [Шаг 4. Повторный раунд: полный срез против инкремента](#шаг-4-повторный-раунд-полный-срез-против-инкремента)
-- [Шаг 5. Повторы запусков и реестр pg-meta](#шаг-5-повторы-запусков-и-реестр-pg-meta)
-- [Шаг 6. Файлы в silo](#шаг-6-файлы-в-silo)
-- [Шаг 7. Эволюция схемы источника](#шаг-7-эволюция-схемы-источника)
-- [Шаг 8. Итоги эволюции схемы в raw](#шаг-8-итоги-эволюции-схемы-в-raw)
-- [Шаг 9. Таблица-снимок act_snap](#шаг-9-таблица-снимок-act_snap)
+- [Шаг 5. Файлы в silo](#шаг-5-файлы-в-silo)
+- [Шаг 6. Эволюция схемы источника](#шаг-6-эволюция-схемы-источника)
+- [Шаг 7. Итоги эволюции схемы в raw](#шаг-7-итоги-эволюции-схемы-в-raw)
+- [Шаг 8. Таблица-снимок act_snap](#шаг-8-таблица-снимок-act_snap)
 
 ## Подготовка
 
@@ -156,7 +155,7 @@ YAML-[манифестов](../glossary.md#term-manifest) (`ingestion/conf/pipel
 | `spark.jdbc_partitioning` | bool | нет | `true` | `false` — полностью отключить нарезку JDBC-чтения основной загрузки: без разведки ключей и запроса MIN/MAX.<br>Не влияет на снимок |
 | `airflow.pool.name` | string | нет | `default_pool` | [Пул](../glossary.md#term-pool) load-таска.<br>Пользовательский [пул](../glossary.md#term-pool) должен заранее существовать в Airflow |
 | `airflow.pool.slots` | int | нет | `1` | Вес load-таска в [пуле](../glossary.md#term-pool) |
-| `incremental` | mapping | нет | [полный срез](../glossary.md#term-full) | [Инкрементальная](../glossary.md#term-increment) загрузка таблицы: обязательный блок `contract` (строки ниже), `lookback` — отступ [окна](../glossary.md#term-window) чтения, `act_snap` — конфигурация снимочного DAG-а (шаг 9) |
+| `incremental` | mapping | нет | [полный срез](../glossary.md#term-full) | [Инкрементальная](../glossary.md#term-increment) загрузка таблицы: обязательный блок `contract` (строки ниже), `lookback` — отступ [окна](../glossary.md#term-window) чтения, `act_snap` — конфигурация снимочного DAG-а (шаг 8) |
 | `incremental.contract.source_column` | string | да | — | Колонка [позиции инкремента](../glossary.md#term-position), идентификатор в нижнем регистре |
 | `incremental.contract.position_type` | string | да | — | [Канонический тип позиции](../glossary.md#term-canonical). Правило выбора — [раздел «Выбор типа позиции» архитектуры](../architecture.md#выбор-типа-позиции) |
 | `incremental.contract.check_not_null` | bool | нет | `true` | `false` — отключить проверку NOT NULL колонки позиции при планировании. Строки с NULL не загружаются даже при [bootstrap](../glossary.md#term-bootstrap) |
@@ -217,7 +216,7 @@ YAML-[манифестов](../glossary.md#term-manifest) (`ingestion/conf/pipel
   продвигается до фактически прочитанного максимума.
 - Каждая загрузка фиксируется в реестре pg-meta отдельной
   [партией](../glossary.md#term-batch). Повторный запуск без новых данных
-  завершается пустой успешной [партией](../glossary.md#term-batch) (шаг 5).
+  завершается пустой успешной [партией](../glossary.md#term-batch).
 - Запись — [append-only](../glossary.md#term-append): в историю
   [raw](../glossary.md#term-raw) дописываются только строки
   [окна](../glossary.md#term-window), мержа с ранее загруженными нет.
@@ -227,7 +226,7 @@ YAML-[манифестов](../glossary.md#term-manifest) (`ingestion/conf/pipel
   [сущностью](../glossary.md#term-entity) генератор создаёт вспомогательный
   снимочный DAG `act_snap`: таблицу полного состояния источника в
   [raw](../glossary.md#term-raw), перезаписываемую целиком одной атомарной
-  операцией (шаг 9). Снимок независим: не меняет
+  операцией (шаг 8). Снимок независим: не меняет
   [watermark](../glossary.md#term-watermark) основной загрузки и не пополняет
   реестр [инкремента](../glossary.md#term-increment).
 
@@ -371,179 +370,22 @@ WHERE entity_fqn = 'retail_bank.transactions' ORDER BY process_id;
 - У `transactions` добавлена только новая часть данных: не более 5000
   транзакций после одного обновления, с учётом каскадного удаления. Первая
   [порция](../glossary.md#term-portion) не изменилась.
+- В реестре pg-meta видны обе [партии](../glossary.md#term-batch)
+  `transactions`: первая — `reason=bootstrap`, вторая — `reason=regular`
+  с [окном](../glossary.md#term-window) `lower_bound < _batch_id <= upper_bound`.
+  Границы заморожены до чтения, `row_count` — дельта,
+  [watermark](../glossary.md#term-watermark) продвинулся только после
+  успешной записи.
 - Изменения и удаления старых транзакций не переносятся
   [инкрементом](../glossary.md#term-increment) по `_batch_id`. Это не CDC —
   механизм чтения всех событий изменения источника.
-- У второй [партии](../glossary.md#term-batch) `reason=regular`: окно
-  `lower_bound < _batch_id <= upper_bound` заморожено до чтения, `row_count` —
-  дельта, [watermark](../glossary.md#term-watermark) продвинулся только после
-  успешной записи.
 - Все числовые номера берите из своих результатов, а не из заранее заданных
   примеров.
+- Нюансы повторных запусков, [Clear](../glossary.md#term-clear) и поведения
+  после ошибок — [раздел «Как различать партии и попытки»
+  архитектуры](../architecture.md#как-различать-партии-и-попытки).
 
-## Шаг 5. Повторы запусков и реестр pg-meta
-
-Реестр проверяется на повторных и «нулевых» запусках. Достаточно банка:
-`ingest__rdbms__bank__main`.
-
-Подготовка:
-
-1. Дождитесь завершения всех загрузок.
-2. Не меняйте источник между действиями, пока подраздел явно этого не
-   потребует. Не запускайте одновременно другие загрузки
-   `retail_bank.transactions`.
-3. Откройте рядом Airflow, pg-meta и Trino в DBeaver.
-4. Выполните запросы и сохраните результаты для сравнения:
-
-```sql
-SELECT process_id, run_id, reason, status, attempt_count, row_count,
-       watermark_before, lower_bound, lower_bound_op, upper_bound,
-       observed_max, watermark_after, expected_revision, created_at, finished_at
-FROM ingestion.incremental_batches
-WHERE source_id = 'bank' AND entity_fqn = 'retail_bank.transactions'
-ORDER BY process_id DESC LIMIT 10;
-
-SELECT incremental_column, incremental_type, watermark, revision,
-       last_process_id, updated_at
-FROM ingestion.incremental_state
-WHERE source_id = 'bank' AND entity_fqn = 'retail_bank.transactions';
-
-SELECT process_id, run_id, status, ts
-FROM ingestion.airflow_dagruns_log
-WHERE dag_id = 'ingest__rdbms__bank__main'
-ORDER BY id DESC LIMIT 20;
-```
-
-Для проверки строк в Trino:
-
-```sql
-SELECT __process_id, count(*) AS rows, count(DISTINCT __load_dttm) AS write_attempts
-FROM raw.bank.retail_bank__transactions
-GROUP BY __process_id ORDER BY __process_id DESC;
-```
-
-**Поля реестра:**
-
-- `run_id` — какой [DagRun](../glossary.md#term-dagrun) смотрим в Airflow.
-- `process_id` — номер [исполнения](../glossary.md#term-execution), а не
-  идентификатор процесса ОС.
-- Одна строка `incremental_batches` — одна [партия загрузки](../glossary.md#term-batch).
-- `attempt_count` — сколько раз началось чтение [партии](../glossary.md#term-batch).
-  Это не номер попытки задачи в Airflow и не число вызовов `spark-submit`.
-- `row_count` — число строк успешной [попытки](../glossary.md#term-attempt),
-  не вся история записей в озере.
-- `revision` — версия состояния: растёт при успешной фиксации новой
-  [партии](../glossary.md#term-batch), даже без новых строк.
-
-Памятка ожидаемых результатов:
-
-| Действие | `run_id` | `process_id` | Реестр и данные |
-|---|---|---|---|
-| Trigger без новых данных | Новый | Новый | Новая успешная [партия](../glossary.md#term-batch), `row_count=0`, без новых строк |
-| Clear только успешной `load` | Прежний | Прежний | Та же успешная [партия](../glossary.md#term-batch), без изменений состояния и данных |
-| Clear генератора и всех задач | Прежний | Новый | Новая [партия](../glossary.md#term-batch), старые записи сохраняются |
-| Trigger после обновления источника | Новый | Новый | Новая [партия](../glossary.md#term-batch), новые строки и продвижение [watermark](../glossary.md#term-watermark) |
-
-### Trigger без новых данных
-
-1. **Не запускайте** `update_source_bank`.
-2. В Airflow нажмите Trigger для `ingest__rdbms__bank__main`. Это новый
-   [DagRun](../glossary.md#term-dagrun), не перезапуск старого.
-3. Дождитесь успеха и повторите запросы выше. Запишите новые `run_id` и
-   `process_id` для сравнения.
-
-Ожидаемый результат для `transactions`: [партия](../glossary.md#term-batch) с
-`reason=regular`, `status=SUCCEEDED`:
-
-- `lower_bound = upper_bound`, `lower_bound_op='>'` (на демо-наборе
-  [lookback](../glossary.md#term-lookback) по `_batch_id` равен нулю).
-- `attempt_count=0`, `row_count=0`, `observed_max=NULL`.
-- [Watermark](../glossary.md#term-watermark) не изменился, `revision` выросла
-  на 1, `last_process_id` указывает на новый номер.
-- В Trino нет строк с новым `__process_id`.
-
-**На что обратить внимание**
-
-- Система зафиксировала успешную проверку отсутствия новых данных.
-  Spark-приложение запускается, но чтение строк пустого [окна](../glossary.md#term-window)
-  и запись Iceberg пропускаются. Нулевой `attempt_count` не означает, что
-  задача не выполнялась.
-- В том же DAG таблица `deals` загружается [полным срезом](../glossary.md#term-full)
-  и дописывается заново — её не используйте как пример отсутствия повторной
-  записи.
-
-### Clear только успешной load-задачи
-
-1. Откройте успешный запуск **второго раунда с данными** из шага 4. Выберите
-   его по `run_id`, а не просто последний запуск.
-2. Выберите задачу `ingest_group.load_retail_bank__transactions.load`.
-3. Выполните [Clear](../glossary.md#term-clear) только этой задачи: без
-   upstream, downstream, других запусков и задачи `generate_process_id`.
-4. Дождитесь повторного успеха задачи и повторите запросы.
-
-Ожидаемый результат:
-
-- `run_id` и `process_id` прежние. Новая [batch](../glossary.md#term-batch) is absent.
-- The loader finds `SUCCEEDED` and outputs the saved result to the log.
-  Source rows are not re-read, Iceberg is not appended to.
-- `attempt_count`, `row_count`, `finished_at` of the selected [batch](../glossary.md#term-batch) are unchanged.
-- The state of `incremental_state`, including `revision`, does not change.
-  If another load already occurred after the selected run, `last_process_id`
-  remains the number of that later load.
-- The number of rows and write marks in Trino has not changed.
-
-**На что обратить внимание**
-
-- Журнал событий DAG-а может получить новое событие завершения при повторном
-  переходе в успех. Это не новая [партия](../glossary.md#term-batch): журналы
-  событий и реестр загрузок показывают разные факты.
-
-### Полный Clear существующего запуска
-
-1. Откройте последний успешный запуск без новых данных из предыдущего
-   подраздела.
-2. Очистите **все его задачи**, включая `generate_process_id`,
-   `activate_source` и обе группы загрузки. В подтверждении проверьте набор
-   задач и единственный выбранный запуск.
-3. Дождитесь успеха и повторите запросы.
-
-Ожидаемый результат:
-
-- `run_id` прежний, но `generate_process_id` выделил новый `process_id`.
-- Добавлена новая [партия](../glossary.md#term-batch). Старая запись с тем же
-  `run_id` сохранена.
-- Источник не менялся: `row_count=0`, `attempt_count=0`,
-  [watermark](../glossary.md#term-watermark) прежний, `revision` выросла на 1.
-- В журнале DAG-а видны события с разными `process_id` для одного `run_id`.
-- У `transactions` новых строк нет. У `deals` добавлен ещё один
-  [полный срез](../glossary.md#term-full).
-
-**На что обратить внимание**
-
-- [Clear](../glossary.md#term-clear) не удаляет историю pg-meta и данные
-  озера. Повтор генератора создаёт новое
-  [исполнение](../glossary.md#term-execution) внутри прежнего
-  [DagRun](../glossary.md#term-dagrun).
-
-### Повтор после ошибки
-
-- [Retry](../glossary.md#term-retry) или [Clear](../glossary.md#term-clear)
-  `load` без повтора генератора использует тот же `process_id` и сохранённые
-  границы [окна](../glossary.md#term-window). При начале чтения
-  `attempt_count` увеличивается — источник между
-  [попытками](../glossary.md#term-attempt) может измениться, даже если границы
-  прежние.
-- Если строки уже записались в Iceberg, а фиксация успеха в pg-meta не
-  состоялась, повтор может записать их ещё раз с тем же `__process_id` и новым
-  `__load_dttm`. Это гарантия [at-least-once](../glossary.md#term-atleast),
-  а не отсутствие дублей.
-- До повтора нужно убедиться, что Spark-приложение прежней
-  [попытки](../glossary.md#term-attempt) остановлено: изменение статуса задачи
-  в UI само по себе этого не подтверждает.
-- Не имитируйте сбой на обычном демо: этот случай объясняется, а не
-  воспроизводится.
-
-## Шаг 6. Файлы в silo
+## Шаг 5. Файлы в silo
 
 1. http://localhost:9001 (`admin123` / `admin123`) → bucket `datalake`.
 2. Путь `datalake / raw / bank / retail_bank__transactions / data` — каталоги
@@ -561,7 +403,7 @@ GROUP BY __process_id ORDER BY __process_id DESC;
   загрузки позволяет исключать ненужные партиции.
 - Каждая загрузка добавляет новые файлы, прежние не меняет.
 
-## Шаг 7. Эволюция схемы источника
+## Шаг 6. Эволюция схемы источника
 
 Стресс-тест: удаление, переименование и добавление колонки на источнике.
 Таблицы: `retail_bank.clients`
@@ -610,7 +452,7 @@ Rules-API меняет одну колонку за вызов, поэтому �
 1. Запустите DAG-и обновления источников — новые строки получат `email`.
 2. Запустите четыре основных ingest-DAG-а.
 
-## Шаг 8. Итоги эволюции схемы в raw
+## Шаг 7. Итоги эволюции схемы в raw
 
 **Trino:**
 
@@ -658,7 +500,7 @@ FROM ingestion.incremental_batches ORDER BY process_id DESC LIMIT 8;
   матрица расширений и отказов —
   [раздел 5 архитектуры](../architecture.md#5-устойчивость-к-эволюции-схемы-источника).
 
-## Шаг 9. Таблица-снимок act_snap
+## Шаг 8. Таблица-снимок act_snap
 
 [Таблица-снимок](../glossary.md#term-snapshot) — вспомогательная таблица
 полного состояния [сущности](../glossary.md#term-entity) с
