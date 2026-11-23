@@ -32,9 +32,9 @@ def window_filters(dialect: RdbmsDialect, batch: "DbRow", kind: str, incremental
 
 
 def position_select(dialect: RdbmsDialect, kind: str, incremental_column: str) -> str:
-    """SELECT fragment with the exact typed extraction position of the window."""
+    """SELECT item with the exact typed extraction position of the window."""
     column = dialect.quote_identifier(incremental_column)
-    return f', {dialect.position_expression(column, kind)} AS "__extract_position"'
+    return f'{dialect.position_expression(column, kind)} AS "__extract_position"'
 
 
 def read_window_frame(

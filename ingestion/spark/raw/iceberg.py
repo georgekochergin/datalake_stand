@@ -48,11 +48,12 @@ def build_create_table_sql(target: str, columns: list[tuple[str, str]]) -> str:
         rendered.append(f"{quote_identifier(name)} {ddl_type}")
     rendered.append(f"{quote_identifier(METADATA_DTTM)} timestamp_ltz")
     rendered.append(f"{quote_identifier(METADATA_PID)} bigint")
-    joined = ", ".join(rendered)
+    body = ",\n".join(f"  {line}" for line in rendered)
     return (
-        f"CREATE TABLE {target} ({joined}) USING iceberg "
-        f"PARTITIONED BY (days({quote_identifier(METADATA_DTTM)})) "
-        f"LOCATION '{table_location(target)}' "
+        f"CREATE TABLE {target} (\n{body}\n)\n"
+        f"USING iceberg\n"
+        f"PARTITIONED BY (days({quote_identifier(METADATA_DTTM)}))\n"
+        f"LOCATION '{table_location(target)}'\n"
         f"TBLPROPERTIES ('write.spark.accept-any-schema'='true')"
     )
 

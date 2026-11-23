@@ -49,8 +49,12 @@ def _check_batch(state: DbRow, batch: DbRow) -> None:
 def _lock_state(cur: DbCursor, source_id: str, entity_fqn: str) -> DbRow:
     """Acquire the first lock in the shared state-then-batch lock order."""
     _execute(cur,
-        "SELECT * FROM ingestion.incremental_state "
-        "WHERE source_id = %s AND entity_fqn = %s FOR UPDATE", (source_id, entity_fqn),
+        "SELECT *\n"
+        "FROM ingestion.incremental_state\n"
+        "WHERE source_id = %s\n"
+        "  AND entity_fqn = %s\n"
+        "FOR UPDATE",
+        (source_id, entity_fqn),
     )
     state = _row(cur)
     if state is None:
@@ -62,8 +66,12 @@ def _lock_batch(cur: DbCursor, process_id: int, source_id: str, entity_fqn: str)
     """Lock state and the process's batch, in the shared lock order."""
     state = _lock_state(cur, source_id, entity_fqn)
     _execute(cur,
-        "SELECT * FROM ingestion.incremental_batches "
-        "WHERE process_id = %s AND source_id = %s AND entity_fqn = %s FOR UPDATE",
+        "SELECT *\n"
+        "FROM ingestion.incremental_batches\n"
+        "WHERE process_id = %s\n"
+        "  AND source_id = %s\n"
+        "  AND entity_fqn = %s\n"
+        "FOR UPDATE",
         (process_id, source_id, entity_fqn),
     )
     batch = _row(cur)
@@ -83,8 +91,11 @@ def get_batch(*, process_id: int, source_id: str, entity_fqn: str, db_connect: D
     with _operation(db_connect, "get_batch", process_id=process_id, source_id=source_id,
                     entity_fqn=entity_fqn) as (cur, _):
         _execute(cur,
-            "SELECT 1 FROM ingestion.incremental_batches "
-            "WHERE process_id = %s AND source_id = %s AND entity_fqn = %s",
+            "SELECT 1\n"
+            "FROM ingestion.incremental_batches\n"
+            "WHERE process_id = %s\n"
+            "  AND source_id = %s\n"
+            "  AND entity_fqn = %s",
             (process_id, source_id, entity_fqn),
         )
         if cur.fetchone() is None:
@@ -128,16 +139,21 @@ def plan_batch(
                     entity_fqn=entity_fqn) as (cur, changes):
         _execute(cur,
             "INSERT INTO ingestion.incremental_state "
-            "(source_id, entity_fqn, incremental_column, incremental_type) "
-            "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING *",
+            "(source_id, entity_fqn, incremental_column, incremental_type)\n"
+            "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING\n"
+            "RETURNING *",
             (source_id, entity_fqn, incremental_column, incremental_type),
         )
         changes.append(("incremental_state", None, _row(cur)))
         state = _lock_state(cur, source_id, entity_fqn)
         _check_contract(state, incremental_column, incremental_type)
         _execute(cur,
-            "SELECT * FROM ingestion.incremental_batches WHERE "
-            "process_id = %s AND source_id = %s AND entity_fqn = %s FOR UPDATE",
+            "SELECT *\n"
+            "FROM ingestion.incremental_batches\n"
+            "WHERE process_id = %s\n"
+            "  AND source_id = %s\n"
+            "  AND entity_fqn = %s\n"
+            "FOR UPDATE",
             (process_id, source_id, entity_fqn),
         )
         batch = _row(cur)
@@ -153,11 +169,12 @@ def plan_batch(
         upper_bound = planner.probe_upper(lower, lower_op)
         empty_at_plan = upper_bound is None
         _execute(cur,
-            "INSERT INTO ingestion.incremental_batches "
+            "INSERT INTO ingestion.incremental_batches\n"
             "(process_id, dag_id, run_id, source_id, entity_fqn, target_table, reason, "
             "incremental_column, incremental_type, expected_revision, watermark_before, "
-            "lookback_size, lookback_unit, lower_bound, lower_bound_op, upper_bound, empty_at_plan) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+            "lookback_size, lookback_unit, lower_bound, lower_bound_op, upper_bound, empty_at_plan)\n"
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n"
+            "RETURNING *",
             (process_id, dag_id, run_id, source_id, entity_fqn, target_table, reason,
              incremental_column, incremental_type, state["revision"], watermark,
              lookback_size, lookback_unit, lower, lower_op, upper_bound, empty_at_plan),
@@ -181,9 +198,12 @@ def start_batch(*, process_id: int, source_id: str, entity_fqn: str, db_connect:
             changes.append(("incremental_batches", batch, None))
             return batch
         _execute(cur,
-            "UPDATE ingestion.incremental_batches SET status = 'RUNNING', "
-            "attempt_count = attempt_count + 1, finished_at = NULL "
-            "WHERE process_id = %s AND source_id = %s AND entity_fqn = %s RETURNING *",
+            "UPDATE ingestion.incremental_batches\n"
+            "SET status = 'RUNNING', attempt_count = attempt_count + 1, finished_at = NULL\n"
+            "WHERE process_id = %s\n"
+            "  AND source_id = %s\n"
+            "  AND entity_fqn = %s\n"
+            "RETURNING *",
             (process_id, source_id, entity_fqn),
         )
         started = _row(cur)
@@ -220,9 +240,13 @@ def finalize_batch(
         if watermark_after not in allowed:
             raise ValueError("watermark_after must be the typed maximum of before and observed_max")
         _execute(cur,
-            "UPDATE ingestion.incremental_state SET watermark = %s, revision = revision + 1, "
-            "last_process_id = %s, updated_at = clock_timestamp() "
-            "WHERE source_id = %s AND entity_fqn = %s AND revision = %s RETURNING *",
+            "UPDATE ingestion.incremental_state\n"
+            "SET watermark = %s, revision = revision + 1, "
+            "last_process_id = %s, updated_at = clock_timestamp()\n"
+            "WHERE source_id = %s\n"
+            "  AND entity_fqn = %s\n"
+            "  AND revision = %s\n"
+            "RETURNING *",
             (watermark_after, batch["process_id"], batch["source_id"], batch["entity_fqn"],
              batch["expected_revision"]),
         )
@@ -230,10 +254,13 @@ def finalize_batch(
             raise ValueError("Incremental revision CAS failed")
         changes.append(("incremental_state", state, _row(cur)))
         _execute(cur,
-            "UPDATE ingestion.incremental_batches SET status = 'SUCCEEDED', row_count = %s, "
-            "observed_max = %s, watermark_after = %s, "
-            "finished_at = clock_timestamp() "
-            "WHERE process_id = %s AND source_id = %s AND entity_fqn = %s RETURNING *",
+            "UPDATE ingestion.incremental_batches\n"
+            "SET status = 'SUCCEEDED', row_count = %s, observed_max = %s, watermark_after = %s, "
+            "finished_at = clock_timestamp()\n"
+            "WHERE process_id = %s\n"
+            "  AND source_id = %s\n"
+            "  AND entity_fqn = %s\n"
+            "RETURNING *",
             (row_count, observed_max, watermark_after, process_id, source_id, entity_fqn),
         )
         finalized = _row(cur)
@@ -255,9 +282,12 @@ def fail_batch(*, process_id: int, source_id: str, entity_fqn: str, db_connect: 
             changes.append(("incremental_batches", batch, None))
             return batch
         _execute(cur,
-            "UPDATE ingestion.incremental_batches SET status = 'FAILED', "
-            "finished_at = clock_timestamp() "
-            "WHERE process_id = %s AND source_id = %s AND entity_fqn = %s RETURNING *",
+            "UPDATE ingestion.incremental_batches\n"
+            "SET status = 'FAILED', finished_at = clock_timestamp()\n"
+            "WHERE process_id = %s\n"
+            "  AND source_id = %s\n"
+            "  AND entity_fqn = %s\n"
+            "RETURNING *",
             (process_id, source_id, entity_fqn),
         )
         failed = _row(cur)

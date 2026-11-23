@@ -170,9 +170,9 @@ def probe_bounds(
         expressions.extend((f"MIN({ref}) AS lower_bound", f"MAX({ref}) AS upper_bound"))
     if not expressions:
         return None, (None, None)
-    sql = f"SELECT {', '.join(expressions)} FROM {source.table}"
+    sql = "SELECT " + ",\n  ".join(expressions) + f"\nFROM {source.table}"
     if filters:
-        sql += " WHERE " + " AND ".join(filters)
+        sql += "\nWHERE " + "\n  AND ".join(filters)
     if incremental is None:
         operation = JdbcOperation.PARTITION_BOUNDS
     elif partition is None:
@@ -200,16 +200,19 @@ def build_extract_query(
     source_table: str, projection: Sequence[str] | None, filters: Sequence[str] = (), extra_select: str = "",
 ) -> str:
     """Assemble the wrapping JDBC read query: projection, extra columns, filters."""
-    select = "extract_source.*"
-    if projection is not None:
-        select = ", ".join(projection)
+    items = ["extract_source.*"] if projection is None else list(projection)
     if extra_select:
-        select += extra_select
+        items.append(extra_select)
+    select = ",\n    ".join(items)
+    where = "\n    WHERE " + "\n      AND ".join(filters) if filters else ""
     return (
-        f"(SELECT {select} FROM (SELECT * FROM "
-        f"{source_table}) extract_source"
-        + (" WHERE " + " AND ".join(filters) if filters else "")
-        + ") extract_batch"
+        f"(\n"
+        f"  SELECT {select}\n"
+        f"  FROM (\n"
+        f"    SELECT *\n"
+        f"    FROM {source_table}\n"
+        f"  ) extract_source{where}\n"
+        f") extract_batch"
     )
 
 

@@ -6,15 +6,15 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
 from ingestion import meta
-from ingestion.logging import SQL_RELAY_ENV, format_sql_for_log, restore_sql_blocks
+from ingestion.logging import SQL_RELAY_ENV, restore_sql_blocks
 from ingestion.spark.raw.iceberg import build_create_table_sql
+from ingestion.spark.raw.rdbms.reader import build_extract_query
 
 
-def test_create_table_displays_one_column_per_line_and_separate_clauses():
-    sql = build_create_table_sql("raw.bank.retail_bank__deals", [
+def test_create_table_sql_is_multiline_with_one_column_per_line():
+    assert build_create_table_sql("raw.bank.retail_bank__deals", [
         ("deal_id", "bigint"), ("FROM, WHERE", "decimal(12,2)"),
-    ])
-    assert format_sql_for_log(sql).splitlines() == [
+    ]).splitlines() == [
         "CREATE TABLE raw.bank.retail_bank__deals (",
         "  `deal_id` bigint,",
         "  `FROM, WHERE` decimal(12,2),",
@@ -28,24 +28,26 @@ def test_create_table_displays_one_column_per_line_and_separate_clauses():
     ]
 
 
-def test_nested_query_keeps_quoted_sql_intact():
-    sql = ('(SELECT MIN([a, b]) AS lo, MAX([a, b]) AS hi FROM '
-           '(SELECT "FROM" FROM [some WHERE table] WHERE "FROM" = \'x AND y\') q) bounds')
-    assert format_sql_for_log(sql).splitlines() == [
-        '(',
-        '  SELECT MIN([a, b]) AS lo,',
-        '    MAX([a, b]) AS hi',
-        '  FROM (',
-        '    SELECT "FROM"',
-        '    FROM [some WHERE table]',
-        '    WHERE "FROM" = \'x AND y\'',
-        '  ) q',
-        ') bounds',
+def test_extract_query_keeps_quoted_identifiers_intact():
+    assert build_extract_query(
+        "[some WHERE table]", ['[a, b]', '"FROM"'], ['"FROM" = \'x AND y\''],
+    ).splitlines() == [
+        "(",
+        "  SELECT [a, b],",
+        '    "FROM"',
+        "  FROM (",
+        "    SELECT *",
+        "    FROM [some WHERE table]",
+        "  ) extract_source",
+        "    WHERE \"FROM\" = 'x AND y'",
+        ") extract_batch",
     ]
 
 
 def test_execute_logs_template_and_params(caplog):
-    sql = "SELECT 1 FROM ingestion.incremental_batches WHERE entity_fqn = %s"
+    sql = ("SELECT 1\n"
+           "FROM ingestion.incremental_batches\n"
+           "WHERE entity_fqn = %s")
     params = ("it's WHERE, here",)
     cursor = SimpleNamespace(execute=Mock())
     with caplog.at_level("INFO", logger=meta.__name__):
@@ -67,7 +69,7 @@ def test_sql_block_survives_line_oriented_driver_output(monkeypatch):
     lines = result.stderr.splitlines(keepends=True)
     assert len(lines) == 1
     assert list(restore_sql_blocks(["unrelated\n", *lines])) == [
-        "unrelated\n", "INFO __main__: JDBC SQL:\n  SELECT a,\n    b\n  FROM t\n  WHERE id = 1",
+        "unrelated\n", "INFO __main__: JDBC SQL:\n  SELECT a, b FROM t WHERE id = 1",
     ]
 
 

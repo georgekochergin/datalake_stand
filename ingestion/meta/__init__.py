@@ -122,8 +122,8 @@ def allocate_process_id(
     with _operation(db_connect, "allocate_process_id", dag_id=dag_id, run_id=run_id) as (cur, changes):
         _execute(cur,
             "INSERT INTO ingestion.airflow_dagruns_log "
-            "(process_id, dag_id, run_id, execution_date, status) "
-            "VALUES (nextval('ingestion.process_id_seq'), %s, %s, %s, 'START') "
+            "(process_id, dag_id, run_id, execution_date, status)\n"
+            "VALUES (nextval('ingestion.process_id_seq'), %s, %s, %s, 'START')\n"
             "RETURNING *",
             (dag_id, run_id, execution_date),
         )
@@ -140,8 +140,9 @@ def log_dagrun(
     with _operation(db_connect, "log_dagrun", process_id=process_id, status=status) as (cur, changes):
         _execute(cur,
             "INSERT INTO ingestion.airflow_dagruns_log "
-            "(process_id, dag_id, run_id, execution_date, status) "
-            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING *",
+            "(process_id, dag_id, run_id, execution_date, status)\n"
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING\n"
+            "RETURNING *",
             (process_id, dag_id, run_id, execution_date, status),
         )
         changes.append(("airflow_dagruns_log", None, _row(cur)))
@@ -155,8 +156,9 @@ def log_task(
     with _operation(db_connect, "log_task", process_id=process_id, status=status) as (cur, changes):
         _execute(cur,
             "INSERT INTO ingestion.airflow_tasks_log "
-            "(process_id, source_id, entity_fqn, datalake_table, status) "
-            "VALUES (%s, %s, %s, %s, %s) RETURNING *",
+            "(process_id, source_id, entity_fqn, datalake_table, status)\n"
+            "VALUES (%s, %s, %s, %s, %s)\n"
+            "RETURNING *",
             (process_id, source_id, entity_fqn, datalake_table, status),
         )
         changes.append(("airflow_tasks_log", None, _row(cur)))
@@ -166,8 +168,11 @@ def find_process_id(dag_id: str, run_id: str, *, db_connect: DbConnect) -> int |
     """Find an identifier already assigned to a DagRun."""
     with _operation(db_connect, "find_process_id", dag_id=dag_id, run_id=run_id) as (cur, _):
         _execute(cur,
-            "SELECT max(process_id) FROM ingestion.airflow_dagruns_log "
-            "WHERE dag_id = %s AND run_id = %s", (dag_id, run_id),
+            "SELECT max(process_id)\n"
+            "FROM ingestion.airflow_dagruns_log\n"
+            "WHERE dag_id = %s\n"
+            "  AND run_id = %s",
+            (dag_id, run_id),
         )
         value = cur.fetchone()[0]
         LOG.info("pg-meta find_process_id result=%s", value)

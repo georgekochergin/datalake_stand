@@ -67,10 +67,13 @@ class TestBuildRtasSql(unittest.TestCase):
         )
         self.assertEqual(
             statement,
-            "CREATE OR REPLACE TABLE raw.bank.s__t__act_snap USING iceberg "
-            "LOCATION 's3://datalake/raw/bank/s__t__act_snap' "
-            "TBLPROPERTIES ('snapshot.process_id'='42') "
-            "AS SELECT `id`, `weird name`, `__load_dttm` FROM snapshot_source",
+            "CREATE OR REPLACE TABLE raw.bank.s__t__act_snap USING iceberg\n"
+            "LOCATION 's3://datalake/raw/bank/s__t__act_snap'\n"
+            "TBLPROPERTIES ('snapshot.process_id'='42')\n"
+            "AS SELECT `id`,\n"
+            "  `weird name`,\n"
+            "  `__load_dttm`\n"
+            "FROM snapshot_source",
         )
 
 

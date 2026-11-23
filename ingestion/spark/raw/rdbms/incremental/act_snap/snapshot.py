@@ -50,12 +50,13 @@ def build_rtas_sql(target: str, process_id: int, columns: list[str]) -> str:
 
     The caller must register that view before executing the statement.
     """
-    rendered = ", ".join(quote_identifier(column) for column in columns)
+    rendered = ",\n  ".join(quote_identifier(column) for column in columns)
     return (
-        f"CREATE OR REPLACE TABLE {target} USING iceberg "
-        f"LOCATION '{table_location(target)}' "
-        f"TBLPROPERTIES ('{SNAPSHOT_PROCESS_ID_PROPERTY}'='{process_id}') "
-        f"AS SELECT {rendered} FROM {_SNAPSHOT_SOURCE_VIEW}"
+        f"CREATE OR REPLACE TABLE {target} USING iceberg\n"
+        f"LOCATION '{table_location(target)}'\n"
+        f"TBLPROPERTIES ('{SNAPSHOT_PROCESS_ID_PROPERTY}'='{process_id}')\n"
+        f"AS SELECT {rendered}\n"
+        f"FROM {_SNAPSHOT_SOURCE_VIEW}"
     )
 
 

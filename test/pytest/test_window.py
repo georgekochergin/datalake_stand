@@ -78,7 +78,7 @@ class TestPositionSelect(unittest.TestCase):
         dialect = registry.by_conn_type("mssql")
         self.assertEqual(
             window.position_select(dialect, "bigint", "_batch_id"),
-            ', [_batch_id] AS "__extract_position"',
+            '[_batch_id] AS "__extract_position"',
         )
 
     def test_temporal_position_uses_dialect_expression(self):
@@ -99,7 +99,7 @@ class TestReadWindowFrame(unittest.TestCase):
         self.assertIs(result, read_frame.return_value)
         kwargs = read_frame.call_args.kwargs
         self.assertEqual(kwargs["filters"], ["[_batch_id] > 5", "[_batch_id] <= 10"])
-        self.assertEqual(kwargs["extra_select"], ', [_batch_id] AS "__extract_position"')
+        self.assertEqual(kwargs["extra_select"], '[_batch_id] AS "__extract_position"')
 
     def test_oracle_window_uses_oracle_dialect(self):
         batch = make_batch(lower_bound="5", upper_bound="10")
