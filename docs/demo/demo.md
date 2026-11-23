@@ -155,7 +155,10 @@ YAML-[манифестов](../glossary.md#term-manifest) (`ingestion/conf/pipel
 | `spark.jdbc_partitioning` | bool | нет | `true` | `false` — полностью отключить нарезку JDBC-чтения основной загрузки: без разведки ключей и запроса MIN/MAX.<br>Не влияет на снимок |
 | `airflow.pool.name` | string | нет | `default_pool` | [Пул](../glossary.md#term-pool) load-таска.<br>Пользовательский [пул](../glossary.md#term-pool) должен заранее существовать в Airflow |
 | `airflow.pool.slots` | int | нет | `1` | Вес load-таска в [пуле](../glossary.md#term-pool) |
-| `incremental` | mapping | нет | [полный срез](../glossary.md#term-full) | Обязательный `contract: {source_column, position_type}` с необязательным `check_not_null` (по умолчанию `true`).<br>`lookback` — отступ [окна](../glossary.md#term-window) чтения.<br>`act_snap` — конфигурация снимочного DAG-а (шаг 9) |
+| `incremental` | mapping | нет | [полный срез](../glossary.md#term-full) | [Инкрементальная](../glossary.md#term-increment) загрузка таблицы: обязательный блок `contract` (строки ниже), `lookback` — отступ [окна](../glossary.md#term-window) чтения, `act_snap` — конфигурация снимочного DAG-а (шаг 9) |
+| `incremental.contract.source_column` | string | да | — | Колонка [позиции инкремента](../glossary.md#term-position), идентификатор в нижнем регистре |
+| `incremental.contract.position_type` | string | да | — | [Канонический тип позиции](../glossary.md#term-canonical). Правило выбора — [раздел «Выбор типа позиции» архитектуры](../architecture.md#выбор-типа-позиции) |
+| `incremental.contract.check_not_null` | bool | нет | `true` | `false` — отключить проверку NOT NULL колонки позиции при планировании. Строки с NULL не загружаются даже при [bootstrap](../glossary.md#term-bootstrap) |
 | `incremental.act_snap.schedule` | string \| null | нет | `null` | Строгий пятиполевой cron.<br>`null` — ручной запуск |
 | `incremental.act_snap.tags` | list[string] | нет | `[]` | Дополнительные теги снимочного DAG-а.<br>Теги основного пайплайна не наследуются |
 | `incremental.act_snap.spark.jdbc_partitioning` | bool | нет | `true` | Независимое от основной [сущности](../glossary.md#term-entity) многопоточное JDBC-чтение |
