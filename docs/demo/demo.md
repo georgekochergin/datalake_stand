@@ -123,13 +123,10 @@ YAML-[манифестов](../glossary.md#term-manifest) (`ingestion/conf/pipel
    ```bash
    rm -rf airflow/dags/generated
    python3 -m ingestion.generator.generate_dags
-   ls -la airflow/dags/generated/
-   python3 -m ingestion.generator.generate_dags --check
    ```
 
-   `--check` печатает `check: 0 difference(s)` — артефакты соответствуют
-   [манифестам](../glossary.md#term-manifest). Удаление папки `generated`
-   данные не сбрасывает: история запусков в базе Airflow сохраняется.
+   Удаление папки `generated` данные не сбрасывает: история запусков в базе
+   Airflow сохраняется.
 
 2. Сгенерированные файлы: `ingest__rdbms__bank__main.py`,
    `ingest__rdbms__bank__refs.py` и два для broker.
