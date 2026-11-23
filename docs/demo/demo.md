@@ -531,13 +531,6 @@ WHERE key = 'snapshot.process_id';
 
 **На что обратить внимание**
 
-- [Снимок](../glossary.md#term-snapshot) содержит весь прочитанный источник,
-  а не [окно](../glossary.md#term-window)
-  [инкремента](../glossary.md#term-increment). Для непустого снимка
-  `portions = 1` и `load_marks = 1`: один процесс публикации и одна отметка
-  времени.
-- `raw_rows` и `snap_rows` не обязаны совпадать: [raw](../glossary.md#term-raw)
-  хранит историю загрузок, включая строки, уже удалённые из источника.
 - После повтора [порция](../glossary.md#term-portion) по-прежнему **одна** с
   новым `__process_id`: [снимок](../glossary.md#term-snapshot)
   **перезаписывается целиком одной атомарной операцией Iceberg**
@@ -551,13 +544,6 @@ WHERE key = 'snapshot.process_id';
   [инкремента](../glossary.md#term-increment) снимком не пополняется: у
   [инкремента](../glossary.md#term-increment) и
   [снимка](../glossary.md#term-snapshot) раздельные потоки.
-- `publish_asset` [снимка](../glossary.md#term-snapshot) читает через Trino одну строку `__process_id` и
-  публикует `raw://bank/retail_bank.transactions/act_snap`, только если строка
-  принадлежит текущему процессу. Пустая таблица или старый процесс — пропуск
-  задачи без события. У обычных загрузок тот же PythonOperator публикует
-  [Asset](../glossary.md#term-asset) без проверки.
-- START/END в журнал pg-meta пишут callbacks задачи `load`.
-- Ошибка записи журнала не блокирует загрузку и публикацию.
 
 Настройки [снимка](../glossary.md#term-snapshot) задаются внутри
 [инкрементальной](../glossary.md#term-increment)
