@@ -19,12 +19,11 @@ from typing import TYPE_CHECKING, Any, TypeAlias
 from ingestion.logging import log_sql, log_step
 
 if TYPE_CHECKING:
-    from psycopg import Connection, Cursor
     from psycopg2.extensions import connection as Psycopg2Connection
     from psycopg2.extensions import cursor as Psycopg2Cursor
 
-DbConnection: TypeAlias = "Connection | Psycopg2Connection"
-DbCursor: TypeAlias = "Cursor | Psycopg2Cursor"
+DbConnection: TypeAlias = "Psycopg2Connection"
+DbCursor: TypeAlias = "Psycopg2Cursor"
 DbConnect: TypeAlias = Callable[[], DbConnection]
 DbRow: TypeAlias = dict[str, Any]
 _RowChange: TypeAlias = tuple[str, DbRow | None, DbRow | None]
@@ -69,34 +68,11 @@ def _row(cursor: DbCursor) -> DbRow | None:
 
 
 def _execute(cursor: DbCursor, sql: str, params: tuple[object, ...]) -> None:
-    """Log only application-owned SQL and its operational parameters."""
+    """Log the SQL template and its bind values, then execute the original query."""
     if LOG.isEnabledFor(logging.INFO):
-        _log_statement(cursor, sql, params)
-    cursor.execute(sql, params)
-
-
-def _log_statement(cursor: DbCursor, sql: str, params: tuple[object, ...]) -> None:
-    """Adapt bind values for display only, independently of execution."""
-    try:
-        mogrify = getattr(cursor, "mogrify", None)
-        if mogrify is not None:
-            rendered = mogrify(sql, params)
-            if isinstance(rendered, bytes):
-                rendered = rendered.decode(cursor.connection.encoding or "utf-8")
-        else:
-            from psycopg import ClientCursor, Connection
-
-            if not isinstance(cursor.connection, Connection):
-                raise TypeError("Cursor has no SQL rendering support")
-            with ClientCursor(cursor.connection) as renderer:
-                rendered = renderer.mogrify(sql, params)
-        if not isinstance(rendered, str):
-            raise TypeError("Cursor returned no rendered SQL text")
-    except Exception:
-        log_sql(LOG, "pg-meta SQL (template)", sql)
+        log_sql(LOG, "pg-meta SQL", sql)
         LOG.info("pg-meta SQL params=%r", params)
-    else:
-        log_sql(LOG, "pg-meta SQL", rendered)
+    cursor.execute(sql, params)
 
 
 @contextmanager
