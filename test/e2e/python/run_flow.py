@@ -482,10 +482,11 @@ def check_load_trace(task_id, log, incremental, *, regular=False):
     scope = "batch_window" if incremental else "source_table"
     expected += [f"JDBC dbtable scope={scope}:"]
     lifecycle_sql = logged_sql(log, "pg-meta SQL")
-    check(f"{task_id}: rendered multiline pg-meta SQL", bool(
+    check(f"{task_id}: multiline pg-meta SQL template", bool(
         lifecycle_sql and "INSERT INTO ingestion.airflow_tasks_log" in lifecycle_sql[0]
-        and len(lifecycle_sql[0].splitlines()) > 1 and "%s" not in lifecycle_sql[0]
-        and "'START'" in lifecycle_sql[0]), True)
+        and len(lifecycle_sql[0].splitlines()) > 1 and "%s" in lifecycle_sql[0]), True)
+    check(f"{task_id}: pg-meta SQL bind values logged beside the template", bool(
+        re.search(r"pg-meta SQL params=\([^\n]*'START'\)", log)), True)
     if incremental:
         probe_scope = "batch_window" if regular else "source_table"
         expected += [f"JDBC SQL scope={probe_scope} operation=combined_bounds:", "jdbc partitioning: selected column=",
@@ -510,8 +511,8 @@ def check_load_trace(task_id, log, incremental, *, regular=False):
             "max_increment_col" in source_sql and "MIN(" in source_sql and "upper_bound" in source_sql
             and "COUNT(" not in source_sql and " <= " not in source_sql
             and (not regular or (re.search(r"\bWHERE\b", source_sql) and " > " in source_sql))), True)
-        check(f"{task_id}: rendered Spark pg-meta SQL", any(
-            "SELECT 1" in sql and "FROM ingestion.incremental_batches" in sql and "%s" not in sql
+        check(f"{task_id}: parameterized Spark pg-meta SQL", any(
+            "SELECT 1" in sql and "FROM ingestion.incremental_batches" in sql and "%s" in sql
             for sql in lifecycle_sql), True)
     else:
         expected += ["--no-jdbc-partitioning", "JDBC partition bounds skipped: JDBC partitioning is disabled. reason=disabled"]
