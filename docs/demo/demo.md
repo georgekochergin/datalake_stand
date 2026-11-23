@@ -117,43 +117,32 @@
 DAG-и загрузки не пишутся руками — генерируются из
 YAML-[манифестов](../glossary.md#term-manifest) (`ingestion/conf/pipelines/`).
 В этом сценарии генерация запускается вручную — имитация шага CI/CD.
-Начните с чистого состояния.
 
-1. Терминал (из корня репозитория) — удалить сгенерированные DAG-и:
-
-   ```bash
-   ls airflow/dags/generated/
-   rm airflow/dags/generated/ingest__*.py
-   ```
-
-   Если каталог или файлы ещё не созданы, пропустите удаление. Удаление
-   файлов DAG-ов данные не сбрасывает: история запусков в базе Airflow
-   сохраняется.
-
-2. Airflow UI → подождать цикла парсинга (каталог пересканируется за 10
-   секунд, обновление списка может занять больше одного цикла) → четыре
-   ingest-DAG-а стали неактивными или скрылись фильтром активных. DAG-и
-   `update_source_*` остаются активными.
-3. Сгенерировать DAG-и заново:
+1. Терминал (из корня репозитория) — пересоздать сгенерированные DAG-и:
 
    ```bash
+   rm -rf airflow/dags/generated
    python3 -m ingestion.generator.generate_dags
    ls -la airflow/dags/generated/
    python3 -m ingestion.generator.generate_dags --check
    ```
 
-4. Сгенерированные файлы: `ingest__rdbms__bank__main.py`,
-   `ingest__rdbms__bank__refs.py` и два для broker.
    `--check` печатает `check: 0 difference(s)` — артефакты соответствуют
-   [манифестам](../glossary.md#term-manifest).
-5. После цикла парсинга четыре DAG-а `ingest__rdbms__{bank,broker}__{main,refs}`
-   появились снова. Открыть `ingest__rdbms__bank__main`: структура
+   [манифестам](../glossary.md#term-manifest). Удаление папки `generated`
+   данные не сбрасывает: история запусков в базе Airflow сохраняется.
+
+2. Сгенерированные файлы: `ingest__rdbms__bank__main.py`,
+   `ingest__rdbms__bank__refs.py` и два для broker.
+3. Airflow UI → после цикла парсинга (каталог пересканируется за 10 секунд,
+   обновление списка может занять больше одного цикла) в списке DAG-ов
+   четыре `ingest__rdbms__{bank,broker}__{main,refs}`. Открыть
+   `ingest__rdbms__bank__main`: структура
    `generate_process_id → activate_source → TaskGroup на каждую
    [сущность](../glossary.md#term-entity) (load → publish_asset)`.
    `publish_asset` публикует событие готовности таблицы
    ([Asset](../glossary.md#term-asset)) после успешной загрузки.
-6. Запустить все четыре DAG-а (сначала банка, затем брокера — или все сразу).
-7. Во время загрузок в Spark Master UI (http://localhost:8080) видны
+4. Запустить все четыре DAG-а (сначала банка, затем брокера — или все сразу).
+5. Во время загрузок в Spark Master UI (http://localhost:8080) видны
    работающие приложения (Running Applications), по одному на каждую загрузку.
 
 ### Многопоточное чтение
