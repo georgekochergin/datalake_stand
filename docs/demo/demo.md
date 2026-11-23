@@ -88,8 +88,11 @@
 
 1. Airflow UI → DAG-и `update_source_bank` и `update_source_broker`.
 2. Запустите оба и откройте Grid View.
-3. Пока идут: таски `migrate_bank` и `migrate_broker` применяют наборы
-   операций из `airflow/plugins/migrations/{bank,broker}.json`.
+3. В процессе работы DAG-ов на источниках выполняются операции, перечисленные
+   в файлах:
+
+   - `airflow/plugins/migrations/bank.json`
+   - `airflow/plugins/migrations/broker.json`
 
 **На что обратить внимание**
 
