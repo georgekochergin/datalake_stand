@@ -419,12 +419,6 @@ python3 docs/demo/schema_evolution.py bank       только bank
 python3 docs/demo/schema_evolution.py broker     только broker
 ```
 
-Адрес sydafa задаётся переменной окружения `SYDAFA_URL` (по умолчанию
-`http://localhost:8090`). Скрипт ждёт готовности `/health` и печатает
-результат каждого шага. Миграция сама будит базу — отдельная активация не
-нужна. Повторный запуск на уже мигрированной схеме завершится ошибкой
-соответствующей операции.
-
 Что делает скрипт для каждого источника:
 
 | Действие | bank (`retail_bank.clients`) | broker (`trading_core.clients`) |
