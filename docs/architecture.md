@@ -205,15 +205,18 @@
 | Параметр | Тип | Обязателен | По умолчанию | Описание |
 |---|---|---|---|---|
 | `fqn` | string | да | — | `<схема>.<таблица>` источника, ровно два фрагмента.<br>Преобразуется в имя целевой таблицы по [правилам именования](#имена-и-колонки) |
-| `incremental` | mapping | нет | [полный срез](glossary.md#term-full) | Обязательный `contract: {source_column, position_type}` с необязательным `check_not_null` (по умолчанию `true`).<br>`lookback` — [настройка отступа](#настройка-lookback) [окна](glossary.md#term-window).<br>`act_snap` — независимая [конфигурация вспомогательного снимочного DAG-а](#генерация-и-настройка) |
+| `spark.jdbc_partitioning` | bool | нет | `true` | `false` — полностью отключить [нарезку JDBC-чтения](#когда-разбиение-работает) основной загрузки: без разведки ключей и запроса MIN/MAX.<br>Не влияет на снимок |
+| `airflow.pool.name` | string | нет | `default_pool` | [Пул](glossary.md#term-pool) load-таска.<br>Пользовательский [пул](glossary.md#term-pool) должен заранее существовать в Airflow |
+| `airflow.pool.slots` | int | нет | `1` | Вес load-таска в [пуле](glossary.md#term-pool) |
+| `incremental` | mapping | нет | [полный срез](glossary.md#term-full) | [Инкрементальная](glossary.md#term-increment) загрузка таблицы: обязательный блок `contract` (строки ниже), `lookback` — [настройка отступа](#настройка-lookback) [окна](glossary.md#term-window), `act_snap` — независимая [конфигурация вспомогательного снимочного DAG-а](#генерация-и-настройка) |
+| `incremental.contract.source_column` | string | да | — | Колонка [позиции инкремента](glossary.md#term-position), идентификатор в нижнем регистре |
+| `incremental.contract.position_type` | string | да | — | [Канонический тип позиции](glossary.md#term-canonical). Правило выбора — [«Выбор типа позиции»](#выбор-типа-позиции) |
+| `incremental.contract.check_not_null` | bool | нет | `true` | `false` — отключить проверку NOT NULL колонки позиции при планировании. Строки с NULL не загружаются даже при [bootstrap](glossary.md#term-bootstrap) |
 | `incremental.act_snap.schedule` | string \| null | нет | `null` | Строгий пятиполевой cron.<br>null — ручной запуск |
 | `incremental.act_snap.tags` | list[string] | нет | `[]` | Дополнительные теги снимочного DAG-а.<br>Теги основного [пайплайна](glossary.md#term-pipeline) не наследуются |
 | `incremental.act_snap.spark.jdbc_partitioning` | bool | нет | `true` | Независимое от основной [сущности](glossary.md#term-entity) параллельное JDBC-чтение |
 | `incremental.act_snap.airflow.pool.name` | string | нет | `default_pool` | [Пул](glossary.md#term-pool) load-таска снимка |
 | `incremental.act_snap.airflow.pool.slots` | int | нет | `1` | Положительный вес load-таска снимка |
-| `spark.jdbc_partitioning` | bool | нет | `true` | `false` — полностью отключить [нарезку JDBC-чтения](#когда-разбиение-работает) основной загрузки: без разведки ключей и запроса MIN/MAX.<br>Не влияет на снимок |
-| `airflow.pool.name` | string | нет | `default_pool` | [Пул](glossary.md#term-pool) load-таска.<br>Пользовательский [пул](glossary.md#term-pool) должен заранее существовать в Airflow |
-| `airflow.pool.slots` | int | нет | `1` | Вес load-таска в [пуле](glossary.md#term-pool) |
 
 Блок `act_snap` допустим только внутри `incremental`: он настраивает
 гарантированно существующий DAG-снимок (расписание и [пул](glossary.md#term-pool)), а не включает его
