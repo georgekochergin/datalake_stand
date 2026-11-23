@@ -86,8 +86,7 @@
 Источники «оживают» через DAG-и обновления: синтетические вставки, обновления
 и удаления выполняются транзакционно через API sydafa.
 
-1. Airflow UI → DAG-и `update_source_bank` и `update_source_broker`
-   (расписания нет — запуск только ручной, кнопка ▶ справа).
+1. Airflow UI → DAG-и `update_source_bank` и `update_source_broker`.
 2. Запустите оба и откройте Grid View.
 3. Пока идут: таски `migrate_bank` и `migrate_broker` применяют наборы
    операций из `airflow/plugins/migrations/{bank,broker}.json`:
