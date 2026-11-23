@@ -192,7 +192,9 @@ class TestResolveBatch(unittest.TestCase):
         run.catalog.assert_called_once()
         run.query.assert_called_once()
         self.assertEqual(run.query.call_args.args[1],
-                         "SELECT MAX([_batch_id]) AS max_increment_col FROM [retail_bank].[transactions] WHERE [_batch_id] > 8")
+                         "SELECT MAX([_batch_id]) AS max_increment_col\n"
+                         "FROM [retail_bank].[transactions]\n"
+                         "WHERE [_batch_id] > 8")
         self.assertEqual(run.resolved.partition_bounds, (None, None))
 
     def test_nullability_check_is_opt_out_only(self):

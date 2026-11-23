@@ -107,11 +107,15 @@ class TestBuildCreateTableSql(unittest.TestCase):
         )
         self.assertEqual(
             ddl,
-            "CREATE TABLE raw.bank.retail_bank__clients "
-            "(`client_id` bigint, `full_name` string, "
-            "`__load_dttm` timestamp_ltz, `__process_id` bigint) USING iceberg "
-            "PARTITIONED BY (days(`__load_dttm`)) "
-            "LOCATION 's3://datalake/raw/bank/retail_bank__clients' "
+            "CREATE TABLE raw.bank.retail_bank__clients (\n"
+            "  `client_id` bigint,\n"
+            "  `full_name` string,\n"
+            "  `__load_dttm` timestamp_ltz,\n"
+            "  `__process_id` bigint\n"
+            ")\n"
+            "USING iceberg\n"
+            "PARTITIONED BY (days(`__load_dttm`))\n"
+            "LOCATION 's3://datalake/raw/bank/retail_bank__clients'\n"
             "TBLPROPERTIES ('write.spark.accept-any-schema'='true')",
         )
 

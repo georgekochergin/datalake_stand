@@ -19,12 +19,11 @@ from typing import TYPE_CHECKING, Any, TypeAlias
 from ingestion.logging import log_sql, log_step
 
 if TYPE_CHECKING:
-    from psycopg import Connection, Cursor
     from psycopg2.extensions import connection as Psycopg2Connection
     from psycopg2.extensions import cursor as Psycopg2Cursor
 
-DbConnection: TypeAlias = "Connection | Psycopg2Connection"
-DbCursor: TypeAlias = "Cursor | Psycopg2Cursor"
+DbConnection: TypeAlias = "Psycopg2Connection"
+DbCursor: TypeAlias = "Psycopg2Cursor"
 DbConnect: TypeAlias = Callable[[], DbConnection]
 DbRow: TypeAlias = dict[str, Any]
 _RowChange: TypeAlias = tuple[str, DbRow | None, DbRow | None]
@@ -69,34 +68,11 @@ def _row(cursor: DbCursor) -> DbRow | None:
 
 
 def _execute(cursor: DbCursor, sql: str, params: tuple[object, ...]) -> None:
-    """Log only application-owned SQL and its operational parameters."""
+    """Log the SQL template and its bind values, then execute the original query."""
     if LOG.isEnabledFor(logging.INFO):
-        _log_statement(cursor, sql, params)
-    cursor.execute(sql, params)
-
-
-def _log_statement(cursor: DbCursor, sql: str, params: tuple[object, ...]) -> None:
-    """Adapt bind values for display only, independently of execution."""
-    try:
-        mogrify = getattr(cursor, "mogrify", None)
-        if mogrify is not None:
-            rendered = mogrify(sql, params)
-            if isinstance(rendered, bytes):
-                rendered = rendered.decode(cursor.connection.encoding or "utf-8")
-        else:
-            from psycopg import ClientCursor, Connection
-
-            if not isinstance(cursor.connection, Connection):
-                raise TypeError("Cursor has no SQL rendering support")
-            with ClientCursor(cursor.connection) as renderer:
-                rendered = renderer.mogrify(sql, params)
-        if not isinstance(rendered, str):
-            raise TypeError("Cursor returned no rendered SQL text")
-    except Exception:
-        log_sql(LOG, "pg-meta SQL (template)", sql)
+        log_sql(LOG, "pg-meta SQL", sql)
         LOG.info("pg-meta SQL params=%r", params)
-    else:
-        log_sql(LOG, "pg-meta SQL", rendered)
+    cursor.execute(sql, params)
 
 
 @contextmanager
@@ -146,8 +122,8 @@ def allocate_process_id(
     with _operation(db_connect, "allocate_process_id", dag_id=dag_id, run_id=run_id) as (cur, changes):
         _execute(cur,
             "INSERT INTO ingestion.airflow_dagruns_log "
-            "(process_id, dag_id, run_id, execution_date, status) "
-            "VALUES (nextval('ingestion.process_id_seq'), %s, %s, %s, 'START') "
+            "(process_id, dag_id, run_id, execution_date, status)\n"
+            "VALUES (nextval('ingestion.process_id_seq'), %s, %s, %s, 'START')\n"
             "RETURNING *",
             (dag_id, run_id, execution_date),
         )
@@ -164,8 +140,9 @@ def log_dagrun(
     with _operation(db_connect, "log_dagrun", process_id=process_id, status=status) as (cur, changes):
         _execute(cur,
             "INSERT INTO ingestion.airflow_dagruns_log "
-            "(process_id, dag_id, run_id, execution_date, status) "
-            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING *",
+            "(process_id, dag_id, run_id, execution_date, status)\n"
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING\n"
+            "RETURNING *",
             (process_id, dag_id, run_id, execution_date, status),
         )
         changes.append(("airflow_dagruns_log", None, _row(cur)))
@@ -179,8 +156,9 @@ def log_task(
     with _operation(db_connect, "log_task", process_id=process_id, status=status) as (cur, changes):
         _execute(cur,
             "INSERT INTO ingestion.airflow_tasks_log "
-            "(process_id, source_id, entity_fqn, datalake_table, status) "
-            "VALUES (%s, %s, %s, %s, %s) RETURNING *",
+            "(process_id, source_id, entity_fqn, datalake_table, status)\n"
+            "VALUES (%s, %s, %s, %s, %s)\n"
+            "RETURNING *",
             (process_id, source_id, entity_fqn, datalake_table, status),
         )
         changes.append(("airflow_tasks_log", None, _row(cur)))
@@ -190,8 +168,11 @@ def find_process_id(dag_id: str, run_id: str, *, db_connect: DbConnect) -> int |
     """Find an identifier already assigned to a DagRun."""
     with _operation(db_connect, "find_process_id", dag_id=dag_id, run_id=run_id) as (cur, _):
         _execute(cur,
-            "SELECT max(process_id) FROM ingestion.airflow_dagruns_log "
-            "WHERE dag_id = %s AND run_id = %s", (dag_id, run_id),
+            "SELECT max(process_id)\n"
+            "FROM ingestion.airflow_dagruns_log\n"
+            "WHERE dag_id = %s\n"
+            "  AND run_id = %s",
+            (dag_id, run_id),
         )
         value = cur.fetchone()[0]
         LOG.info("pg-meta find_process_id result=%s", value)

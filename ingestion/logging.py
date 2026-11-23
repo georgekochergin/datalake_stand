@@ -10,70 +10,10 @@ SQL_RELAY_ENV = "INGESTION_SQL_LOG_RELAY"
 _SQL_FRAME = "INGESTION_SQL_LOG "
 
 
-_SQL_PART = re.compile(
-    r"--[^\n]*|/\*[\s\S]*?\*/|\$(?P<tag>[a-zA-Z_]\w*|)\$[\s\S]*?\$(?P=tag)\$"
-    r"|(?:[eE]'(?:\\.|''|[^'\\])*'|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|\[(?:\]\]|[^\]])*\]|`(?:``|[^`])*`)"
-    r"|\b(?:SELECT|FROM|WHERE|AND|OR|SET|VALUES|ON\s+CONFLICT|RETURNING|FOR\s+UPDATE|AS\s+SELECT"
-    r"|USING|PARTITIONED\s+BY|LOCATION|TBLPROPERTIES)\b|[(),]",
-    re.IGNORECASE,
-)
-
-
-def format_sql_for_log(sql: str) -> str:
-    """Lay out generated SQL without splitting quoted values or function arguments."""
-    depth = 0
-    create_table = re.match(r"\s*CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\b", sql, re.IGNORECASE)
-    ddl_clauses = {"USING", "PARTITIONED BY", "LOCATION", "TBLPROPERTIES"}
-    columns = False
-    before_clause = True
-    queries = {0}
-    offset = 0
-    indent = 0
-    lines = []
-
-    def flush(end: int, next_indent: int) -> None:
-        """Keep the original SQL fragment and update its display indentation."""
-        nonlocal offset, indent
-        part = sql[offset:end].strip()
-        if part:
-            lines.append("  " * indent + part)
-        offset, indent = end, next_indent
-
-    for match in _SQL_PART.finditer(sql):
-        token = match[0].upper()
-        if token == "(":
-            if create_table and before_clause and depth == 0:
-                columns = True
-                before_clause = False
-                flush(match.end(), 1)
-            depth += 1
-        elif token == ")":
-            if columns and depth == 1:
-                flush(match.start(), 0)
-                columns = False
-            if depth in queries and depth:
-                flush(match.start(), depth - 1)
-                queries.remove(depth)
-            depth -= 1
-        elif token == "SELECT":
-            queries.add(depth)
-            flush(match.start(), depth)
-        elif token == "," and (depth in queries or (columns and depth == 1)):
-            flush(match.end(), 1 if columns else depth + 1)
-        elif " ".join(token.split()) in ddl_clauses:
-            if create_table and depth == 0:
-                before_clause = False
-                flush(match.start(), 0)
-        elif depth in queries and token[0].isalpha() and not token.startswith("E'"):
-            flush(match.start(), depth + (token in ("AND", "OR")))
-    flush(len(sql), 0)
-    return "\n".join(lines)
-
-
 def log_sql(logger: logging.Logger, label: str, sql: str) -> None:
-    """Send one SQL record, framed only when the Airflow relay is enabled."""
+    """Send one SQL record as emitted by its generator, framed only when the relay is enabled."""
     if logger.isEnabledFor(logging.INFO):
-        block = f"{label}:\n" + "\n".join("  " + line for line in format_sql_for_log(sql).splitlines())
+        block = f"{label}:\n" + "\n".join("  " + line for line in sql.splitlines())
         logger.info("%s", _SQL_FRAME + json.dumps(block) if os.environ.get(SQL_RELAY_ENV) == "1" else block)
 
 

@@ -214,7 +214,13 @@ class TestReadExtractFrame(unittest.TestCase):
         self.assertIs(result, reader_double)
         self.assertEqual(
             query,
-            "(SELECT extract_source.* FROM (SELECT * FROM [retail_bank].[clients]) extract_source) extract_batch",
+            "(\n"
+            "  SELECT extract_source.*\n"
+            "  FROM (\n"
+            "    SELECT *\n"
+            "    FROM [retail_bank].[clients]\n"
+            "  ) extract_source\n"
+            ") extract_batch",
         )
         key_call.assert_called_once()
         self.assertNotIn("partitionColumn", reader_double.options)
@@ -233,10 +239,10 @@ class TestReadExtractFrame(unittest.TestCase):
                                  columns=[("transaction_id", "bigint"), ("_batch_id", "int")])
         _, reader_double, query, _ = self.frame(
             args, filters=["[_batch_id] > 5", "[_batch_id] <= 10"],
-            extra_select=', [_batch_id] AS "__extract_position"', keys=keys, bounds=(5, 10),
+            extra_select='[_batch_id] AS "__extract_position"', keys=keys, bounds=(5, 10),
         )
-        self.assertIn("[_batch_id] > 5 AND [_batch_id] <= 10", query)
-        self.assertIn(', [_batch_id] AS "__extract_position"', query)
+        self.assertIn("[_batch_id] > 5\n      AND [_batch_id] <= 10", query)
+        self.assertIn('[_batch_id] AS "__extract_position"', query)
         self.assertEqual(reader_double.options["partitionColumn"], "transaction_id")
 
     def test_precomputed_bounds_do_not_trigger_another_query(self):
@@ -341,8 +347,8 @@ class TestReadExtractFrame(unittest.TestCase):
     def test_compatibility_projection_rewrites_select(self):
         projection = ['extract_source."a"', 'DATEDIFF_BIG(MICROSECOND, epoch, extract_source."b") AS "b"']
         _, _, query, _ = self.frame(make_args(jdbc_url=ORACLE_URL), projection=projection)
-        self.assertIn('SELECT ' + ', '.join(projection), query)
-        self.assertIn('FROM (SELECT * FROM "retail_bank"."clients")', query)
+        self.assertIn("SELECT " + projection[0] + ",\n    " + projection[1], query)
+        self.assertIn('FROM "retail_bank"."clients"\n  ) extract_source', query)
 
     def test_converts_only_projected_microseconds_before_cache(self):
         keys = self.key_metadata(columns=[("local_time", "datetime2"), ("event.at`utc", "datetimeoffset")])
