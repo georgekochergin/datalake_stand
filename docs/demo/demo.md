@@ -125,9 +125,11 @@ YAML-[манифестов](../glossary.md#term-manifest) (`ingestion/conf/pipel
    python3 -m ingestion.generator.generate_dags
    ```
 
-2. Запустить все четыре DAG-а (сначала банка, затем брокера — или все сразу).
-3. Во время загрузок в Spark Master UI (http://localhost:8080) видны
-   работающие приложения (Running Applications), по одному на каждую загрузку.
+2. Запустить все четыре DAG-а.
+3. Во время загрузок в Spark Master UI видны работающие приложения
+   (Running Applications), по одному на каждую загрузку. Имя приложения —
+   полное имя целевой таблицы в озере, например
+   `raw.bank.retail_bank__transactions`.
 
 ### Структура манифеста
 
@@ -150,15 +152,15 @@ YAML-[манифестов](../glossary.md#term-manifest) (`ingestion/conf/pipel
 | Параметр | Тип | Обязателен | По умолчанию | Описание |
 |---|---|---|---|---|
 | `fqn` | string | да | — | `<схема>.<таблица>` источника, ровно два фрагмента.<br>Регистр исходных имён сохраняется |
+| `spark.jdbc_partitioning` | bool | нет | `true` | `false` — полностью отключить нарезку JDBC-чтения основной загрузки: без разведки ключей и запроса MIN/MAX.<br>Не влияет на снимок |
+| `airflow.pool.name` | string | нет | `default_pool` | [Пул](../glossary.md#term-pool) load-таска.<br>Пользовательский [пул](../glossary.md#term-pool) должен заранее существовать в Airflow |
+| `airflow.pool.slots` | int | нет | `1` | Вес load-таска в [пуле](../glossary.md#term-pool) |
 | `incremental` | mapping | нет | [полный срез](../glossary.md#term-full) | Обязательный `contract: {source_column, position_type}` с необязательным `check_not_null` (по умолчанию `true`).<br>`lookback` — отступ [окна](../glossary.md#term-window) чтения.<br>`act_snap` — конфигурация снимочного DAG-а (шаг 9) |
 | `incremental.act_snap.schedule` | string \| null | нет | `null` | Строгий пятиполевой cron.<br>`null` — ручной запуск |
 | `incremental.act_snap.tags` | list[string] | нет | `[]` | Дополнительные теги снимочного DAG-а.<br>Теги основного пайплайна не наследуются |
 | `incremental.act_snap.spark.jdbc_partitioning` | bool | нет | `true` | Независимое от основной [сущности](../glossary.md#term-entity) многопоточное JDBC-чтение |
 | `incremental.act_snap.airflow.pool.name` | string | нет | `default_pool` | [Пул](../glossary.md#term-pool) load-таска снимка |
 | `incremental.act_snap.airflow.pool.slots` | int | нет | `1` | Положительный вес load-таска снимка |
-| `spark.jdbc_partitioning` | bool | нет | `true` | `false` — полностью отключить нарезку JDBC-чтения основной загрузки: без разведки ключей и запроса MIN/MAX.<br>Не влияет на снимок |
-| `airflow.pool.name` | string | нет | `default_pool` | [Пул](../glossary.md#term-pool) load-таска.<br>Пользовательский [пул](../glossary.md#term-pool) должен заранее существовать в Airflow |
-| `airflow.pool.slots` | int | нет | `1` | Вес load-таска в [пуле](../glossary.md#term-pool) |
 
 Тип источника задаётся в `ingestion/conf/sources.yaml`:
 
