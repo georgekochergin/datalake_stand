@@ -1,20 +1,14 @@
 # Сценарий демонстрации стенда
 
-Памятка ведущего: что и в каком порядке показывать и какие тезисы проговаривать.
-Зрителям файл не показывается. Попутно документ служит коротким введением
-в возможности фреймворка загрузки данных.
-
-Маршрут: обновление источников → загрузка в [raw-слой](../glossary.md#term-raw) →
-проверка в Trino и pg-meta → файлы в silo → эволюция схемы источника →
-[таблица-снимок](../glossary.md#term-snapshot). Все запросы подготовлены —
-копируются как есть. Продолжительность — 30–40 минут.
+Пошаговый сценарий демонстрации. Всё показанное можно повторить
+самостоятельно: запросы и команды подготовлены — копируются как есть.
 
 ## Содержание
 
 - [Глоссарий](../glossary.md)
 - [Подготовка](#подготовка)
 - [Шаг 1. Обновление источников](#шаг-1-обновление-источников)
-- [Шаг 2. Источники через DBeaver](#шаг-2-источники-через-dbeaver)
+- [Шаг 2. Активация источников](#шаг-2-активация-источников)
 - [Шаг 3. Генерация DAG-ов и запуск загрузок](#шаг-3-генерация-dag-ов-и-запуск-загрузок)
   - [Многопоточное чтение](#многопоточное-чтение)
   - [Пул загрузок](#пул-загрузок)
@@ -42,10 +36,6 @@
    python -m pip install -r ingestion/generator/requirements.txt
    ```
 
-   Оставьте `.venv` активным для команд шага 3. В новом терминале активируйте
-   снова: `source .venv/bin/activate`. Airflow и Spark для генерации DAG-ов на
-   хосте не требуются.
-
 ### Запуск и подключения
 
 Запустите стенд из корня репозитория (`docker compose up -d`) и откройте
@@ -57,30 +47,32 @@
 | Swagger UI sydafa | http://localhost:8090/docs |
 | Консоль silo | http://localhost:9001 (`admin123` / `admin123`) |
 | Spark Master UI | http://localhost:8080 |
-| DBeaver | два подключения к источникам (создаются на шаге 2), Trino и pg-meta (параметры ниже) |
-| Терминал | для генерации DAG-ов, psql к pg-meta и скрипта миграции |
-
-Реквизиты источников (одинаковые для обоих): пользователь `sydafa`, пароль
-`sydafa`. Порт bank (MSSQL) — `14330`, broker (Oracle) — `15211`.
+| DBeaver | Trino и pg-meta (параметры ниже) |
+| Терминал | для генерации DAG-ов и скрипта миграции |
 
 Подключения DBeaver, которые готовятся заранее:
 
-- **Trino**: драйвер Trino, host `localhost`, port `8443`, catalog/database
-  `raw`, SSL включён.
-  - Свойства драйвера: `SSL=true`, `SSLVerification=NONE`
-  (сертификат стенда самоподписанный). JDBC URL:
-  `jdbc:trino://localhost:8443/raw?SSL=true&SSLVerification=NONE`.
-- **pg-meta**: драйвер PostgreSQL, host `localhost`, port `55432`, database
-  `meta`, схема `ingestion`. JDBC URL: `jdbc:postgresql://localhost:55432/meta`.
-
-Для обоих подключений пользователь и пароль по умолчанию — `admin123` /
-`admin123`. Если в `.env` переопределены `STAND_USER` и `STAND_PASSWORD`,
-используйте их также для Airflow UI и консоли silo.
+- **Trino**:
+  - драйвер: Trino
+  - host: `localhost`
+  - port: `8443`
+  - catalog/database: `raw`
+  - логин: `admin123`
+  - пароль: `admin123`
+  - SSL: включён, свойства драйвера `SSL=true`, `SSLVerification=NONE`
+    (сертификат стенда самоподписанный)
+  - JDBC URL: `jdbc:trino://localhost:8443/raw?SSL=true&SSLVerification=NONE`
+- **pg-meta**:
+  - драйвер: PostgreSQL
+  - host: `localhost`
+  - port: `55432`
+  - database: `meta`, схема `ingestion`
+  - логин: `admin123`
+  - пароль: `admin123`
+  - JDBC URL: `jdbc:postgresql://localhost:55432/meta`
 
 ### Исходное состояние
 
-- Дождитесь готовности sydafa: `GET /health` на http://localhost:8090/health
-  возвращает HTTP 200. При первом старте сервис инициализирует СУБД и схемы.
 - Сценарий рассчитан на исходную схему источников и отсутствие предыдущих
   загрузок в [raw](../glossary.md#term-raw)/pg-meta. На уже использованном
   стенде номера [партий](../glossary.md#term-batch), число [порций](../glossary.md#term-portion)
@@ -119,56 +111,32 @@
   [инкрементальная](../glossary.md#term-increment) загрузка прочитает новые
   значения `_batch_id`.
 
-## Шаг 2. Источники через DBeaver
+## Шаг 2. Активация источников
 
 СУБД-источники ленивые: контейнер поднимается по запросу и живёт ограниченное
 время ([TTL](../glossary.md#term-ttl)).
 
 1. Swagger UI → `POST /sources/bank/activate` → «Try it out» → параметр
-   `ttl_minutes=20` → «Execute». В ответе — объект `connection` с готовыми
-   параметрами подключения (host `localhost`, port `14330`, database `sydafa`).
-2. DBeaver → новое подключение SQL Server: host `localhost`, port `14330`,
-   database `sydafa`, пользователь `sydafa` / `sydafa`. Схема — `retail_bank`.
-3. То же для Oracle: `POST /sources/broker/activate?ttl_minutes=20` → DBeaver →
-   Oracle: host `localhost`, port `15211`, service name `sydafa`,
-   `sydafa` / `sydafa`, SID оставить пустым. Схема — `trading_core`.
+   `ttl_minutes=20` → «Execute».
+2. То же для Oracle: `POST /sources/broker/activate?ttl_minutes=20`.
 
-Активацию можно повторить, если [TTL](../glossary.md#term-ttl) истёк во время
-демонстрации (максимум — 30 минут).
-
-Запросы к **bank (MSSQL)**:
-
-```sql
-SELECT count(*) FROM retail_bank.clients;
-SELECT count(*) FROM retail_bank.accounts;
-SELECT count(*) FROM retail_bank.deals;
-SELECT count(*) AS rows_total, max(_batch_id) AS last_batch
-FROM retail_bank.transactions;
-
-SELECT TOP 10 * FROM retail_bank.clients ORDER BY client_id DESC;
-```
-
-Запросы к **broker (Oracle)**:
-
-```sql
-SELECT count(*) FROM "trading_core"."clients";
-SELECT count(*) AS rows_total, max("_batch_id") AS last_batch
-FROM "trading_core"."transactions";
-
-SELECT * FROM "trading_core"."clients" ORDER BY "client_id" DESC FETCH FIRST 10 ROWS ONLY;
-```
+В ответе — объект `connection` с готовыми параметрами подключения
+(host `localhost`, port `14330` для bank и `15211` для broker, database
+`sydafa`, пользователь `sydafa` / `sydafa`). Активацию можно повторить, если
+[TTL](../glossary.md#term-ttl) истёк во время демонстрации (максимум —
+30 минут).
 
 **На что обратить внимание**
 
-- В каждой таблице видна служебная колонка `_batch_id` — номер наполнения
+- Источники демо-набора: bank (MSSQL, схема `retail_bank`) и broker (Oracle,
+  схема `trading_core`).
+- В каждой таблице есть служебная колонка `_batch_id` — номер наполнения
   источника. По ней работает [инкрементальная](../glossary.md#term-increment)
   загрузка transactions.
 - Тип этой колонки в источниках разный: в bank — BIGINT, в broker —
   NUMBER(19,0). Поэтому в [манифесте](../glossary.md#term-manifest) bank
   заявлен `position_type: bigint`, а broker — `decimal(19,0)`. Правило выбора —
   [раздел «Выбор типа позиции» архитектуры](../architecture.md#выбор-типа-позиции).
-- У Oracle имена схем, таблиц и колонок созданы в нижнем регистре: в SQL
-  заключайте их в двойные кавычки.
 - Читатель `sydafa` имеет права только на чтение (SELECT).
 
 ## Шаг 3. Генерация DAG-ов и запуск загрузок
@@ -613,25 +581,6 @@ Rules-API меняет одну колонку за вызов, поэтому �
 1. Запустите DAG-и обновления источников — новые строки получат `email`.
 2. Запустите четыре основных ingest-DAG-а.
 
-### Проверка схемы источника
-
-Покажите изменения в DBeaver до запуска загрузок.
-
-Для bank:
-
-```sql
-SELECT TOP 10 * FROM retail_bank.clients ORDER BY client_id DESC;
-```
-
-Для broker:
-
-```sql
-SELECT * FROM "trading_core"."clients" ORDER BY "client_id" DESC FETCH FIRST 10 ROWS ONLY;
-```
-
-Видно: `client_type`/`is_qualified` исчезли, `client_name` хранит прежние
-значения (переименование сохранило данные), `email` у существующих строк NULL.
-
 ## Шаг 9. Итоги эволюции схемы в raw
 
 **Trino:**
@@ -732,7 +681,6 @@ WHERE key = 'snapshot.process_id';
   времени.
 - `raw_rows` и `snap_rows` не обязаны совпадать: [raw](../glossary.md#term-raw)
   хранит историю загрузок, включая строки, уже удалённые из источника.
-  Сравните `snap_rows` с `count(*)` источника, пока данные не меняются.
 - После повтора [порция](../glossary.md#term-portion) по-прежнему **одна** с
   новым `__process_id`: [снимок](../glossary.md#term-snapshot)
   **перезаписывается целиком одной атомарной операцией Iceberg**
