@@ -116,8 +116,8 @@
 
 DAG-и загрузки не пишутся руками — генерируются из
 YAML-[манифестов](../glossary.md#term-manifest) (`ingestion/conf/pipelines/`).
-В сценарии генерация запускается вручную — это имитация шага CI/CD. Чтобы
-показать генерацию «вживую», начните с чистого состояния.
+В этом сценарии генерация запускается вручную — имитация шага CI/CD.
+Начните с чистого состояния.
 
 1. Терминал (из корня репозитория) — удалить сгенерированные DAG-и:
 
@@ -142,7 +142,7 @@ YAML-[манифестов](../glossary.md#term-manifest) (`ingestion/conf/pipel
    python3 -m ingestion.generator.generate_dags --check
    ```
 
-4. Показать сгенерированные файлы: `ingest__rdbms__bank__main.py`,
+4. Сгенерированные файлы: `ingest__rdbms__bank__main.py`,
    `ingest__rdbms__bank__refs.py` и два для broker.
    `--check` печатает `check: 0 difference(s)` — артефакты соответствуют
    [манифестам](../glossary.md#term-manifest).
@@ -153,14 +153,15 @@ YAML-[манифестов](../glossary.md#term-manifest) (`ingestion/conf/pipel
    `publish_asset` публикует событие готовности таблицы
    ([Asset](../glossary.md#term-asset)) после успешной загрузки.
 6. Запустить все четыре DAG-а (сначала банка, затем брокера — или все сразу).
-7. Пока идут: Spark Master UI (http://localhost:8080) — работающие приложения
-   (Running Applications), по одному на каждую загрузку.
+7. Во время загрузок в Spark Master UI (http://localhost:8080) видны
+   работающие приложения (Running Applications), по одному на каждую загрузку.
 
 ### Многопоточное чтение
 
 Многопоточное чтение таблицы — это разбиение выборки на несколько
 [JDBC-партиций](../glossary.md#term-jdbc-partition): Spark читает каждую
-отдельным SQL-запросом. Где показать настройку:
+отдельным SQL-запросом. Настройка хранится в конфигурации и отражается
+в логе load-таска:
 
 1. **Конфигурация** (до запуска):
    - `ingestion/conf/settings.yaml` — `spark.jdbc.num_partitions: 4`: четыре
@@ -172,9 +173,9 @@ YAML-[манифестов](../glossary.md#term-manifest) (`ingestion/conf/pipel
      в один поток.
    - Колонка нарезки выбирается автоматически единой эвристикой: у всех
      демо-таблиц это целочисленный первичный ключ (`transaction_id`).
-2. **В логе load-таска**: открыть лог
-   `ingest_group.load_retail_bank__transactions.load` и показать команду Spark
-   с `--num-jdbc-partitions 4` и JSON `--incremental-config`, содержащим
+2. **В логе load-таска**: в логе задачи
+   `ingest_group.load_retail_bank__transactions.load` видны команда Spark
+   с `--num-jdbc-partitions 4` и JSON `--incremental-config`, содержащий
    контракт (колонку и [канонический тип позиции](../glossary.md#term-canonical))
    и конкретный [lookback](../glossary.md#term-lookback). У `deals` и таблиц
    refs передаётся `--no-jdbc-partitioning`. Ниже в том же логе — строка
@@ -325,9 +326,8 @@ WHERE entity_fqn = 'retail_bank.transactions' ORDER BY process_id;
 
 ## Шаг 5. Повторы запусков и реестр pg-meta
 
-Блок показывает, как реестр переживает повторные и «нулевые» запуски.
-Достаточно банка: `ingest__rdbms__bank__main`. Дополнительное время — 10–15
-минут.
+Реестр проверяется на повторных и «нулевых» запусках. Достаточно банка:
+`ingest__rdbms__bank__main`.
 
 Подготовка:
 
@@ -468,7 +468,7 @@ GROUP BY __process_id ORDER BY __process_id DESC;
   [исполнение](../glossary.md#term-execution) внутри прежнего
   [DagRun](../glossary.md#term-dagrun).
 
-### Повтор после ошибки: рассказать, не показывать
+### Повтор после ошибки
 
 - [Retry](../glossary.md#term-retry) или [Clear](../glossary.md#term-clear)
   `load` без повтора генератора использует тот же `process_id` и сохранённые
@@ -507,7 +507,7 @@ GROUP BY __process_id ORDER BY __process_id DESC;
 ## Шаг 7. Эволюция схемы источника
 
 Стресс-тест: удаление, переименование и добавление колонки на источнике.
-Показываем, от чего система **не падает**. Таблицы: `retail_bank.clients`
+Таблицы: `retail_bank.clients`
 (bank) и `trading_core.clients` (broker) — [полные срезы](../glossary.md#term-full),
 изменения схемы пройдут в [raw](../glossary.md#term-raw) автоматически.
 
@@ -545,7 +545,7 @@ python3 docs/demo/schema_evolution.py broker     только broker
 
 Rules-API меняет одну колонку за вызов, поэтому скрипт использует точечные
 обращения: полный `PUT` профиля таблицы заменил бы его целиком. В ответе на
-каждый вызов rules-API возвращается весь профиль таблицы — удобно показать,
+каждый вызов rules-API возвращается весь профиль таблицы — по нему видно,
 что остальные генераторы не тронуты.
 
 Дальше по сценарию:
@@ -576,8 +576,8 @@ SELECT process_id, entity_fqn, reason, status, row_count, finished_at
 FROM ingestion.incremental_batches ORDER BY process_id DESC LIMIT 8;
 ```
 
-**На что обратить внимание** (главный финальный тезис): загрузка после
-эволюции схемы не упала и ничего не потеряла молча.
+**На что обратить внимание**: загрузка после эволюции схемы не упала
+и ничего не потеряла молча.
 
 - `client_type` **сохранён** в [raw](../glossary.md#term-raw): история
   читается по-старому, у новых [порций](../glossary.md#term-portion) NULL —
